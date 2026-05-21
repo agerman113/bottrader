@@ -11,7 +11,7 @@ load_dotenv()
 
 # ========== НАСТРОЙКИ ==========
 SYMBOLS = ["PEPE/USDT", "DOGE/USDT", "SHIB/USDT", "FLOKI/USDT", "BONK/USDT"]  # мемкоины
-INITIAL_AMOUNT = 5.0          # для первого ордера (USDT) — при 2 шагах: 6 + 8.1 = 14.1 USDT
+INITIAL_AMOUNT = 8.0          # для первого ордера (USDT) — при 2 шагах: 6 + 8.1 = 14.1 USDT
 MARTINGALE_FACTOR = 1.35
 MAX_STEPS = 0                 # 0 = без мартингейла, 1 или 2 для лёгкого
 TP_PERCENT = 1.0              # тейк-профит от цены входа (для каждой сделки, если мартингейл выкл)
