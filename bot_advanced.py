@@ -11,7 +11,7 @@ load_dotenv()
 
 # ========== НАСТРОЙКИ ==========
 SYMBOLS = ["DOGE/USDT", "FLOKI/USDT", "PEPE/USDT"]  # убрал SHIB и BONK (слишком дешёвые)
-INITIAL_AMOUNT = 12          # увеличено до 12 USDT (чтобы гарантированно пройти минималку)
+INITIAL_AMOUNT = 6          # увеличено до 12 USDT (чтобы гарантированно пройти минималку)
 MARTINGALE_FACTOR = 1.35
 MAX_STEPS = 0                # 0 = без мартингейла
 TP_PERCENT = 1.0             # тейк-профит 1%
