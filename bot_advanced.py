@@ -11,15 +11,15 @@ load_dotenv()
 
 # ========== НАСТРОЙКИ ==========
 SYMBOLS = ["PEPE/USDT", "DOGE/USDT", "SHIB/USDT", "FLOKI/USDT", "BONK/USDT"]  # мемкоины
-INITIAL_AMOUNT = 6.0          # для первого ордера (USDT) — при 2 шагах: 6 + 8.1 = 14.1 USDT
+INITIAL_AMOUNT = 1.0          # для первого ордера (USDT) — при 2 шагах: 6 + 8.1 = 14.1 USDT
 MARTINGALE_FACTOR = 1.35
-MAX_STEPS = 2                 # 0 = без мартингейла, 1 или 2 для лёгкого
-TP_PERCENT = 0.8              # тейк-профит от цены входа (для каждой сделки, если мартингейл выкл)
-SL_PERCENT = 1.0              # стоп-лосс
+MAX_STEPS = 0                 # 0 = без мартингейла, 1 или 2 для лёгкого
+TP_PERCENT = 1.0              # тейк-профит от цены входа (для каждой сделки, если мартингейл выкл)
+SL_PERCENT = 1.2              # стоп-лосс
 TIMEFRAME_TA = "5m"           # для анализа (RSE, MACD) — 5 минут для частых сигналов
 TIMEFRAME_TREND = "1h"        # для глобального тренда (EMA50/200)
 SCAN_INTERVAL = 300           # сканировать пары каждые 5 минут
-MIN_SCORE = 70                # минимальный score ТА для входа (0-100)
+MIN_SCORE = 30                # минимальный score ТА для входа (0-100)
 USE_AI = True                 # использовать ИИ как доп. фильтр
 AI_CONFIDENCE_THRESHOLD = 0.6
 
