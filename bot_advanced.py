@@ -20,7 +20,7 @@ TIMEFRAME_TA = "5m"           # для анализа (RSE, MACD) — 5 мину
 TIMEFRAME_TREND = "1h"        # для глобального тренда (EMA50/200)
 SCAN_INTERVAL = 300           # сканировать пары каждые 5 минут
 MIN_SCORE = 30                # минимальный score ТА для входа (0-100)
-USE_AI = True                 # использовать ИИ как доп. фильтр
+USE_AI = False                 # использовать ИИ как доп. фильтр
 AI_CONFIDENCE_THRESHOLD = 0.6
 
 # Подключение к Bybit
