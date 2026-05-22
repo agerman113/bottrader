@@ -26,14 +26,13 @@ SL_PERCENT         = 1.0
 TIMEFRAME_TA       = "5m"
 TIMEFRAME_TREND    = "1h"
 SCAN_INTERVAL      = 300
-MIN_SCORE          = 40               # ← изменено с 50 на 40
+MIN_SCORE          = 40
 TRADE_TIMEOUT      = 600
 TRADE_MAX_LIFETIME = 86400
 REPORT_INTERVAL    = 1800
 STATE_FILE         = "state.json"
 
-# Минимальная сумма сделки (USDT) – для входа и для тейк-профита
-MIN_DEAL_AMOUNT = 6.0                 # увеличено с 5 до 6 для надёжности
+MIN_DEAL_AMOUNT = 6.0
 MAX_DEAL_AMOUNT = 20.0
 
 USE_AI = False
@@ -246,7 +245,6 @@ def получить_скор(symbol: str) -> dict:
         df1h = pd.DataFrame(raw1h, columns=cols).reset_index(drop=True)
         c5, c1h = df5["c"], df1h["c"]
 
-        # RSI
         rsi_val = calc_rsi(c5).iloc[-1]
         details["rsi"] = round(rsi_val, 1)
         if rsi_val < 30:
@@ -258,53 +256,44 @@ def получить_скор(symbol: str) -> dict:
         else:
             score += 5
 
-        # MACD
         ml, sl, _ = calc_macd(c5)
         macd_bull = ml.iloc[-1] > sl.iloc[-1]
         macd_cross = macd_bull and ml.iloc[-2] <= sl.iloc[-2]
         details["macd"] = "бычий" if macd_bull else "медвежий"
         score += 15 if macd_cross else (8 if macd_bull else 0)
 
-        # Range Filter
         _, _, _, rf_up, _ = calc_range_filter(df5)
         details["range_filter"] = "вверх" if rf_up.iloc[-1] else "вниз"
         score += 15 if rf_up.iloc[-1] else 0
 
-        # Supertrend
         st_up, _ = calc_supertrend(df5)
         details["supertrend"] = "вверх" if st_up.iloc[-1] else "вниз"
         score += 10 if st_up.iloc[-1] else 0
 
-        # Hull
         hu_up, _ = calc_hull(c5)
         details["hull"] = "вверх" if hu_up.iloc[-1] else "вниз"
         score += 10 if hu_up.iloc[-1] else 0
 
-        # Тренд 1h
         ema50 = _ema(c1h, 50).iloc[-1]
         ema200 = _ema(c1h, 200).iloc[-1]
         trend_bull = ema50 > ema200
         details["тренд_1h"] = "бычий" if trend_bull else "медвежий"
         score += 10 if trend_bull else 0
 
-        # ADX
         adx, pdi, mdi = calc_adx(df5)
         details["adx"] = round(adx.iloc[-1], 1)
         if adx.iloc[-1] > 20 and pdi.iloc[-1] > mdi.iloc[-1]:
             score += 5
 
-        # Stochastic
         k, _ = calc_stochastic(df5)
         details["stoch_k"] = round(k.iloc[-1], 1)
         if k.iloc[-1] < 30:
             score += 5
 
-        # Объём
         vol_surge = df5["v"].iloc[-1] > df5["v"].rolling(20).mean().iloc[-1] * 1.2
         details["объём_всплеск"] = vol_surge
         score += 5 if vol_surge else 0
 
-        # QQE
         qqe_long, _ = calc_qqe(c5)
         details["qqe"] = "лонг" if qqe_long.iloc[-1] else "шорт"
         score += 5 if qqe_long.iloc[-1] else 0
@@ -329,22 +318,32 @@ def спросить_ии(symbol, price, score, details) -> tuple:
         return "buy", 1.0, "ИИ отключён"
     return "buy", 1.0, "ИИ отключён"
 
-# ================== ТОРГОВЫЕ ФУНКЦИИ (С ИСПРАВЛЕНИЯМИ) ==================
+# ================== ТОРГОВЫЕ ФУНКЦИИ (С ОЖИДАНИЕМ БАЛАНСА) ==================
 def купить(symbol, amount_usdt):
-    price = exchange.fetch_ticker(symbol)["last"]
+    ticker = exchange.fetch_ticker(symbol)
+    price = ticker['last']
     qty = amount_usdt / price
-    order = exchange.create_market_buy_order(symbol, qty)
+    exchange.create_market_buy_order(symbol, qty)
+    # Ожидаем появления монеты на балансе (до 10 секунд)
+    for _ in range(10):
+        time.sleep(1)
+        bal = баланс_монеты(symbol)
+        if bal >= qty * 0.99:
+            log.info(f"  📈 ПОКУПКА {qty:.6f} {symbol.split('/')[0]} по ~{price:.8f} ({amount_usdt:.2f} USDT)")
+            return price, qty
+    log.warning(f"  ⚠️ Баланс {symbol} не появился за 10 секунд, но продолжаем")
     log.info(f"  📈 ПОКУПКА {qty:.6f} {symbol.split('/')[0]} по ~{price:.8f} ({amount_usdt:.2f} USDT)")
-    time.sleep(1.5)   # Ждём обновления баланса
     return price, qty
 
 def поставить_тп(symbol, qty, entry_price):
     tp_price = entry_price * (1 + TP_PERCENT / 100)
     стоимость_ордера = tp_price * qty
     if стоимость_ордера < MIN_DEAL_AMOUNT:
-        log.warning(f"  Сумма TP ({стоимость_ордера:.2f} USDT) ниже минимальной {MIN_DEAL_AMOUNT}. Продаю по рынку.")
+        log.warning(f"  Сумма TP ({стоимость_ордера:.2f} USDT) ниже {MIN_DEAL_AMOUNT}. Продаю по рынку.")
         продать_по_рынку(symbol, qty, "TP малая сумма")
         return
+    # Дополнительно ждём ещё немного, на всякий случай
+    time.sleep(1)
     for попытка in range(3):
         try:
             exchange.create_limit_sell_order(symbol, qty, tp_price)
@@ -353,13 +352,13 @@ def поставить_тп(symbol, qty, entry_price):
         except Exception as e:
             log.warning(f"  Попытка {попытка+1} не удалось поставить TP: {e}")
             time.sleep(1)
-    # Если все попытки не удались – продаём по рынку
+    # Если не удалось – продаём по рынку
     log.warning("  Не удалось выставить TP после 3 попыток, продаю по рынку")
     продать_по_рынку(symbol, qty, "ошибка TP")
 
 def продать_по_рынку(symbol, qty, причина=""):
     try:
-        time.sleep(1)   # Даём время обновиться балансу
+        time.sleep(1)
         exchange.create_market_sell_order(symbol, qty)
         log.info(f"  📉 ПРОДАЖА {qty:.6f} {symbol.split('/')[0]} по рынку{' (' + причина + ')' if причина else ''}")
     except Exception as e:
@@ -375,10 +374,19 @@ def отменить_ордера_по_паре(symbol):
         log.warning(f"  Ошибка отмены ордеров: {e}")
 
 def баланс_монеты(symbol):
-    return exchange.fetch_balance()["free"].get(symbol.split("/")[0], 0.0)
+    coin = symbol.split("/")[0]
+    try:
+        bal = exchange.fetch_balance()
+        return bal["free"].get(coin, 0.0)
+    except:
+        return 0.0
 
 def баланс_usdt():
-    return exchange.fetch_balance()["free"].get("USDT", 0.0)
+    try:
+        bal = exchange.fetch_balance()
+        return bal["free"].get("USDT", 0.0)
+    except:
+        return 0.0
 
 def мониторить_позицию(symbol, entry_price, qty, открыта_в: float) -> str:
     deadline_обычный = открыта_в + TRADE_TIMEOUT
@@ -485,9 +493,6 @@ def main():
     log.info(f"  ИИ модель:            выкл")
     log.info("=" * 58)
     log.info("")
-
-    # Автокоррекция риска ОТКЛЮЧЕНА (чтобы MIN_SCORE не менялся)
-    # скорректировать_риск(баланс_сейчас)
 
     while True:
         try:
