@@ -28,27 +28,18 @@ SL_PERCENT         = 1.0
 TIMEFRAME_TA       = "5m"
 TIMEFRAME_TREND    = "1h"
 SCAN_INTERVAL      = 300
-MIN_SCORE          = 50          # снижен для более частых входов
-AI_CONFIDENCE_MIN  = 0.60
-TRADE_TIMEOUT      = 600
-TRADE_MAX_LIFETIME = 86400
-REPORT_INTERVAL    = 1800
+MIN_SCORE          = 50          # порог для входа
+TRADE_TIMEOUT      = 600         # 10 минут
+TRADE_MAX_LIFETIME = 86400       # 24 часа
+REPORT_INTERVAL    = 1800        # 30 минут
 STATE_FILE         = "state.json"
 
-# Минимальная сумма для лимитного ордера TP (USDT)
-MIN_TP_ORDER_USDT = 5.0
+# Минимальная сумма сделки (USDT) – для входа и для тейк-профита
+MIN_DEAL_AMOUNT = 5.0
+MAX_DEAL_AMOUNT = 20.0
 
-# Отключаем ИИ – он не работает на бесплатных моделях
+# ИИ отключён (можно включить, но не рекомендуется)
 USE_AI = False
-
-# Список моделей (оставлен для истории, но не используется)
-AI_MODELS = [
-    "baidu/cobuddy:free",
-    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-    "poolside/laguna-xs.2:free",
-    "poolside/laguna-m.1:free",
-    "deepseek/deepseek-v4-flash:free",
-]
 
 # ─────────────────────────────────────────────────────────────
 #  ЛОГИРОВАНИЕ
@@ -91,8 +82,6 @@ stats = {
     "депозит_текущий":    0.0,
     "старт_время":        "",
     "последний_отчёт":    0.0,
-    "ai_модель":          "",
-    "ai_статус":          "отключён",
 }
 
 def сохранить_состояние():
@@ -121,7 +110,7 @@ def загрузить_состояние():
         return False
 
 # ─────────────────────────────────────────────────────────────
-#  ПОЛНАЯ ИНВЕНТАРИЗАЦИЯ ПРИ СТАРТЕ
+#  ИНВЕНТАРИЗАЦИЯ
 # ─────────────────────────────────────────────────────────────
 def отменить_все_ордера():
     log.info("  🗑️  Отмена всех открытых ордеров...")
@@ -234,7 +223,7 @@ def calc_stochastic(df, k=14, d=3, smooth=3):
     ks = (100 * (df["c"] - lo) / (hi - lo + 1e-10)).rolling(smooth).mean()
     return ks, ks.rolling(d).mean()
 
-def calc_qqe(close, rsi_period=14, sf=5, qq_factor=4.236):
+def calc_qqe(close, rsi_period=14, sf=5):
     rsi = calc_rsi(close, rsi_period)
     rsi_s = _ema(rsi, sf)
     return rsi_s > 50, rsi_s < 50
@@ -344,25 +333,26 @@ def получить_скор(symbol: str) -> dict:
     return {"score": score, "details": details, "price": price}
 
 # ─────────────────────────────────────────────────────────────
-#  ИИ (ОТКЛЮЧЁН)
+#  РАСЧЁТ РАЗМЕРА ВХОДА (МИНИМУМ 5 USDT)
+# ─────────────────────────────────────────────────────────────
+def рассчитать_размер_входа(баланс_usdt: float) -> float:
+    total_factor = 1 + MARTINGALE_FACTOR + MARTINGALE_FACTOR ** 2
+    amount = min(баланс_usdt * 0.15, баланс_usdt / total_factor * 0.9)
+    # Жёсткий минимум 5 USDT
+    return round(max(MIN_DEAL_AMOUNT, min(MAX_DEAL_AMOUNT, amount)), 2)
+
+# ─────────────────────────────────────────────────────────────
+#  ИИ (ОТКЛЮЧЁН, НО ФУНКЦИЯ ОСТАВЛЕНА)
 # ─────────────────────────────────────────────────────────────
 def спросить_ии(symbol, price, score, details) -> tuple:
     if not USE_AI:
         return "buy", 1.0, "ИИ отключён"
-    # Остальной код ИИ (не используется) можно удалить, но для целостности оставим заглушку
+    # Здесь мог быть код, но он не нужен
     return "buy", 1.0, "ИИ отключён"
 
 # ─────────────────────────────────────────────────────────────
 #  ТОРГОВЫЕ ФУНКЦИИ
 # ─────────────────────────────────────────────────────────────
-def рассчитать_размер_входа(баланс_usdt: float) -> float:
-    """Возвращает сумму входа не меньше 5 USDT и не больше 20 USDT"""
-    min_amount = 5.0
-    max_amount = 20.0
-    total_factor = 1 + MARTINGALE_FACTOR + MARTINGALE_FACTOR ** 2
-    amount = min(баланс_usdt * 0.15, баланс_usdt / total_factor * 0.9)
-    return round(max(min_amount, min(max_amount, amount)), 2)
-
 def купить(symbol, amount_usdt):
     price = exchange.fetch_ticker(symbol)["last"]
     qty = amount_usdt / price
@@ -373,8 +363,8 @@ def купить(symbol, amount_usdt):
 def поставить_тп(symbol, qty, entry_price):
     tp_price = entry_price * (1 + TP_PERCENT / 100)
     стоимость_ордера = tp_price * qty
-    if стоимость_ордера < MIN_TP_ORDER_USDT:
-        log.warning(f"  Сумма TP ({стоимость_ордера:.2f} USDT) ниже минимальной {MIN_TP_ORDER_USDT}. Продаю по рынку.")
+    if стоимость_ордера < MIN_DEAL_AMOUNT:
+        log.warning(f"  Сумма TP ({стоимость_ордера:.2f} USDT) ниже минимальной {MIN_DEAL_AMOUNT}. Продаю по рынку.")
         продать_по_рынку(symbol, qty, "TP не может быть выставлен (малая сумма)")
         return
     try:
@@ -382,7 +372,7 @@ def поставить_тп(symbol, qty, entry_price):
         log.info(f"  🎯 Тейк-профит установлен на {tp_price:.8f}")
     except Exception as e:
         log.warning(f"  Не удалось поставить TP: {e}")
-        # При ошибке – продаём по рынку
+        # Если не удалось, продаём по рынку
         продать_по_рынку(symbol, qty, "ошибка TP")
 
 def продать_по_рынку(symbol, qty, причина=""):
@@ -480,9 +470,6 @@ def печатать_отчёт():
     log.info(f"  💰 Прибыль:          +{stats['прибыль_usdt']:.4f} USDT")
     log.info(f"  💸 Убыток:           -{stats['убыток_usdt']:.4f} USDT")
     log.info(f"  📈 Чистый P&L:        {'+' if чистый >= 0 else ''}{чистый:.4f} USDT")
-    log.info("  ──────────────────────────────────────────────────")
-    log.info(f"  🤖 ИИ модель:         {stats['ai_модель'] or 'отключён'}")
-    log.info(f"  🤖 ИИ статус:         {stats['ai_статус']}")
     log.info("=" * 58)
     log.info("")
 
@@ -572,10 +559,11 @@ def main():
 
             log.info(f"  ► Выбрана {лучшая}  скор={скор}  цена={цена:.8f}  (прошло порог: {len(прошедшие)} из {len(SYMBOLS)} пар)")
 
+            # ИИ отключён, сразу buy
             действие, уверенность, причина = спросить_ии(лучшая, цена, скор, детали)
             log.info(f"  🤖 ИИ: {действие}  уверенность={уверенность:.2f}  → {причина}")
 
-            if действие != "buy" or уверенность < AI_CONFIDENCE_MIN:
+            if действие != "buy":
                 log.info(f"  ИИ отклонил сделку — ждём {SCAN_INTERVAL} сек")
                 time.sleep(SCAN_INTERVAL)
                 continue
@@ -594,6 +582,7 @@ def main():
                 вход_цена, кол_во = купить(лучшая, сумма)
                 поставить_тп(лучшая, кол_во, вход_цена)
                 stats["сделок_всего"] += 1
+                сохранить_состояние()
 
                 результат = мониторить_позицию(лучшая, вход_цена, кол_во, время_входа)
 
