@@ -26,7 +26,7 @@ SL_PERCENT         = 1.0
 TIMEFRAME_TA       = "5m"
 TIMEFRAME_TREND    = "1h"
 SCAN_INTERVAL      = 300
-MIN_SCORE          = 40               # базовый порог (может корректироваться AI)
+MIN_SCORE          = 40
 TRADE_TIMEOUT      = 600
 TRADE_MAX_LIFETIME = 86400
 REPORT_INTERVAL    = 1800
@@ -35,9 +35,7 @@ STATE_FILE         = "state.json"
 MIN_DEAL_AMOUNT = 6.0
 MAX_DEAL_AMOUNT = 20.0
 
-USE_AI = False           # свой ИИ отключён, используем AI Bybit
-USE_BYBIT_AI = True      # включаем анализ Bybit AI
-USE_NEWS = False         # включать новости (для информации, не влияет на сделку)
+USE_BYBIT_AI = True   # включаем AI анализ Bybit (если доступен)
 
 # ================== ЛОГИРОВАНИЕ ==================
 logging.basicConfig(
@@ -138,34 +136,14 @@ def продать_все_монеты():
     except Exception as e:
         log.warning(f"  Ошибка при получении баланса: {e}")
 
-def перевести_с_финансирования():
-    """Переводит USDT с Funding на Spot – требует права Transfer у API ключа"""
-    try:
-        funding = exchange.private_get_v5_asset_transfer_query_asset_info()
-        usdt_funding = 0.0
-        for item in funding.get("result", {}).get("assets", []):
-            if item.get("asset") == "USDT":
-                usdt_funding = float(item.get("free", 0))
-                break
-        if usdt_funding > 0.5:
-            log.info(f"  Найдено {usdt_funding:.2f} USDT на финансировании. Перевожу на спот...")
-            exchange.transfer("USDT", usdt_funding, "FUND", "SPOT")
-            log.info("  Перевод выполнен")
-        else:
-            log.info("  На финансировании нет значимого остатка USDT")
-    except Exception as e:
-        log.warning(f"  Ошибка перевода с финансирования: {e}")
-
 def полная_инвентаризация():
     log.info("🔄 Выполняю полную инвентаризацию перед торговлей...")
     отменить_все_ордера()
     продать_все_монеты()
-    # Раскомментируйте, если API ключ имеет право на перевод
-    # перевести_с_финансирования()
     log.info("✅ Инвентаризация завершена")
     time.sleep(2)
 
-# ================== ИНДИКАТОРЫ (те же) ==================
+# ================== ИНДИКАТОРЫ ==================
 def _ema(s, span):
     return s.ewm(span=span, adjust=False).mean()
 
@@ -330,12 +308,9 @@ def получить_скор(symbol: str) -> dict:
 
 # ================== BYBIT AI АНАЛИЗ ==================
 def получить_ai_анализ_bybit(symbol):
-    """Возвращает (trend, bullish_count, bearish_count, support, resistance) или None"""
     try:
-        # Bybit требует формат пары без слеша, например PEPEUSDT
         pair = symbol.replace("/", "")
         url = f"https://api.bybit.com/v5/market/ai-analysis?symbol={pair}"
-        # Публичный ключ не обязателен, но можно передать для повышения лимитов
         headers = {}
         if os.getenv("BYBIT_API_KEY"):
             headers["X-BAPI-API-KEY"] = os.getenv("BYBIT_API_KEY")
@@ -350,27 +325,10 @@ def получить_ai_анализ_bybit(symbol):
                 support = result.get("support", [])
                 resistance = result.get("resistance", [])
                 return trend, bullish, bearish, support, resistance
-        log.warning(f"AI Bybit ошибка {symbol}: {resp.status_code} {resp.text[:100]}")
+        return None
     except Exception as e:
-        log.warning(f"AI Bybit исключение {symbol}: {e}")
-    return None
-
-# ================== НОВОСТИ BYBIT (опционально) ==================
-def получить_новости_bybit(symbol, limit=3):
-    """Возвращает список новостей по монете (только для информации)"""
-    if not USE_NEWS:
-        return []
-    try:
-        pair = symbol.replace("/", "")
-        url = f"https://api.bybit.com/v5/market/news?symbol={pair}&limit={limit}"
-        resp = requests.get(url, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("retCode") == 0:
-                return data["result"].get("news", [])
-    except Exception as e:
-        log.warning(f"Новости ошибка {symbol}: {e}")
-    return []
+        log.warning(f"AI Bybit ошибка {symbol}: {e}")
+        return None
 
 # ================== РАСЧЁТ РАЗМЕРА ВХОДА ==================
 def рассчитать_размер_входа(баланс_usdt: float) -> float:
@@ -378,58 +336,7 @@ def рассчитать_размер_входа(баланс_usdt: float) -> fl
     amount = min(баланс_usdt * 0.15, баланс_usdt / total_factor * 0.9)
     return round(max(MIN_DEAL_AMOUNT, min(MAX_DEAL_AMOUNT, amount)), 2)
 
-# ================== ТОРГОВЫЕ ФУНКЦИИ (с ожиданием баланса) ==================
-def купить(symbol, amount_usdt):
-    ticker = exchange.fetch_ticker(symbol)
-    price = ticker['last']
-    qty = amount_usdt / price
-    exchange.create_market_buy_order(symbol, qty)
-    for _ in range(10):
-        time.sleep(1)
-        bal = баланс_монеты(symbol)
-        if bal >= qty * 0.99:
-            log.info(f"  📈 ПОКУПКА {qty:.6f} {symbol.split('/')[0]} по ~{price:.8f} ({amount_usdt:.2f} USDT)")
-            return price, qty
-    log.warning(f"  ⚠️ Баланс {symbol} не появился за 10 секунд, но продолжаем")
-    log.info(f"  📈 ПОКУПКА {qty:.6f} {symbol.split('/')[0]} по ~{price:.8f} ({amount_usdt:.2f} USDT)")
-    return price, qty
-
-def поставить_тп(symbol, qty, entry_price):
-    tp_price = entry_price * (1 + TP_PERCENT / 100)
-    стоимость_ордера = tp_price * qty
-    if стоимость_ордера < MIN_DEAL_AMOUNT:
-        log.warning(f"  Сумма TP ({стоимость_ордера:.2f} USDT) ниже {MIN_DEAL_AMOUNT}. Продаю по рынку.")
-        продать_по_рынку(symbol, qty, "TP малая сумма")
-        return
-    time.sleep(1)
-    for попытка in range(3):
-        try:
-            exchange.create_limit_sell_order(symbol, qty, tp_price)
-            log.info(f"  🎯 Тейк-профит установлен на {tp_price:.8f}")
-            return
-        except Exception as e:
-            log.warning(f"  Попытка {попытка+1} не удалось поставить TP: {e}")
-            time.sleep(1)
-    log.warning("  Не удалось выставить TP после 3 попыток, продаю по рынку")
-    продать_по_рынку(symbol, qty, "ошибка TP")
-
-def продать_по_рынку(symbol, qty, причина=""):
-    try:
-        time.sleep(1)
-        exchange.create_market_sell_order(symbol, qty)
-        log.info(f"  📉 ПРОДАЖА {qty:.6f} {symbol.split('/')[0]} по рынку{' (' + причина + ')' if причина else ''}")
-    except Exception as e:
-        log.warning(f"  Ошибка продажи: {e}")
-
-def отменить_ордера_по_паре(symbol):
-    try:
-        ордера = exchange.fetch_open_orders(symbol)
-        for ордер in ордера:
-            exchange.cancel_order(ордер["id"], symbol)
-            log.info(f"  🗑️  Отменён ордер {ордер['id']} на {symbol}")
-    except Exception as e:
-        log.warning(f"  Ошибка отмены ордеров: {e}")
-
+# ================== ТОРГОВЫЕ ФУНКЦИИ (С НАДЁЖНЫМ ОЖИДАНИЕМ) ==================
 def баланс_монеты(symbol):
     coin = symbol.split("/")[0]
     try:
@@ -444,6 +351,81 @@ def баланс_usdt():
         return bal["free"].get("USDT", 0.0)
     except:
         return 0.0
+
+def купить(symbol, amount_usdt):
+    ticker = exchange.fetch_ticker(symbol)
+    price = ticker['last']
+    qty = amount_usdt / price
+    log.info(f"  Отправка рыночного ордера на покупку {qty:.6f} {symbol}...")
+    try:
+        exchange.create_market_buy_order(symbol, qty)
+    except Exception as e:
+        log.error(f"  Ошибка при покупке: {e}")
+        return None, None
+    # Ждём появления монеты на балансе (до 30 секунд)
+    for i in range(30):
+        time.sleep(1)
+        bal = баланс_монеты(symbol)
+        if bal >= qty * 0.99:
+            log.info(f"  ✅ Монета появилась на балансе через {i+1} сек: {bal:.6f}")
+            log.info(f"  📈 ПОКУПКА {qty:.6f} {symbol.split('/')[0]} по ~{price:.8f} ({amount_usdt:.2f} USDT)")
+            return price, qty
+    log.error(f"  ❌ Монета {symbol} не появилась на балансе за 30 секунд, сделка считается неудачной")
+    return None, None
+
+def продать_по_рынку(symbol, qty, причина=""):
+    try:
+        # Перед продажей убедимся, что монета есть
+        bal = баланс_монеты(symbol)
+        if bal < qty * 0.99:
+            log.warning(f"  Баланс монеты {bal:.6f} меньше {qty:.6f}, пытаемся продать всё что есть")
+            qty = bal
+            if qty <= 0:
+                log.warning("  Нет монет для продажи")
+                return
+        exchange.create_market_sell_order(symbol, qty)
+        log.info(f"  📉 ПРОДАЖА {qty:.6f} {symbol.split('/')[0]} по рынку{' (' + причина + ')' if причина else ''}")
+    except Exception as e:
+        log.error(f"  Ошибка продажи: {e}")
+
+def поставить_тп(symbol, qty, entry_price):
+    tp_price = entry_price * (1 + TP_PERCENT / 100)
+    стоимость_ордера = tp_price * qty
+    if стоимость_ордера < MIN_DEAL_AMOUNT:
+        log.warning(f"  Сумма TP ({стоимость_ордера:.2f} USDT) ниже {MIN_DEAL_AMOUNT}. Продаю по рынку.")
+        продать_по_рынку(symbol, qty, "TP малая сумма")
+        return
+    # Дополнительная задержка и проверка баланса
+    time.sleep(2)
+    bal = баланс_монеты(symbol)
+    if bal < qty * 0.99:
+        log.warning(f"  Баланс монеты {bal:.6f} меньше ожидаемого {qty:.6f}. Ждём ещё 5 сек...")
+        time.sleep(5)
+        bal = баланс_монеты(symbol)
+        if bal < qty * 0.99:
+            log.error(f"  Баланс так и не появился. Продаю по рынку.")
+            продать_по_рынку(symbol, qty, "баланс не появился")
+            return
+    for попытка in range(3):
+        try:
+            exchange.create_limit_sell_order(symbol, qty, tp_price)
+            log.info(f"  🎯 Тейк-профит установлен на {tp_price:.8f}")
+            return
+        except Exception as e:
+            log.warning(f"  Попытка {попытка+1} не удалось поставить TP: {e}")
+            time.sleep(1)
+    # Если не удалось – продаём по рынку
+    log.warning("  Не удалось выставить TP после 3 попыток, продаю по рынку")
+    продать_по_рынку(symbol, qty, "ошибка TP")
+
+def отменить_ордера_по_паре(symbol):
+    try:
+        ордера = exchange.fetch_open_orders(symbol)
+        for ордер in ордера:
+            exchange.cancel_order(ордер["id"], symbol)
+            log.info(f"  🗑️  Отменён ордер {ордер['id']} на {symbol}")
+    except Exception as e:
+        log.warning(f"  Ошибка отмены ордеров: {e}")
 
 def мониторить_позицию(symbol, entry_price, qty, открыта_в: float) -> str:
     deadline_обычный = открыта_в + TRADE_TIMEOUT
@@ -590,7 +572,6 @@ def main():
                     elif trend == "bearish" and bear_cnt >= 3:
                         финальный_скор -= 15
                         log.info(f"     ➖ Вычтено -15 (медвежий AI)")
-                    # Можно также проверить поддержку/сопротивление (опционально)
                 else:
                     log.info(f"  🤖 Bybit AI: данные не получены")
 
@@ -600,13 +581,6 @@ def main():
                 log.info(f"  Финальный скор {финальный_скор} < порога {MIN_SCORE} — ждём {SCAN_INTERVAL} сек")
                 time.sleep(SCAN_INTERVAL)
                 continue
-
-            # Если хотим выводить новости (только информативно)
-            if USE_NEWS:
-                новости = получить_новости_bybit(лучшая, limit=2)
-                if новости:
-                    for n in новости:
-                        log.info(f"  📰 Новость: {n.get('title', '')[:80]}")
 
             log.info(f"  ✅ Сигнал к покупке (финальный скор {финальный_скор} >= {MIN_SCORE})")
 
@@ -622,6 +596,10 @@ def main():
 
                 время_входа = time.time()
                 вход_цена, кол_во = купить(лучшая, сумма)
+                if вход_цена is None:
+                    log.warning("  Покупка не удалась, прерываем серию")
+                    break
+
                 поставить_тп(лучшая, кол_во, вход_цена)
                 stats["сделок_всего"] += 1
                 сохранить_состояние()
