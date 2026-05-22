@@ -28,44 +28,27 @@ SL_PERCENT         = 1.0
 TIMEFRAME_TA       = "5m"
 TIMEFRAME_TREND    = "1h"
 SCAN_INTERVAL      = 300
-MIN_SCORE          = 50          # снижен с 65 до 50
+MIN_SCORE          = 50          # снижен для более частых входов
 AI_CONFIDENCE_MIN  = 0.60
 TRADE_TIMEOUT      = 600
 TRADE_MAX_LIFETIME = 86400
 REPORT_INTERVAL    = 1800
 STATE_FILE         = "state.json"
 
-# Список моделей OpenRouter (ваш список)
+# Минимальная сумма для лимитного ордера TP (USDT)
+MIN_TP_ORDER_USDT = 5.0
+
+# Отключаем ИИ – он не работает на бесплатных моделях
+USE_AI = False
+
+# Список моделей (оставлен для истории, но не используется)
 AI_MODELS = [
     "baidu/cobuddy:free",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "poolside/laguna-xs.2:free",
     "poolside/laguna-m.1:free",
     "deepseek/deepseek-v4-flash:free",
-    "google/gemma-4-26b-a4b-it:free",
-    "google/gemma-4-31b-it:free",
-    "arcee-ai/trinity-large-thinking:free",
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    "nvidia/llama-nemotron-embed-vl-1b-v2:free",
-    "minimax/minimax-m2.5:free",
-    "liquid/lfm-2.5-1.2b-thinking:free",
-    "liquid/lfm-2.5-1.2b-instruct:free",
-    "nvidia/nemotron-3-nano-30b-a3b:free",
-    "nvidia/nemotron-nano-12b-v2-vl:free",
-    "qwen/qwen3-next-80b-a3b-instruct:free",
-    "nvidia/nemotron-nano-9b-v2:free",
-    "openai/gpt-oss-120b:free",
-    "openai/gpt-oss-20b:free",
-    "z-ai/glm-4.5-air:free",
-    "qwen/qwen3-coder:free",
-    "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "meta-llama/llama-3.2-3b-instruct:free",
-    "nousresearch/hermes-3-llama-3.1-405b:free",
 ]
-
-USE_AI = False                    # отключать ИИ не рекомендуется, но можно установить False
-CACHE_WORKING_MODEL = True       # запоминать последнюю рабочую модель
 
 # ─────────────────────────────────────────────────────────────
 #  ЛОГИРОВАНИЕ
@@ -108,8 +91,8 @@ stats = {
     "депозит_текущий":    0.0,
     "старт_время":        "",
     "последний_отчёт":    0.0,
-    "ai_модель":          "",          # текущая используемая модель ИИ
-    "ai_статус":          "ожидание",   # ok / ошибка / перебор
+    "ai_модель":          "",
+    "ai_статус":          "отключён",
 }
 
 def сохранить_состояние():
@@ -176,33 +159,15 @@ def продать_все_монеты():
     except Exception as e:
         log.warning(f"  Ошибка при получении баланса: {e}")
 
-def перевести_с_финансирования():
-    try:
-        funding = exchange.private_get_v5_asset_transfer_query_asset_info()
-        usdt_funding = 0.0
-        for item in funding.get("result", {}).get("assets", []):
-            if item.get("asset") == "USDT":
-                usdt_funding = float(item.get("free", 0))
-                break
-        if usdt_funding > 0.5:
-            log.info(f"  Найдено {usdt_funding:.2f} USDT на финансировании. Перевожу на спот...")
-            exchange.transfer("USDT", usdt_funding, "FUND", "SPOT")
-            log.info("  Перевод выполнен")
-        else:
-            log.info("  На финансировании нет значимого остатка USDT")
-    except Exception as e:
-        log.warning(f"  Ошибка перевода с финансирования: {e}")
-
 def полная_инвентаризация():
     log.info("🔄 Выполняю полную инвентаризацию перед торговлей...")
     отменить_все_ордера()
     продать_все_монеты()
-    # перевести_с_финансирования()   # раскомментируйте, если ключ имеет права на перевод
     log.info("✅ Инвентаризация завершена")
     time.sleep(2)
 
 # ─────────────────────────────────────────────────────────────
-#  ИНДИКАТОРЫ (те же, что были)
+#  ИНДИКАТОРЫ
 # ─────────────────────────────────────────────────────────────
 def _ema(s, span):
     return s.ewm(span=span, adjust=False).mean()
@@ -379,115 +344,46 @@ def получить_скор(symbol: str) -> dict:
     return {"score": score, "details": details, "price": price}
 
 # ─────────────────────────────────────────────────────────────
-#  ИИ С ПЕРЕБОРОМ МОДЕЛЕЙ
+#  ИИ (ОТКЛЮЧЁН)
 # ─────────────────────────────────────────────────────────────
-_working_model = None
-
 def спросить_ии(symbol, price, score, details) -> tuple:
-    global _working_model
     if not USE_AI:
         return "buy", 1.0, "ИИ отключён"
-
-    models_to_try = AI_MODELS.copy()
-    if CACHE_WORKING_MODEL and _working_model and _working_model in models_to_try:
-        models_to_try.remove(_working_model)
-        models_to_try.insert(0, _working_model)
-
-    for model in models_to_try:
-        try:
-            log.debug(f"  🤖 Пробуем модель: {model}")
-            prompt = f"""Ты помощник для крипто-скальпинга. Проанализируй данные и реши: купить (buy) или ждать (wait).
-
-Пара: {symbol}
-Цена: {price}
-ТА-скор: {score}/100
-
-Индикаторы:
-- RSI: {details.get('rsi', '?')}
-- MACD: {details.get('macd', '?')}
-- Range Filter: {details.get('range_filter', '?')}
-- Supertrend: {details.get('supertrend', '?')}
-- Hull Suite: {details.get('hull', '?')}
-- Тренд 1h EMA: {details.get('тренд_1h', '?')}
-- ADX: {details.get('adx', '?')}
-- Stochastic K: {details.get('stoch_k', '?')}
-- Объём всплеск: {details.get('объём_всплеск', False)}
-- QQE: {details.get('qqe', '?')}
-
-Стратегия: спот-скальпинг, TP=0.8%, SL=1.0%. Входить только при сильном стечении факторов.
-
-Ответь ТОЛЬКО валидным JSON без markdown:
-{{"action": "buy" или "wait", "confidence": 0.0-1.0, "reasoning": "одно предложение"}}"""
-
-            headers = {
-                "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.1,
-                "max_tokens": 150,
-            }
-            resp = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers, json=payload, timeout=12
-            )
-            if resp.status_code == 200:
-                content = resp.json()["choices"][0]["message"]["content"].strip()
-                if content.startswith("```"):
-                    content = content.split("```")[1]
-                    if content.startswith("json"):
-                        content = content[4:]
-                s, e = content.find("{"), content.rfind("}") + 1
-                if s != -1:
-                    data = json.loads(content[s:e])
-                    action = data.get("action", "wait")
-                    confidence = float(data.get("confidence", 0))
-                    reasoning = data.get("reasoning", "")
-                    # успех
-                    if CACHE_WORKING_MODEL:
-                        _working_model = model
-                        stats["ai_модель"] = model
-                        stats["ai_статус"] = "ok"
-                    log.debug(f"  ✅ Модель {model} ответила: {action} ({confidence:.2f})")
-                    return action, confidence, reasoning
-                else:
-                    log.warning(f"  ❌ Модель {model} вернула невалидный JSON: {content[:100]}")
-            else:
-                log.warning(f"  ❌ Модель {model} вернула HTTP {resp.status_code}: {resp.text[:100]}")
-                stats["ai_статус"] = f"ошибка {resp.status_code}"
-        except Exception as e:
-            log.warning(f"  ❌ Ошибка модели {model}: {e}")
-            stats["ai_статус"] = str(e)[:50]
-            continue
-
-    log.error("  ❌ Все модели ИИ недоступны. Возвращаем wait.")
-    stats["ai_статус"] = "нет доступных моделей"
-    return "wait", 0.0, "ИИ недоступен"
+    # Остальной код ИИ (не используется) можно удалить, но для целостности оставим заглушку
+    return "buy", 1.0, "ИИ отключён"
 
 # ─────────────────────────────────────────────────────────────
 #  ТОРГОВЫЕ ФУНКЦИИ
 # ─────────────────────────────────────────────────────────────
 def рассчитать_размер_входа(баланс_usdt: float) -> float:
+    """Возвращает сумму входа не меньше 5 USDT и не больше 20 USDT"""
+    min_amount = 5.0
+    max_amount = 20.0
     total_factor = 1 + MARTINGALE_FACTOR + MARTINGALE_FACTOR ** 2
     amount = min(баланс_usdt * 0.15, баланс_usdt / total_factor * 0.9)
-    return round(max(2.0, min(20.0, amount)), 2)
+    return round(max(min_amount, min(max_amount, amount)), 2)
 
 def купить(symbol, amount_usdt):
     price = exchange.fetch_ticker(symbol)["last"]
     qty = amount_usdt / price
-    exchange.create_market_buy_order(symbol, qty)
+    order = exchange.create_market_buy_order(symbol, qty)
     log.info(f"  📈 ПОКУПКА {qty:.6f} {symbol.split('/')[0]} по ~{price:.8f} ({amount_usdt:.2f} USDT)")
     return price, qty
 
 def поставить_тп(symbol, qty, entry_price):
-    tp = entry_price * (1 + TP_PERCENT / 100)
+    tp_price = entry_price * (1 + TP_PERCENT / 100)
+    стоимость_ордера = tp_price * qty
+    if стоимость_ордера < MIN_TP_ORDER_USDT:
+        log.warning(f"  Сумма TP ({стоимость_ордера:.2f} USDT) ниже минимальной {MIN_TP_ORDER_USDT}. Продаю по рынку.")
+        продать_по_рынку(symbol, qty, "TP не может быть выставлен (малая сумма)")
+        return
     try:
-        exchange.create_limit_sell_order(symbol, qty, tp)
-        log.info(f"  🎯 Тейк-профит установлен на {tp:.8f}")
+        exchange.create_limit_sell_order(symbol, qty, tp_price)
+        log.info(f"  🎯 Тейк-профит установлен на {tp_price:.8f}")
     except Exception as e:
         log.warning(f"  Не удалось поставить TP: {e}")
+        # При ошибке – продаём по рынку
+        продать_по_рынку(symbol, qty, "ошибка TP")
 
 def продать_по_рынку(symbol, qty, причина=""):
     try:
@@ -585,7 +481,7 @@ def печатать_отчёт():
     log.info(f"  💸 Убыток:           -{stats['убыток_usdt']:.4f} USDT")
     log.info(f"  📈 Чистый P&L:        {'+' if чистый >= 0 else ''}{чистый:.4f} USDT")
     log.info("  ──────────────────────────────────────────────────")
-    log.info(f"  🤖 ИИ модель:         {stats['ai_модель'] or 'не определена'}")
+    log.info(f"  🤖 ИИ модель:         {stats['ai_модель'] or 'отключён'}")
     log.info(f"  🤖 ИИ статус:         {stats['ai_статус']}")
     log.info("=" * 58)
     log.info("")
@@ -636,7 +532,7 @@ def main():
     log.info(f"  Стартовый депозит:    {stats['депозит_старт']:.2f} USDT")
     log.info(f"  Пар для торговли:     {len(SYMBOLS)}")
     log.info(f"  MIN_SCORE:            {MIN_SCORE}")
-    log.info(f"  ИИ модель:            {'вкл (перебор ' + str(len(AI_MODELS)) + ' моделей)' if USE_AI else 'выкл'}")
+    log.info(f"  ИИ модель:            выкл")
     log.info("=" * 58)
     log.info("")
 
