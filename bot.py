@@ -81,18 +81,15 @@ stats = {
     "последний_отчёт":    0.0,
 }
 
-
 # ─────────────────────────────────────────────────────────────
 #  СОСТОЯНИЕ
 # ─────────────────────────────────────────────────────────────
-
 def сохранить_состояние():
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(stats, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log.warning(f"Не удалось сохранить состояние: {e}")
-
 
 def загрузить_состояние():
     global stats
@@ -112,11 +109,77 @@ def загрузить_состояние():
         log.warning(f"Не удалось загрузить состояние: {e}")
         return False
 
+# ─────────────────────────────────────────────────────────────
+#  ПОЛНАЯ ИНВЕНТАРИЗАЦИЯ ПРИ СТАРТЕ
+# ─────────────────────────────────────────────────────────────
+def отменить_все_ордера():
+    """Отменяет все открытые ордера на споте (лимитные, TP, SL)."""
+    log.info("  🗑️  Отмена всех открытых ордеров...")
+    try:
+        ордера = exchange.fetch_open_orders()
+        for ордер in ордера:
+            try:
+                exchange.cancel_order(ордер["id"], ордер["symbol"])
+                log.info(f"    Отменён ордер {ордер['id']} на {ордер['symbol']}")
+            except Exception as e:
+                log.warning(f"    Не удалось отменить {ордер['id']}: {e}")
+    except Exception as e:
+        log.warning(f"  Ошибка при получении ордеров: {e}")
+
+def продать_все_монеты():
+    """Продаёт все монеты (кроме USDT) по рыночной цене."""
+    log.info("  💱 Продажа всех монет (кроме USDT)...")
+    try:
+        баланс = exchange.fetch_balance()
+        свободные = баланс["free"]
+        for монета, количество in свободные.items():
+            if монета == "USDT" or количество == 0:
+                continue
+            пара = f"{монета}/USDT"
+            try:
+                log.info(f"    Продажа {количество:.6f} {монета} по рынку")
+                exchange.create_market_sell_order(пара, количество)
+                time.sleep(0.3)
+            except Exception as e:
+                log.warning(f"    Не удалось продать {монета}: {e}")
+    except Exception as e:
+        log.warning(f"  Ошибка при получении баланса: {e}")
+
+def перевести_с_финансирования():
+    """
+    Переводит USDT с Funding Account на Spot Account.
+    Требует наличия прав на перевод у API ключа.
+    """
+    try:
+        # Получаем баланс финансирования (эндпоинт Bybit)
+        funding = exchange.private_get_v5_asset_transfer_query_asset_info()
+        usdt_funding = 0.0
+        for item in funding.get("result", {}).get("assets", []):
+            if item.get("asset") == "USDT":
+                usdt_funding = float(item.get("free", 0))
+                break
+        if usdt_funding > 0.5:
+            log.info(f"  Найдено {usdt_funding:.2f} USDT на финансировании. Перевожу на спот...")
+            exchange.transfer("USDT", usdt_funding, "FUND", "SPOT")
+            log.info("  Перевод выполнен")
+        else:
+            log.info("  На финансировании нет значимого остатка USDT")
+    except Exception as e:
+        log.warning(f"  Ошибка перевода с финансирования: {e}")
+
+def полная_инвентаризация():
+    """Главная функция очистки: отмена ордеров, продажа монет, перевод с финансирования."""
+    log.info("🔄 Выполняю полную инвентаризацию перед торговлей...")
+    отменить_все_ордера()
+    продать_все_монеты()
+    # Раскомментируйте следующую строку, если API ключ имеет права на перевод
+    # перевести_с_финансирования()
+    log.info("✅ Инвентаризация завершена")
+    time.sleep(2)
 
 # ─────────────────────────────────────────────────────────────
 #  ИНДИКАТОРЫ
 # ─────────────────────────────────────────────────────────────
-
 def _ema(s, span):
     return s.ewm(span=span, adjust=False).mean()
 
@@ -125,8 +188,11 @@ def _rma(s, span):
 
 def calc_rsi(close, period=14):
     d = close.diff()
-    return 100 - (100 / (1 + _rma(d.clip(lower=0), period) /
-                         _rma((-d).clip(lower=0), period).replace(0, np.nan)))
+    gain = d.clip(lower=0)
+    loss = (-d).clip(lower=0)
+    avg_gain = _rma(gain, period)
+    avg_loss = _rma(loss, period)
+    return 100 - (100 / (1 + avg_gain / avg_loss.replace(0, np.nan)))
 
 def calc_macd(close, fast=12, slow=26, signal=9):
     ml = _ema(close, fast) - _ema(close, slow)
@@ -140,43 +206,53 @@ def calc_atr(df, period=14):
 
 def calc_range_filter(df, period=200, qty=3.0):
     close = df["c"]
-    rng   = qty * calc_atr(df, period)
-    filt  = close.copy()
+    rng = qty * calc_atr(df, period)
+    filt = close.copy()
     for i in range(1, len(close)):
-        c, r, pf = close.iloc[i], rng.iloc[i], filt.iloc[i - 1]
-        filt.iloc[i] = c - r if c - r > pf else (c + r if c + r < pf else pf)
-    up   = (filt > filt.shift(1)) & (close > filt)
+        c, r, pf = close.iloc[i], rng.iloc[i], filt.iloc[i-1]
+        if c - r > pf:
+            filt.iloc[i] = c - r
+        elif c + r < pf:
+            filt.iloc[i] = c + r
+        else:
+            filt.iloc[i] = pf
+    up = (filt > filt.shift(1)) & (close > filt)
     down = (filt < filt.shift(1)) & (close < filt)
     return filt, filt + rng, filt - rng, up, down
 
 def calc_supertrend(df, period=10, mult=3.0):
     atr = calc_atr(df, period)
     hl2 = (df["h"] + df["l"]) / 2
-    ub  = (hl2 + mult * atr).copy()
-    lb  = (hl2 - mult * atr).copy()
+    ub = (hl2 + mult * atr).copy()
+    lb = (hl2 - mult * atr).copy()
     trend = pd.Series(1, index=df.index)
     for i in range(1, len(df)):
-        c, pc = df["c"].iloc[i], df["c"].iloc[i - 1]
-        pu, pl, pt = ub.iloc[i - 1], lb.iloc[i - 1], trend.iloc[i - 1]
+        c, pc = df["c"].iloc[i], df["c"].iloc[i-1]
+        pu, pl, pt = ub.iloc[i-1], lb.iloc[i-1], trend.iloc[i-1]
         ub.iloc[i] = ub.iloc[i] if ub.iloc[i] < pu or pc > pu else pu
         lb.iloc[i] = lb.iloc[i] if lb.iloc[i] > pl or pc < pl else pl
-        trend.iloc[i] = (-1 if pt == 1 and c < lb.iloc[i] else
-                         (1 if pt == -1 and c > ub.iloc[i] else pt))
+        if pt == 1 and c < lb.iloc[i]:
+            trend.iloc[i] = -1
+        elif pt == -1 and c > ub.iloc[i]:
+            trend.iloc[i] = 1
+        else:
+            trend.iloc[i] = pt
     return trend == 1, trend == -1
 
 def calc_stochastic(df, k=14, d=3, smooth=3):
-    lo  = df["l"].rolling(k).min()
-    hi  = df["h"].rolling(k).max()
-    ks  = (100 * (df["c"] - lo) / (hi - lo + 1e-10)).rolling(smooth).mean()
+    lo = df["l"].rolling(k).min()
+    hi = df["h"].rolling(k).max()
+    ks = (100 * (df["c"] - lo) / (hi - lo + 1e-10)).rolling(smooth).mean()
     return ks, ks.rolling(d).mean()
 
 def calc_qqe(close, rsi_period=14, sf=5, qq_factor=4.236):
-    rsi_s = _ema(calc_rsi(close, rsi_period), sf)
-    _ema((rsi_s - rsi_s.shift(1)).abs(), rsi_period * 2)
+    rsi = calc_rsi(close, rsi_period)
+    rsi_s = _ema(rsi, sf)
+    # Для простоты берём только направление
     return rsi_s > 50, rsi_s < 50
 
 def calc_hull(close, period=55):
-    hma = _ema(2 * _ema(close, period // 2) - _ema(close, period), int(np.sqrt(period)))
+    hma = _ema(2 * _ema(close, period//2) - _ema(close, period), int(np.sqrt(period)))
     return hma > hma.shift(2), hma < hma.shift(2)
 
 def calc_adx(df, period=14):
@@ -190,85 +266,92 @@ def calc_adx(df, period=14):
     adx = _rma(100 * (pdi - mdi).abs() / (pdi + mdi + 1e-10), period)
     return adx, pdi, mdi
 
-
 # ─────────────────────────────────────────────────────────────
-#  АВТОКАЛИБРОВКА СУММЫ ВХОДА
+#  РАСЧЁТ РАЗМЕРА ВХОДА (15% от текущего USDT)
 # ─────────────────────────────────────────────────────────────
-
 def рассчитать_размер_входа(баланс_usdt: float) -> float:
-    """15% депозита, с запасом на полный мартингейл. Мин 2, макс 20 USDT."""
+    """15% депозита, с запасом на мартингейл. Мин 2, макс 20 USDT."""
     total_factor = 1 + MARTINGALE_FACTOR + MARTINGALE_FACTOR ** 2
     amount = min(баланс_usdt * 0.15, баланс_usdt / total_factor * 0.9)
     return round(max(2.0, min(20.0, amount)), 2)
 
-
 # ─────────────────────────────────────────────────────────────
-#  ТЕХНИЧЕСКИЙ СКОР  (0–100)
+#  ТЕХНИЧЕСКИЙ СКОР
 # ─────────────────────────────────────────────────────────────
-
 def получить_скор(symbol: str) -> dict:
     details = {}
-    score   = 0
-    price   = 0
+    score = 0
+    price = 0
     try:
-        raw5  = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA,    limit=300)
+        raw5 = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=300)
         raw1h = exchange.fetch_ohlcv(symbol, TIMEFRAME_TREND, limit=300)
         if len(raw5) < 100 or len(raw1h) < 100:
             return {"score": 0, "details": {}, "price": 0}
 
         cols = ["ts", "o", "h", "l", "c", "v"]
-        df5  = pd.DataFrame(raw5,  columns=cols).reset_index(drop=True)
+        df5 = pd.DataFrame(raw5, columns=cols).reset_index(drop=True)
         df1h = pd.DataFrame(raw1h, columns=cols).reset_index(drop=True)
         c5, c1h = df5["c"], df1h["c"]
 
-        # RSI — 20 очков
+        # RSI
         rsi_val = calc_rsi(c5).iloc[-1]
         details["rsi"] = round(rsi_val, 1)
-        score += (20 if rsi_val < 30 else 10 if rsi_val < 45 else -5 if rsi_val > 70 else 5)
+        if rsi_val < 30:
+            score += 20
+        elif rsi_val < 45:
+            score += 10
+        elif rsi_val > 70:
+            score -= 5
+        else:
+            score += 5
 
-        # MACD — 15 очков
+        # MACD
         ml, sl, _ = calc_macd(c5)
-        macd_bull  = ml.iloc[-1] > sl.iloc[-1]
+        macd_bull = ml.iloc[-1] > sl.iloc[-1]
         macd_cross = macd_bull and ml.iloc[-2] <= sl.iloc[-2]
         details["macd"] = "бычий" if macd_bull else "медвежий"
         score += 15 if macd_cross else (8 if macd_bull else 0)
 
-        # Range Filter — 15 очков
+        # Range Filter
         _, _, _, rf_up, _ = calc_range_filter(df5)
         details["range_filter"] = "вверх" if rf_up.iloc[-1] else "вниз"
         score += 15 if rf_up.iloc[-1] else 0
 
-        # Supertrend — 10 очков
+        # Supertrend
         st_up, _ = calc_supertrend(df5)
         details["supertrend"] = "вверх" if st_up.iloc[-1] else "вниз"
         score += 10 if st_up.iloc[-1] else 0
 
-        # Hull Suite — 10 очков
+        # Hull
         hu_up, _ = calc_hull(c5)
         details["hull"] = "вверх" if hu_up.iloc[-1] else "вниз"
         score += 10 if hu_up.iloc[-1] else 0
 
-        # EMA тренд 1h — 10 очков
-        trend_bull = _ema(c1h, 50).iloc[-1] > _ema(c1h, 200).iloc[-1]
+        # EMA тренд 1h
+        ema50 = _ema(c1h, 50).iloc[-1]
+        ema200 = _ema(c1h, 200).iloc[-1]
+        trend_bull = ema50 > ema200
         details["тренд_1h"] = "бычий" if trend_bull else "медвежий"
         score += 10 if trend_bull else 0
 
-        # ADX — 5 очков
+        # ADX
         adx, pdi, mdi = calc_adx(df5)
         details["adx"] = round(adx.iloc[-1], 1)
-        score += 5 if adx.iloc[-1] > 20 and pdi.iloc[-1] > mdi.iloc[-1] else 0
+        if adx.iloc[-1] > 20 and pdi.iloc[-1] > mdi.iloc[-1]:
+            score += 5
 
-        # Stochastic — 5 очков
+        # Stochastic
         k, _ = calc_stochastic(df5)
         details["stoch_k"] = round(k.iloc[-1], 1)
-        score += 5 if k.iloc[-1] < 30 else 0
+        if k.iloc[-1] < 30:
+            score += 5
 
-        # Объём — 5 очков
+        # Объём
         vol_surge = df5["v"].iloc[-1] > df5["v"].rolling(20).mean().iloc[-1] * 1.2
         details["объём_всплеск"] = vol_surge
         score += 5 if vol_surge else 0
 
-        # QQE — 5 очков
+        # QQE
         qqe_long, _ = calc_qqe(c5)
         details["qqe"] = "лонг" if qqe_long.iloc[-1] else "шорт"
         score += 5 if qqe_long.iloc[-1] else 0
@@ -281,11 +364,9 @@ def получить_скор(symbol: str) -> dict:
 
     return {"score": score, "details": details, "price": price}
 
-
 # ─────────────────────────────────────────────────────────────
 #  ИИ-ФИЛЬТР
 # ─────────────────────────────────────────────────────────────
-
 def спросить_ии(symbol, price, score, details) -> tuple:
     prompt = f"""Ты помощник для крипто-скальпинга. Проанализируй данные и реши: купить (buy) или ждать (wait).
 
@@ -300,9 +381,9 @@ def спросить_ии(symbol, price, score, details) -> tuple:
 - Supertrend: {details.get('supertrend', '?')}
 - Hull Suite: {details.get('hull', '?')}
 - Тренд 1h EMA: {details.get('тренд_1h', '?')}
-- ADX: {details.get('adx', '?')} (> 20 = тренд)
+- ADX: {details.get('adx', '?')} (>20 тренд)
 - Stochastic K: {details.get('stoch_k', '?')}
-- Всплеск объёма: {details.get('объём_всплеск', False)}
+- Объём выше среднего: {details.get('объём_всплеск', False)}
 - QQE: {details.get('qqe', '?')}
 
 Стратегия: спот-скальпинг, TP={TP_PERCENT}%, SL={SL_PERCENT}%. Входить только при сильном стечении факторов.
@@ -312,19 +393,16 @@ def спросить_ии(symbol, price, score, details) -> tuple:
 
     headers = {
         "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
-        "Content-Type":  "application/json",
+        "Content-Type": "application/json",
     }
     payload = {
-        "model":       AI_MODEL,
-        "messages":    [{"role": "user", "content": prompt}],
+        "model": AI_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
-        "max_tokens":  150,
+        "max_tokens": 150,
     }
     try:
-        resp = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers, json=payload, timeout=12
-        )
+        resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=12)
         if resp.status_code == 200:
             content = resp.json()["choices"][0]["message"]["content"].strip()
             if content.startswith("```"):
@@ -343,14 +421,12 @@ def спросить_ии(symbol, price, score, details) -> tuple:
         log.warning(f"Ошибка ИИ: {e}")
     return "wait", 0.0, "ИИ недоступен"
 
-
 # ─────────────────────────────────────────────────────────────
 #  ТОРГОВЫЕ ФУНКЦИИ
 # ─────────────────────────────────────────────────────────────
-
 def купить(symbol, amount_usdt):
     price = exchange.fetch_ticker(symbol)["last"]
-    qty   = amount_usdt / price
+    qty = amount_usdt / price
     exchange.create_market_buy_order(symbol, qty)
     log.info(f"  📈 ПОКУПКА {qty:.6f} {symbol.split('/')[0]} по ~{price:.8f} ({amount_usdt:.2f} USDT)")
     return price, qty
@@ -370,13 +446,12 @@ def продать_по_рынку(symbol, qty, причина=""):
     except Exception as e:
         log.warning(f"  Ошибка продажи: {e}")
 
-def отменить_все_ордера(symbol):
-    """Отменяет все открытые лимитные ордера по паре (TP лимитки)."""
+def отменить_все_ордера_по_паре(symbol):
     try:
-        открытые = exchange.fetch_open_orders(symbol)
-        for ордер in открытые:
+        ордера = exchange.fetch_open_orders(symbol)
+        for ордер in ордера:
             exchange.cancel_order(ордер["id"], symbol)
-            log.info(f"  🗑️  Отменён ордер {ордер['id']}")
+            log.info(f"  🗑️  Отменён ордер {ордер['id']} на {symbol}")
     except Exception as e:
         log.warning(f"  Ошибка отмены ордеров: {e}")
 
@@ -386,29 +461,15 @@ def баланс_монеты(symbol):
 def баланс_usdt():
     return exchange.fetch_balance()["free"].get("USDT", 0.0)
 
-
-# ─────────────────────────────────────────────────────────────
-#  МОНИТОРИНГ ПОЗИЦИИ  (обычный таймаут + жёсткий дедлайн 24ч)
-# ─────────────────────────────────────────────────────────────
-
 def мониторить_позицию(symbol, entry_price, qty, открыта_в: float) -> str:
-    """
-    Следит за позицией.
-    Уровни закрытия по времени:
-      — TRADE_TIMEOUT (10 мин)  → закрывает по рынку, серия продолжается
-      — TRADE_MAX_LIFETIME (24ч) → жёсткий дедлайн, отменяет все ордера,
-                                   продаёт остаток, серия заканчивается
-    """
-    deadline_обычный  = открыта_в + TRADE_TIMEOUT
-    deadline_24ч      = открыта_в + TRADE_MAX_LIFETIME
+    deadline_обычный = открыта_в + TRADE_TIMEOUT
+    deadline_24ч = открыта_в + TRADE_MAX_LIFETIME
 
     while True:
         сейчас = time.time()
-
-        # ── Жёсткий дедлайн 24 часа ──────────────────────────
         if сейчас >= deadline_24ч:
             log.warning("  🔴 ДЕДЛАЙН 24 ЧАСА — принудительное закрытие позиции!")
-            отменить_все_ордера(symbol)
+            отменить_все_ордера_по_паре(symbol)
             остаток = баланс_монеты(symbol)
             if остаток > 0:
                 продать_по_рынку(symbol, остаток, "дедлайн 24ч")
@@ -417,55 +478,46 @@ def мониторить_позицию(symbol, entry_price, qty, открыта
             log.warning(f"  Итог за 24ч: {'+' if pnl >= 0 else ''}{pnl:.2f}% от цены входа")
             return "дедлайн_24ч"
 
-        # ── Обычный 10-минутный таймаут ───────────────────────
         if сейчас >= deadline_обычный:
             log.info("  ⏰ Таймаут 10 мин — закрываем позицию")
-            отменить_все_ордера(symbol)
+            отменить_все_ордера_по_паре(symbol)
             остаток = баланс_монеты(symbol)
             if остаток > 0:
                 продать_по_рынку(symbol, остаток, "таймаут 10 мин")
             return "timeout"
 
         time.sleep(10)
-
         try:
-            # ── Проверяем, не сработал ли TP лимиткой ─────────
             бал = баланс_монеты(symbol)
             if бал < qty * 0.05:
                 log.info("  ✅ Тейк-профит исполнен!")
                 return "tp"
 
-            # ── Проверяем стоп-лосс ───────────────────────────
             cur = exchange.fetch_ticker(symbol)["last"]
             pnl = (cur - entry_price) / entry_price * 100
-
             прошло_мин = (time.time() - открыта_в) / 60
-            прошло_ч   = прошло_мин / 60
-            if прошло_ч >= 1:
-                log.debug(f"  {symbol}  P&L: {pnl:+.2f}%  держим {прошло_ч:.1f}ч")
+            if прошло_мин >= 60:
+                log.debug(f"  {symbol} P&L: {pnl:+.2f}%  держим {прошло_мин/60:.1f}ч")
             else:
-                log.debug(f"  {symbol}  P&L: {pnl:+.2f}%  держим {прошло_мин:.0f} мин")
+                log.debug(f"  {symbol} P&L: {pnl:+.2f}%  держим {прошло_мин:.0f} мин")
 
             if pnl <= -SL_PERCENT:
                 log.info(f"  ❌ Стоп-лосс! Убыток {pnl:.2f}%")
-                отменить_все_ордера(symbol)
+                отменить_все_ордера_по_паре(symbol)
                 продать_по_рынку(symbol, бал, "стоп-лосс")
                 return "sl"
-
         except Exception as e:
             log.warning(f"  Ошибка мониторинга: {e}")
 
-
 # ─────────────────────────────────────────────────────────────
-#  30-МИНУТНЫЙ ОТЧЁТ
+#  ОТЧЁТЫ И АДАПТАЦИЯ
 # ─────────────────────────────────────────────────────────────
-
 def печатать_отчёт():
-    сейчас  = баланс_usdt()
-    старт   = stats["депозит_старт"]
-    дельта  = сейчас - старт
-    знак    = "+" if дельта >= 0 else ""
-    чистый  = stats["прибыль_usdt"] - stats["убыток_usdt"]
+    сейчас = баланс_usdt()
+    старт = stats["депозит_старт"]
+    дельта = сейчас - старт
+    знак = "+" if дельта >= 0 else ""
+    чистый = stats["прибыль_usdt"] - stats["убыток_usdt"]
     процент = (дельта / старт * 100) if старт > 0 else 0
 
     log.info("")
@@ -494,11 +546,6 @@ def печатать_отчёт():
     stats["последний_отчёт"] = time.time()
     сохранить_состояние()
 
-
-# ─────────────────────────────────────────────────────────────
-#  АВТОКОРРЕКТИРОВКА РИСКА
-# ─────────────────────────────────────────────────────────────
-
 def скорректировать_риск(баланс: float):
     global MIN_SCORE
     старт = stats["депозит_старт"]
@@ -515,19 +562,21 @@ def скорректировать_риск(баланс: float):
         MIN_SCORE = 65
         log.info(f"  ✅ Депозит в норме ({'+' if изм >= 0 else ''}{изм:.1f}%) — штатный режим, MIN_SCORE=65")
 
-
 # ─────────────────────────────────────────────────────────────
-#  ГЛАВНЫЙ ЦИКЛ
+#  ОСНОВНОЙ ЦИКЛ
 # ─────────────────────────────────────────────────────────────
-
 def main():
+    # --- ПОЛНАЯ ИНВЕНТАРИЗАЦИЯ ПРИ СТАРТЕ ---
+    полная_инвентаризация()
+    # ---------------------------------------
+
     восстановлен = загрузить_состояние()
     баланс_сейчас = баланс_usdt()
     stats["запусков"] += 1
 
     if not восстановлен or stats["депозит_старт"] == 0:
         stats["депозит_старт"] = баланс_сейчас
-        stats["старт_время"]   = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        stats["старт_время"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
 
     stats["депозит_текущий"] = баланс_сейчас
     stats["последний_отчёт"] = time.time()
@@ -552,15 +601,12 @@ def main():
 
     while True:
         try:
-            # ── Периодический отчёт ───────────────────────────
             if time.time() - stats["последний_отчёт"] >= REPORT_INTERVAL:
                 печатать_отчёт()
 
-            # ── 1. Рассчитываем размер входа ──────────────────
             баланс = баланс_usdt()
             первый_вход = рассчитать_размер_входа(баланс)
 
-            # ── 2. Скорим все пары ────────────────────────────
             log.info(f"── Сканирование {len(SYMBOLS)} пар ──")
             scores = {}
             for sym in SYMBOLS:
@@ -573,7 +619,6 @@ def main():
                     f"тренд={res['details'].get('тренд_1h','?')}"
                 )
 
-            # Фильтруем пары которые вообще прошли порог
             прошедшие = {s: v for s, v in scores.items() if v["score"] >= MIN_SCORE}
             if not прошедшие:
                 лучший_скор = max(scores.values(), key=lambda x: x["score"])["score"]
@@ -581,15 +626,13 @@ def main():
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            # Берём лучшую
             лучшая = max(прошедшие, key=lambda s: прошедшие[s]["score"])
-            скор   = прошедшие[лучшая]["score"]
+            скор = прошедшие[лучшая]["score"]
             детали = прошедшие[лучшая]["details"]
-            цена   = прошедшие[лучшая]["price"]
+            цена = прошедшие[лучшая]["price"]
 
             log.info(f"  ► Выбрана {лучшая}  скор={скор}  цена={цена:.8f}  (прошло порог: {len(прошедшие)} из {len(SYMBOLS)} пар)")
 
-            # ── 3. ИИ фильтр ──────────────────────────────────
             действие, уверенность, причина = спросить_ии(лучшая, цена, скор, детали)
             log.info(f"  🤖 ИИ: {действие}  уверенность={уверенность:.2f}  → {причина}")
 
@@ -598,14 +641,12 @@ def main():
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            # ── 4. Вход с мартингейлом ─────────────────────────
-            шаг    = 0
-            сумма  = первый_вход
+            сумма = первый_вход
+            шаг = 0
             log.info(f"  💰 Первый вход: {сумма:.2f} USDT (баланс {баланс:.2f} USDT)")
 
             while шаг <= MAX_STEPS:
                 log.info(f"  ── Шаг мартингейла {шаг} / сумма {сумма:.2f} USDT ──")
-
                 if баланс_usdt() < сумма:
                     log.warning(f"  Недостаточно USDT для входа {сумма:.2f} — прерываем серию")
                     break
@@ -613,24 +654,22 @@ def main():
                 время_входа = time.time()
                 вход_цена, кол_во = купить(лучшая, сумма)
                 поставить_тп(лучшая, кол_во, вход_цена)
-
                 stats["сделок_всего"] += 1
 
                 результат = мониторить_позицию(лучшая, вход_цена, кол_во, время_входа)
 
                 if результат == "tp":
                     прибыль = сумма * TP_PERCENT / 100
-                    stats["тейкпрофит"]   += 1
+                    stats["тейкпрофит"] += 1
                     stats["прибыль_usdt"] += прибыль
                     log.info(f"  ✅ Прибыль зафиксирована ~{прибыль:.4f} USDT — серия закончена")
                     break
 
                 elif результат == "дедлайн_24ч":
-                    # Уже всё закрыто внутри мониторинга
-                    stats["дедлайн_24ч"]  += 1
-                    stats["убыток_usdt"]  += сумма * SL_PERCENT / 100
+                    stats["дедлайн_24ч"] += 1
+                    stats["убыток_usdt"] += сумма * SL_PERCENT / 100
                     log.warning("  Серия прервана по дедлайну 24 часа")
-                    шаг = MAX_STEPS + 1   # выходим из while
+                    шаг = MAX_STEPS + 1
                     break
 
                 elif результат in ("sl", "timeout"):
@@ -639,7 +678,7 @@ def main():
                     if результат == "sl":
                         stats["стоплосс"] += 1
                     else:
-                        stats["таймаут"]  += 1
+                        stats["таймаут"] += 1
 
                     шаг += 1
                     if шаг > MAX_STEPS:
@@ -656,7 +695,6 @@ def main():
         except Exception as e:
             log.error(f"Глобальная ошибка: {e}", exc_info=True)
             time.sleep(60)
-
 
 if __name__ == "__main__":
     main()
