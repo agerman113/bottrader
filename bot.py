@@ -12,6 +12,62 @@ from datetime import datetime
 load_dotenv()
 
 # ─────────────────────────────────────────────────────────────
+#  НАСТРОЙКИ
+# ─────────────────────────────────────────────────────────────
+SYMBOLS = [
+    "PEPE/USDT", "DOGE/USDT", "SHIB/USDT", "FLOKI/USDT", "BONK/USDT",
+    "WIF/USDT",  "MEME/USDT", "BOME/USDT", "DOGS/USDT",
+    "SOL/USDT",  "AVAX/USDT", "LTC/USDT",  "LINK/USDT",
+    "DOT/USDT",  "ADA/USDT",  "TRX/USDT",  "XRP/USDT",  "TON/USDT",
+]
+
+MARTINGALE_FACTOR  = 1.35
+MAX_STEPS          = 2
+TP_PERCENT         = 0.8
+SL_PERCENT         = 1.0
+TIMEFRAME_TA       = "5m"
+TIMEFRAME_TREND    = "1h"
+SCAN_INTERVAL      = 300
+MIN_SCORE          = 50          # снижен с 65 до 50
+AI_CONFIDENCE_MIN  = 0.60
+TRADE_TIMEOUT      = 600
+TRADE_MAX_LIFETIME = 86400
+REPORT_INTERVAL    = 1800
+STATE_FILE         = "state.json"
+
+# Список моделей OpenRouter (ваш список)
+AI_MODELS = [
+    "baidu/cobuddy:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "poolside/laguna-xs.2:free",
+    "poolside/laguna-m.1:free",
+    "deepseek/deepseek-v4-flash:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "google/gemma-4-31b-it:free",
+    "arcee-ai/trinity-large-thinking:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "nvidia/llama-nemotron-embed-vl-1b-v2:free",
+    "minimax/minimax-m2.5:free",
+    "liquid/lfm-2.5-1.2b-thinking:free",
+    "liquid/lfm-2.5-1.2b-instruct:free",
+    "nvidia/nemotron-3-nano-30b-a3b:free",
+    "nvidia/nemotron-nano-12b-v2-vl:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "nvidia/nemotron-nano-9b-v2:free",
+    "openai/gpt-oss-120b:free",
+    "openai/gpt-oss-20b:free",
+    "z-ai/glm-4.5-air:free",
+    "qwen/qwen3-coder:free",
+    "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "meta-llama/llama-3.2-3b-instruct:free",
+    "nousresearch/hermes-3-llama-3.1-405b:free",
+]
+
+USE_AI = True                    # отключать ИИ не рекомендуется, но можно установить False
+CACHE_WORKING_MODEL = True       # запоминать последнюю рабочую модель
+
+# ─────────────────────────────────────────────────────────────
 #  ЛОГИРОВАНИЕ
 # ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -26,33 +82,6 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────
-#  НАСТРОЙКИ
-# ─────────────────────────────────────────────────────────────
-SYMBOLS = [
-    # Мемкоины
-    "PEPE/USDT", "DOGE/USDT", "SHIB/USDT", "FLOKI/USDT", "BONK/USDT",
-    "WIF/USDT",  "MEME/USDT", "BOME/USDT", "NEIRO/USDT", "DOGS/USDT",
-    # Альткоины с высокой ликвидностью
-    "SOL/USDT",  "AVAX/USDT", "MATIC/USDT", "LTC/USDT",  "LINK/USDT",
-    "DOT/USDT",  "ADA/USDT",  "TRX/USDT",  "XRP/USDT",  "TON/USDT",
-]
-
-MARTINGALE_FACTOR  = 1.35
-MAX_STEPS          = 2
-TP_PERCENT         = 0.8
-SL_PERCENT         = 1.0
-TIMEFRAME_TA       = "5m"
-TIMEFRAME_TREND    = "1h"
-SCAN_INTERVAL      = 150        # секунд между сканированиями
-MIN_SCORE          = 65         # минимальный ТА-скор
-AI_MODEL           = "deepseek/deepseek-v4-flash:free"
-AI_CONFIDENCE_MIN  = 0.60
-TRADE_TIMEOUT      = 600        # обычный таймаут позиции (10 мин)
-TRADE_MAX_LIFETIME = 86400      # жёсткий дедлайн позиции (24 часа)
-REPORT_INTERVAL    = 1800       # отчёт каждые 30 минут
-STATE_FILE         = "state.json"
-
-# ─────────────────────────────────────────────────────────────
 #  БИРЖА
 # ─────────────────────────────────────────────────────────────
 exchange = ccxt.bybit({
@@ -63,7 +92,7 @@ exchange = ccxt.bybit({
 })
 
 # ─────────────────────────────────────────────────────────────
-#  СТАТИСТИКА
+#  СТАТИСТИКА И СОСТОЯНИЕ
 # ─────────────────────────────────────────────────────────────
 stats = {
     "запусков":           0,
@@ -79,11 +108,10 @@ stats = {
     "депозит_текущий":    0.0,
     "старт_время":        "",
     "последний_отчёт":    0.0,
+    "ai_модель":          "",          # текущая используемая модель ИИ
+    "ai_статус":          "ожидание",   # ok / ошибка / перебор
 }
 
-# ─────────────────────────────────────────────────────────────
-#  СОСТОЯНИЕ
-# ─────────────────────────────────────────────────────────────
 def сохранить_состояние():
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
@@ -113,7 +141,6 @@ def загрузить_состояние():
 #  ПОЛНАЯ ИНВЕНТАРИЗАЦИЯ ПРИ СТАРТЕ
 # ─────────────────────────────────────────────────────────────
 def отменить_все_ордера():
-    """Отменяет все открытые ордера на споте (лимитные, TP, SL)."""
     log.info("  🗑️  Отмена всех открытых ордеров...")
     try:
         ордера = exchange.fetch_open_orders()
@@ -127,7 +154,6 @@ def отменить_все_ордера():
         log.warning(f"  Ошибка при получении ордеров: {e}")
 
 def продать_все_монеты():
-    """Продаёт все монеты (кроме USDT) по рыночной цене."""
     log.info("  💱 Продажа всех монет (кроме USDT)...")
     try:
         баланс = exchange.fetch_balance()
@@ -137,6 +163,11 @@ def продать_все_монеты():
                 continue
             пара = f"{монета}/USDT"
             try:
+                ticker = exchange.fetch_ticker(пара)
+                сумма_usdt = количество * ticker['last']
+                if сумма_usdt < 0.5:
+                    log.info(f"    Пропускаю {количество:.6f} {монета} (сумма {сумма_usdt:.4f} USDT < 0.5)")
+                    continue
                 log.info(f"    Продажа {количество:.6f} {монета} по рынку")
                 exchange.create_market_sell_order(пара, количество)
                 time.sleep(0.3)
@@ -146,12 +177,7 @@ def продать_все_монеты():
         log.warning(f"  Ошибка при получении баланса: {e}")
 
 def перевести_с_финансирования():
-    """
-    Переводит USDT с Funding Account на Spot Account.
-    Требует наличия прав на перевод у API ключа.
-    """
     try:
-        # Получаем баланс финансирования (эндпоинт Bybit)
         funding = exchange.private_get_v5_asset_transfer_query_asset_info()
         usdt_funding = 0.0
         for item in funding.get("result", {}).get("assets", []):
@@ -168,17 +194,15 @@ def перевести_с_финансирования():
         log.warning(f"  Ошибка перевода с финансирования: {e}")
 
 def полная_инвентаризация():
-    """Главная функция очистки: отмена ордеров, продажа монет, перевод с финансирования."""
     log.info("🔄 Выполняю полную инвентаризацию перед торговлей...")
     отменить_все_ордера()
     продать_все_монеты()
-    # Раскомментируйте следующую строку, если API ключ имеет права на перевод
-    # перевести_с_финансирования()
+    # перевести_с_финансирования()   # раскомментируйте, если ключ имеет права на перевод
     log.info("✅ Инвентаризация завершена")
     time.sleep(2)
 
 # ─────────────────────────────────────────────────────────────
-#  ИНДИКАТОРЫ
+#  ИНДИКАТОРЫ (те же, что были)
 # ─────────────────────────────────────────────────────────────
 def _ema(s, span):
     return s.ewm(span=span, adjust=False).mean()
@@ -248,7 +272,6 @@ def calc_stochastic(df, k=14, d=3, smooth=3):
 def calc_qqe(close, rsi_period=14, sf=5, qq_factor=4.236):
     rsi = calc_rsi(close, rsi_period)
     rsi_s = _ema(rsi, sf)
-    # Для простоты берём только направление
     return rsi_s > 50, rsi_s < 50
 
 def calc_hull(close, period=55):
@@ -265,15 +288,6 @@ def calc_adx(df, period=14):
     mdi = 100 * _rma(mdm, period) / atr.replace(0, np.nan)
     adx = _rma(100 * (pdi - mdi).abs() / (pdi + mdi + 1e-10), period)
     return adx, pdi, mdi
-
-# ─────────────────────────────────────────────────────────────
-#  РАСЧЁТ РАЗМЕРА ВХОДА (15% от текущего USDT)
-# ─────────────────────────────────────────────────────────────
-def рассчитать_размер_входа(баланс_usdt: float) -> float:
-    """15% депозита, с запасом на мартингейл. Мин 2, макс 20 USDT."""
-    total_factor = 1 + MARTINGALE_FACTOR + MARTINGALE_FACTOR ** 2
-    amount = min(баланс_usdt * 0.15, баланс_usdt / total_factor * 0.9)
-    return round(max(2.0, min(20.0, amount)), 2)
 
 # ─────────────────────────────────────────────────────────────
 #  ТЕХНИЧЕСКИЙ СКОР
@@ -327,7 +341,7 @@ def получить_скор(symbol: str) -> dict:
         details["hull"] = "вверх" if hu_up.iloc[-1] else "вниз"
         score += 10 if hu_up.iloc[-1] else 0
 
-        # EMA тренд 1h
+        # Тренд 1h
         ema50 = _ema(c1h, 50).iloc[-1]
         ema200 = _ema(c1h, 200).iloc[-1]
         trend_bull = ema50 > ema200
@@ -365,65 +379,101 @@ def получить_скор(symbol: str) -> dict:
     return {"score": score, "details": details, "price": price}
 
 # ─────────────────────────────────────────────────────────────
-#  ИИ-ФИЛЬТР
+#  ИИ С ПЕРЕБОРОМ МОДЕЛЕЙ
 # ─────────────────────────────────────────────────────────────
+_working_model = None
+
 def спросить_ии(symbol, price, score, details) -> tuple:
-    prompt = f"""Ты помощник для крипто-скальпинга. Проанализируй данные и реши: купить (buy) или ждать (wait).
+    global _working_model
+    if not USE_AI:
+        return "buy", 1.0, "ИИ отключён"
+
+    models_to_try = AI_MODELS.copy()
+    if CACHE_WORKING_MODEL and _working_model and _working_model in models_to_try:
+        models_to_try.remove(_working_model)
+        models_to_try.insert(0, _working_model)
+
+    for model in models_to_try:
+        try:
+            log.debug(f"  🤖 Пробуем модель: {model}")
+            prompt = f"""Ты помощник для крипто-скальпинга. Проанализируй данные и реши: купить (buy) или ждать (wait).
 
 Пара: {symbol}
 Цена: {price}
 ТА-скор: {score}/100
 
 Индикаторы:
-- RSI: {details.get('rsi', '?')} (< 30 = перепроданность)
+- RSI: {details.get('rsi', '?')}
 - MACD: {details.get('macd', '?')}
 - Range Filter: {details.get('range_filter', '?')}
 - Supertrend: {details.get('supertrend', '?')}
 - Hull Suite: {details.get('hull', '?')}
 - Тренд 1h EMA: {details.get('тренд_1h', '?')}
-- ADX: {details.get('adx', '?')} (>20 тренд)
+- ADX: {details.get('adx', '?')}
 - Stochastic K: {details.get('stoch_k', '?')}
-- Объём выше среднего: {details.get('объём_всплеск', False)}
+- Объём всплеск: {details.get('объём_всплеск', False)}
 - QQE: {details.get('qqe', '?')}
 
-Стратегия: спот-скальпинг, TP={TP_PERCENT}%, SL={SL_PERCENT}%. Входить только при сильном стечении факторов.
+Стратегия: спот-скальпинг, TP=0.8%, SL=1.0%. Входить только при сильном стечении факторов.
 
 Ответь ТОЛЬКО валидным JSON без markdown:
 {{"action": "buy" или "wait", "confidence": 0.0-1.0, "reasoning": "одно предложение"}}"""
 
-    headers = {
-        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": AI_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1,
-        "max_tokens": 150,
-    }
-    try:
-        resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=12)
-        if resp.status_code == 200:
-            content = resp.json()["choices"][0]["message"]["content"].strip()
-            if content.startswith("```"):
-                content = content.split("```")[1]
-                if content.startswith("json"):
-                    content = content[4:]
-            s, e = content.find("{"), content.rfind("}") + 1
-            if s != -1:
-                data = json.loads(content[s:e])
-                return (data.get("action", "wait"),
-                        float(data.get("confidence", 0)),
-                        data.get("reasoning", ""))
-        else:
-            log.warning(f"ИИ вернул HTTP {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log.warning(f"Ошибка ИИ: {e}")
+            headers = {
+                "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": 150,
+            }
+            resp = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers, json=payload, timeout=12
+            )
+            if resp.status_code == 200:
+                content = resp.json()["choices"][0]["message"]["content"].strip()
+                if content.startswith("```"):
+                    content = content.split("```")[1]
+                    if content.startswith("json"):
+                        content = content[4:]
+                s, e = content.find("{"), content.rfind("}") + 1
+                if s != -1:
+                    data = json.loads(content[s:e])
+                    action = data.get("action", "wait")
+                    confidence = float(data.get("confidence", 0))
+                    reasoning = data.get("reasoning", "")
+                    # успех
+                    if CACHE_WORKING_MODEL:
+                        _working_model = model
+                        stats["ai_модель"] = model
+                        stats["ai_статус"] = "ok"
+                    log.debug(f"  ✅ Модель {model} ответила: {action} ({confidence:.2f})")
+                    return action, confidence, reasoning
+                else:
+                    log.warning(f"  ❌ Модель {model} вернула невалидный JSON: {content[:100]}")
+            else:
+                log.warning(f"  ❌ Модель {model} вернула HTTP {resp.status_code}: {resp.text[:100]}")
+                stats["ai_статус"] = f"ошибка {resp.status_code}"
+        except Exception as e:
+            log.warning(f"  ❌ Ошибка модели {model}: {e}")
+            stats["ai_статус"] = str(e)[:50]
+            continue
+
+    log.error("  ❌ Все модели ИИ недоступны. Возвращаем wait.")
+    stats["ai_статус"] = "нет доступных моделей"
     return "wait", 0.0, "ИИ недоступен"
 
 # ─────────────────────────────────────────────────────────────
 #  ТОРГОВЫЕ ФУНКЦИИ
 # ─────────────────────────────────────────────────────────────
+def рассчитать_размер_входа(баланс_usdt: float) -> float:
+    total_factor = 1 + MARTINGALE_FACTOR + MARTINGALE_FACTOR ** 2
+    amount = min(баланс_usdt * 0.15, баланс_usdt / total_factor * 0.9)
+    return round(max(2.0, min(20.0, amount)), 2)
+
 def купить(symbol, amount_usdt):
     price = exchange.fetch_ticker(symbol)["last"]
     qty = amount_usdt / price
@@ -446,7 +496,7 @@ def продать_по_рынку(symbol, qty, причина=""):
     except Exception as e:
         log.warning(f"  Ошибка продажи: {e}")
 
-def отменить_все_ордера_по_паре(symbol):
+def отменить_ордера_по_паре(symbol):
     try:
         ордера = exchange.fetch_open_orders(symbol)
         for ордер in ордера:
@@ -469,7 +519,7 @@ def мониторить_позицию(symbol, entry_price, qty, открыта
         сейчас = time.time()
         if сейчас >= deadline_24ч:
             log.warning("  🔴 ДЕДЛАЙН 24 ЧАСА — принудительное закрытие позиции!")
-            отменить_все_ордера_по_паре(symbol)
+            отменить_ордера_по_паре(symbol)
             остаток = баланс_монеты(symbol)
             if остаток > 0:
                 продать_по_рынку(symbol, остаток, "дедлайн 24ч")
@@ -480,7 +530,7 @@ def мониторить_позицию(symbol, entry_price, qty, открыта
 
         if сейчас >= deadline_обычный:
             log.info("  ⏰ Таймаут 10 мин — закрываем позицию")
-            отменить_все_ордера_по_паре(symbol)
+            отменить_ордера_по_паре(symbol)
             остаток = баланс_монеты(symbol)
             if остаток > 0:
                 продать_по_рынку(symbol, остаток, "таймаут 10 мин")
@@ -495,22 +545,16 @@ def мониторить_позицию(symbol, entry_price, qty, открыта
 
             cur = exchange.fetch_ticker(symbol)["last"]
             pnl = (cur - entry_price) / entry_price * 100
-            прошло_мин = (time.time() - открыта_в) / 60
-            if прошло_мин >= 60:
-                log.debug(f"  {symbol} P&L: {pnl:+.2f}%  держим {прошло_мин/60:.1f}ч")
-            else:
-                log.debug(f"  {symbol} P&L: {pnl:+.2f}%  держим {прошло_мин:.0f} мин")
-
             if pnl <= -SL_PERCENT:
                 log.info(f"  ❌ Стоп-лосс! Убыток {pnl:.2f}%")
-                отменить_все_ордера_по_паре(symbol)
+                отменить_ордера_по_паре(symbol)
                 продать_по_рынку(symbol, бал, "стоп-лосс")
                 return "sl"
         except Exception as e:
             log.warning(f"  Ошибка мониторинга: {e}")
 
 # ─────────────────────────────────────────────────────────────
-#  ОТЧЁТЫ И АДАПТАЦИЯ
+#  ОТЧЁТЫ
 # ─────────────────────────────────────────────────────────────
 def печатать_отчёт():
     сейчас = баланс_usdt()
@@ -540,6 +584,9 @@ def печатать_отчёт():
     log.info(f"  💰 Прибыль:          +{stats['прибыль_usdt']:.4f} USDT")
     log.info(f"  💸 Убыток:           -{stats['убыток_usdt']:.4f} USDT")
     log.info(f"  📈 Чистый P&L:        {'+' if чистый >= 0 else ''}{чистый:.4f} USDT")
+    log.info("  ──────────────────────────────────────────────────")
+    log.info(f"  🤖 ИИ модель:         {stats['ai_модель'] or 'не определена'}")
+    log.info(f"  🤖 ИИ статус:         {stats['ai_статус']}")
     log.info("=" * 58)
     log.info("")
 
@@ -559,16 +606,14 @@ def скорректировать_риск(баланс: float):
         MIN_SCORE = 72
         log.info(f"  ℹ️  Депозит ниже старта на {abs(изм):.1f}% — MIN_SCORE повышен до 72")
     else:
-        MIN_SCORE = 65
-        log.info(f"  ✅ Депозит в норме ({'+' if изм >= 0 else ''}{изм:.1f}%) — штатный режим, MIN_SCORE=65")
+        MIN_SCORE = 50
+        log.info(f"  ✅ Депозит в норме ({'+' if изм >= 0 else ''}{изм:.1f}%) — штатный режим, MIN_SCORE=50")
 
 # ─────────────────────────────────────────────────────────────
-#  ОСНОВНОЙ ЦИКЛ
+#  ГЛАВНЫЙ ЦИКЛ
 # ─────────────────────────────────────────────────────────────
 def main():
-    # --- ПОЛНАЯ ИНВЕНТАРИЗАЦИЯ ПРИ СТАРТЕ ---
     полная_инвентаризация()
-    # ---------------------------------------
 
     восстановлен = загрузить_состояние()
     баланс_сейчас = баланс_usdt()
@@ -590,10 +635,8 @@ def main():
     log.info(f"  Баланс:               {баланс_сейчас:.2f} USDT")
     log.info(f"  Стартовый депозит:    {stats['депозит_старт']:.2f} USDT")
     log.info(f"  Пар для торговли:     {len(SYMBOLS)}")
-    log.info(f"  Таймаут позиции:      10 мин  /  жёсткий дедлайн: 24 ч")
-    log.info(f"  ИИ модель:            {AI_MODEL}")
-    if восстановлен:
-        log.info("  ♻️  Состояние восстановлено — продолжаем с прошлой сессии")
+    log.info(f"  MIN_SCORE:            {MIN_SCORE}")
+    log.info(f"  ИИ модель:            {'вкл (перебор ' + str(len(AI_MODELS)) + ' моделей)' if USE_AI else 'выкл'}")
     log.info("=" * 58)
     log.info("")
 
