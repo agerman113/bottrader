@@ -12,11 +12,12 @@ from datetime import datetime
 load_dotenv()
 
 # ─────────────────────────────────────────────────────────────
-#  LOGGING
+#  ЛОГИРОВАНИЕ
 # ─────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%d.%m.%Y %H:%M:%S",
     handlers=[
         logging.StreamHandler(),
         logging.FileHandler("bot.log", encoding="utf-8"),
@@ -25,24 +26,34 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────
-#  SETTINGS
+#  НАСТРОЙКИ
 # ─────────────────────────────────────────────────────────────
-SYMBOLS          = ["PEPE/USDT", "DOGE/USDT", "SHIB/USDT", "FLOKI/USDT", "BONK/USDT"]
-INITIAL_AMOUNT   = 6.0          # USDT on first entry
-MARTINGALE_FACTOR = 1.35
-MAX_STEPS        = 2            # max martingale doubles (0 = off)
-TP_PERCENT       = 0.8          # take-profit %
-SL_PERCENT       = 1.0          # stop-loss %
-TIMEFRAME_TA     = "5m"
-TIMEFRAME_TREND  = "1h"
-SCAN_INTERVAL    = 300          # seconds between scans
-MIN_SCORE        = 65           # minimum TA score to consider entry (0-100)
-AI_MODEL         = "deepseek/deepseek-v4-flash:free"
-AI_CONFIDENCE_THRESHOLD = 0.60
-TRADE_TIMEOUT    = 600          # max seconds to hold a position
+SYMBOLS = [
+    # Мемкоины
+    "PEPE/USDT", "DOGE/USDT", "SHIB/USDT", "FLOKI/USDT", "BONK/USDT",
+    "WIF/USDT",  "MEME/USDT", "BOME/USDT", "NEIRO/USDT", "DOGS/USDT",
+    # Альткоины с высокой ликвидностью
+    "SOL/USDT",  "AVAX/USDT", "MATIC/USDT", "LTC/USDT",  "LINK/USDT",
+    "DOT/USDT",  "ADA/USDT",  "TRX/USDT",  "XRP/USDT",  "TON/USDT",
+]
+
+MARTINGALE_FACTOR  = 1.35
+MAX_STEPS          = 2
+TP_PERCENT         = 0.8
+SL_PERCENT         = 1.0
+TIMEFRAME_TA       = "5m"
+TIMEFRAME_TREND    = "1h"
+SCAN_INTERVAL      = 300        # секунд между сканированиями
+MIN_SCORE          = 65         # минимальный ТА-скор
+AI_MODEL           = "deepseek/deepseek-v4-flash:free"
+AI_CONFIDENCE_MIN  = 0.60
+TRADE_TIMEOUT      = 600        # обычный таймаут позиции (10 мин)
+TRADE_MAX_LIFETIME = 86400      # жёсткий дедлайн позиции (24 часа)
+REPORT_INTERVAL    = 1800       # отчёт каждые 30 минут
+STATE_FILE         = "state.json"
 
 # ─────────────────────────────────────────────────────────────
-#  EXCHANGE
+#  БИРЖА
 # ─────────────────────────────────────────────────────────────
 exchange = ccxt.bybit({
     "apiKey":    os.getenv("BYBIT_API_KEY"),
@@ -51,279 +62,253 @@ exchange = ccxt.bybit({
     "options": {"defaultType": "spot"},
 })
 
+# ─────────────────────────────────────────────────────────────
+#  СТАТИСТИКА
+# ─────────────────────────────────────────────────────────────
+stats = {
+    "запусков":           0,
+    "сделок_всего":       0,
+    "тейкпрофит":         0,
+    "стоплосс":           0,
+    "таймаут":            0,
+    "дедлайн_24ч":        0,
+    "мартингейл_шагов":   0,
+    "прибыль_usdt":       0.0,
+    "убыток_usdt":        0.0,
+    "депозит_старт":      0.0,
+    "депозит_текущий":    0.0,
+    "старт_время":        "",
+    "последний_отчёт":    0.0,
+}
+
 
 # ─────────────────────────────────────────────────────────────
-#  INDICATOR HELPERS  (replicate DIY Custom Strategy Builder)
+#  СОСТОЯНИЕ
 # ─────────────────────────────────────────────────────────────
 
-def _ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False).mean()
+def сохранить_состояние():
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(stats, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.warning(f"Не удалось сохранить состояние: {e}")
 
 
-def _rma(series: pd.Series, span: int) -> pd.Series:
-    """Wilder's smoothing (RMA) — used in RSI and ATR."""
-    alpha = 1 / span
-    return series.ewm(alpha=alpha, adjust=False).mean()
+def загрузить_состояние():
+    global stats
+    if not os.path.exists(STATE_FILE):
+        return False
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        for key in ["сделок_всего", "тейкпрофит", "стоплосс", "таймаут",
+                    "дедлайн_24ч", "мартингейл_шагов", "прибыль_usdt",
+                    "убыток_usdt", "депозит_старт", "старт_время"]:
+            if key in saved:
+                stats[key] = saved[key]
+        log.info(f"  Состояние восстановлено из {STATE_FILE}")
+        return True
+    except Exception as e:
+        log.warning(f"Не удалось загрузить состояние: {e}")
+        return False
 
 
-def calc_rsi(close: pd.Series, period: int = 14) -> pd.Series:
-    delta = close.diff()
-    gain  = delta.clip(lower=0)
-    loss  = (-delta).clip(lower=0)
-    avg_gain = _rma(gain, period)
-    avg_loss = _rma(loss, period)
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+# ─────────────────────────────────────────────────────────────
+#  ИНДИКАТОРЫ
+# ─────────────────────────────────────────────────────────────
 
+def _ema(s, span):
+    return s.ewm(span=span, adjust=False).mean()
 
-def calc_macd(close: pd.Series, fast=12, slow=26, signal=9):
-    macd_line   = _ema(close, fast) - _ema(close, slow)
-    signal_line = _ema(macd_line, signal)
-    histogram   = macd_line - signal_line
-    return macd_line, signal_line, histogram
+def _rma(s, span):
+    return s.ewm(alpha=1 / span, adjust=False).mean()
 
+def calc_rsi(close, period=14):
+    d = close.diff()
+    return 100 - (100 / (1 + _rma(d.clip(lower=0), period) /
+                         _rma((-d).clip(lower=0), period).replace(0, np.nan)))
 
-def calc_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    hi, lo, prev_close = df["h"], df["l"], df["c"].shift(1)
-    tr = pd.concat([hi - lo, (hi - prev_close).abs(), (lo - prev_close).abs()], axis=1).max(axis=1)
+def calc_macd(close, fast=12, slow=26, signal=9):
+    ml = _ema(close, fast) - _ema(close, slow)
+    sl = _ema(ml, signal)
+    return ml, sl, ml - sl
+
+def calc_atr(df, period=14):
+    hi, lo, pc = df["h"], df["l"], df["c"].shift(1)
+    tr = pd.concat([hi - lo, (hi - pc).abs(), (lo - pc).abs()], axis=1).max(axis=1)
     return _rma(tr, period)
 
-
-def calc_range_filter(df: pd.DataFrame, period: int = 200, qty: float = 3.0):
-    """
-    Simplified Python port of the Range Filter from the DIY indicator.
-    Returns (filt, hi_band, lo_band, upward, downward) as Series.
-    """
+def calc_range_filter(df, period=200, qty=3.0):
     close = df["c"]
-    atr   = calc_atr(df, period)
-    rng   = qty * atr
-
-    filt = close.copy()
+    rng   = qty * calc_atr(df, period)
+    filt  = close.copy()
     for i in range(1, len(close)):
-        c  = close.iloc[i]
-        r  = rng.iloc[i]
-        pf = filt.iloc[i - 1]
-        if   c - r > pf:  filt.iloc[i] = c - r
-        elif c + r < pf:  filt.iloc[i] = c + r
-        else:             filt.iloc[i] = pf
+        c, r, pf = close.iloc[i], rng.iloc[i], filt.iloc[i - 1]
+        filt.iloc[i] = c - r if c - r > pf else (c + r if c + r < pf else pf)
+    up   = (filt > filt.shift(1)) & (close > filt)
+    down = (filt < filt.shift(1)) & (close < filt)
+    return filt, filt + rng, filt - rng, up, down
 
-    hi_band = filt + rng
-    lo_band = filt - rng
-
-    upward   = (filt > filt.shift(1)) & (close > filt)
-    downward = (filt < filt.shift(1)) & (close < filt)
-    return filt, hi_band, lo_band, upward, downward
-
-
-def calc_supertrend(df: pd.DataFrame, period: int = 10, mult: float = 3.0):
-    atr  = calc_atr(df, period)
-    hl2  = (df["h"] + df["l"]) / 2
-    upper_basic = hl2 + mult * atr
-    lower_basic = hl2 - mult * atr
-
-    upper = upper_basic.copy()
-    lower = lower_basic.copy()
+def calc_supertrend(df, period=10, mult=3.0):
+    atr = calc_atr(df, period)
+    hl2 = (df["h"] + df["l"]) / 2
+    ub  = (hl2 + mult * atr).copy()
+    lb  = (hl2 - mult * atr).copy()
     trend = pd.Series(1, index=df.index)
-
     for i in range(1, len(df)):
-        c    = df["c"].iloc[i]
-        pc   = df["c"].iloc[i - 1]
-        pu   = upper.iloc[i - 1]
-        pl   = lower.iloc[i - 1]
-        pt   = trend.iloc[i - 1]
+        c, pc = df["c"].iloc[i], df["c"].iloc[i - 1]
+        pu, pl, pt = ub.iloc[i - 1], lb.iloc[i - 1], trend.iloc[i - 1]
+        ub.iloc[i] = ub.iloc[i] if ub.iloc[i] < pu or pc > pu else pu
+        lb.iloc[i] = lb.iloc[i] if lb.iloc[i] > pl or pc < pl else pl
+        trend.iloc[i] = (-1 if pt == 1 and c < lb.iloc[i] else
+                         (1 if pt == -1 and c > ub.iloc[i] else pt))
+    return trend == 1, trend == -1
 
-        upper.iloc[i] = upper_basic.iloc[i] if upper_basic.iloc[i] < pu or pc > pu else pu
-        lower.iloc[i] = lower_basic.iloc[i] if lower_basic.iloc[i] > pl or pc < pl else pl
+def calc_stochastic(df, k=14, d=3, smooth=3):
+    lo  = df["l"].rolling(k).min()
+    hi  = df["h"].rolling(k).max()
+    ks  = (100 * (df["c"] - lo) / (hi - lo + 1e-10)).rolling(smooth).mean()
+    return ks, ks.rolling(d).mean()
 
-        if   pt ==  1 and c < lower.iloc[i]:  trend.iloc[i] = -1
-        elif pt == -1 and c > upper.iloc[i]:  trend.iloc[i] =  1
-        else:                                  trend.iloc[i] =  pt
+def calc_qqe(close, rsi_period=14, sf=5, qq_factor=4.236):
+    rsi_s = _ema(calc_rsi(close, rsi_period), sf)
+    _ema((rsi_s - rsi_s.shift(1)).abs(), rsi_period * 2)
+    return rsi_s > 50, rsi_s < 50
 
-    is_up   = trend ==  1
-    is_down = trend == -1
-    return is_up, is_down
+def calc_hull(close, period=55):
+    hma = _ema(2 * _ema(close, period // 2) - _ema(close, period), int(np.sqrt(period)))
+    return hma > hma.shift(2), hma < hma.shift(2)
 
-
-def calc_stochastic(df: pd.DataFrame, k=14, d=3, smooth=3):
-    lowest  = df["l"].rolling(k).min()
-    highest = df["h"].rolling(k).max()
-    k_line  = 100 * (df["c"] - lowest) / (highest - lowest + 1e-10)
-    k_smooth = k_line.rolling(smooth).mean()
-    d_line   = k_smooth.rolling(d).mean()
-    return k_smooth, d_line
-
-
-def calc_qqe(close: pd.Series, rsi_period=14, sf=5, qq_factor=4.236):
-    """Simplified QQE Mod signal direction."""
-    rsi        = calc_rsi(close, rsi_period)
-    rsi_smooth = _ema(rsi, sf)
-    tr_rsi     = (rsi_smooth - rsi_smooth.shift(1)).abs()
-    atr_rsi    = _ema(tr_rsi, rsi_period * 2)
-    threshold  = qq_factor * atr_rsi
-    upper = rsi_smooth + threshold
-    lower = rsi_smooth - threshold
-    is_long  = rsi_smooth > 50
-    is_short = rsi_smooth < 50
-    return is_long, is_short
-
-
-def calc_hull_suite(close: pd.Series, period: int = 55):
-    half  = _ema(close, period // 2)
-    full  = _ema(close, period)
-    delta = 2 * half - full
-    hma   = _ema(delta, int(np.sqrt(period)))
-    is_up   = hma > hma.shift(2)
-    is_down = hma < hma.shift(2)
-    return is_up, is_down
-
-
-def calc_adx(df: pd.DataFrame, period: int = 14):
-    atr   = calc_atr(df, period)
-    plus_dm  = (df["h"] - df["h"].shift(1)).clip(lower=0)
-    minus_dm = (df["l"].shift(1) - df["l"]).clip(lower=0)
-    # zero out when the other is larger
-    mask = plus_dm < minus_dm;  plus_dm[mask]  = 0
-    mask = minus_dm < plus_dm;  minus_dm[mask] = 0
-
-    plus_di  = 100 * _rma(plus_dm,  period) / atr.replace(0, np.nan)
-    minus_di = 100 * _rma(minus_dm, period) / atr.replace(0, np.nan)
-    dx       = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
-    adx      = _rma(dx, period)
-    return adx, plus_di, minus_di
+def calc_adx(df, period=14):
+    atr = calc_atr(df, period)
+    pdm = (df["h"] - df["h"].shift(1)).clip(lower=0)
+    mdm = (df["l"].shift(1) - df["l"]).clip(lower=0)
+    pdm[pdm < mdm] = 0
+    mdm[mdm < pdm] = 0
+    pdi = 100 * _rma(pdm, period) / atr.replace(0, np.nan)
+    mdi = 100 * _rma(mdm, period) / atr.replace(0, np.nan)
+    adx = _rma(100 * (pdi - mdi).abs() / (pdi + mdi + 1e-10), period)
+    return adx, pdi, mdi
 
 
 # ─────────────────────────────────────────────────────────────
-#  COMPOSITE TECHNICAL SCORE  (0-100)
+#  АВТОКАЛИБРОВКА СУММЫ ВХОДА
 # ─────────────────────────────────────────────────────────────
 
-def get_technical_score(symbol: str) -> dict:
-    """
-    Runs a suite of indicators inspired by the DIY Custom Strategy Builder.
-    Returns {'score': int, 'details': dict} where score ∈ [0, 100].
-    """
+def рассчитать_размер_входа(баланс_usdt: float) -> float:
+    """15% депозита, с запасом на полный мартингейл. Мин 2, макс 20 USDT."""
+    total_factor = 1 + MARTINGALE_FACTOR + MARTINGALE_FACTOR ** 2
+    amount = min(баланс_usdt * 0.15, баланс_usdt / total_factor * 0.9)
+    return round(max(2.0, min(20.0, amount)), 2)
+
+
+# ─────────────────────────────────────────────────────────────
+#  ТЕХНИЧЕСКИЙ СКОР  (0–100)
+# ─────────────────────────────────────────────────────────────
+
+def получить_скор(symbol: str) -> dict:
     details = {}
     score   = 0
-
+    price   = 0
     try:
-        # ── Fetch candles ──────────────────────────────────────
-        raw_5m = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=300)
-        raw_1h = exchange.fetch_ohlcv(symbol, TIMEFRAME_TREND, limit=300)
-        if len(raw_5m) < 100 or len(raw_1h) < 100:
-            return {"score": 0, "details": {}}
+        raw5  = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA,    limit=300)
+        raw1h = exchange.fetch_ohlcv(symbol, TIMEFRAME_TREND, limit=300)
+        if len(raw5) < 100 or len(raw1h) < 100:
+            return {"score": 0, "details": {}, "price": 0}
 
         cols = ["ts", "o", "h", "l", "c", "v"]
-        df5  = pd.DataFrame(raw_5m, columns=cols).reset_index(drop=True)
-        df1h = pd.DataFrame(raw_1h, columns=cols).reset_index(drop=True)
+        df5  = pd.DataFrame(raw5,  columns=cols).reset_index(drop=True)
+        df1h = pd.DataFrame(raw1h, columns=cols).reset_index(drop=True)
+        c5, c1h = df5["c"], df1h["c"]
 
-        close5  = df5["c"]
-        close1h = df1h["c"]
-
-        # ── 1. RSI (5m) — 20 pts ──────────────────────────────
-        rsi = calc_rsi(close5)
-        rsi_val = rsi.iloc[-1]
+        # RSI — 20 очков
+        rsi_val = calc_rsi(c5).iloc[-1]
         details["rsi"] = round(rsi_val, 1)
-        if   rsi_val < 30:  rsi_pts = 20
-        elif rsi_val < 45:  rsi_pts = 10
-        elif rsi_val > 70:  rsi_pts = -5
-        else:               rsi_pts = 5
-        score += rsi_pts
+        score += (20 if rsi_val < 30 else 10 if rsi_val < 45 else -5 if rsi_val > 70 else 5)
 
-        # ── 2. MACD (5m) — 15 pts ─────────────────────────────
-        macd, sig, hist = calc_macd(close5)
-        macd_bull = macd.iloc[-1] > sig.iloc[-1]
-        macd_cross = macd.iloc[-1] > sig.iloc[-1] and macd.iloc[-2] <= sig.iloc[-2]
-        details["macd_bullish"] = macd_bull
-        macd_pts = 15 if macd_cross else (8 if macd_bull else 0)
-        score += macd_pts
+        # MACD — 15 очков
+        ml, sl, _ = calc_macd(c5)
+        macd_bull  = ml.iloc[-1] > sl.iloc[-1]
+        macd_cross = macd_bull and ml.iloc[-2] <= sl.iloc[-2]
+        details["macd"] = "бычий" if macd_bull else "медвежий"
+        score += 15 if macd_cross else (8 if macd_bull else 0)
 
-        # ── 3. Range Filter (5m) — 15 pts ─────────────────────
-        filt, hi_b, lo_b, rf_up, rf_dn = calc_range_filter(df5)
-        rf_long = rf_up.iloc[-1]
-        details["range_filter"] = "up" if rf_long else "down"
-        score += 15 if rf_long else 0
+        # Range Filter — 15 очков
+        _, _, _, rf_up, _ = calc_range_filter(df5)
+        details["range_filter"] = "вверх" if rf_up.iloc[-1] else "вниз"
+        score += 15 if rf_up.iloc[-1] else 0
 
-        # ── 4. Supertrend (5m) — 10 pts ───────────────────────
-        st_up, st_dn = calc_supertrend(df5)
-        details["supertrend"] = "up" if st_up.iloc[-1] else "down"
+        # Supertrend — 10 очков
+        st_up, _ = calc_supertrend(df5)
+        details["supertrend"] = "вверх" if st_up.iloc[-1] else "вниз"
         score += 10 if st_up.iloc[-1] else 0
 
-        # ── 5. Hull Suite (5m) — 10 pts ───────────────────────
-        hu_up, hu_dn = calc_hull_suite(close5)
-        details["hull"] = "up" if hu_up.iloc[-1] else "down"
+        # Hull Suite — 10 очков
+        hu_up, _ = calc_hull(c5)
+        details["hull"] = "вверх" if hu_up.iloc[-1] else "вниз"
         score += 10 if hu_up.iloc[-1] else 0
 
-        # ── 6. EMA trend (1h) — 10 pts ────────────────────────
-        ema50_1h  = _ema(close1h, 50).iloc[-1]
-        ema200_1h = _ema(close1h, 200).iloc[-1]
-        trend_bull = ema50_1h > ema200_1h
-        details["ema_trend_1h"] = "bullish" if trend_bull else "bearish"
+        # EMA тренд 1h — 10 очков
+        trend_bull = _ema(c1h, 50).iloc[-1] > _ema(c1h, 200).iloc[-1]
+        details["тренд_1h"] = "бычий" if trend_bull else "медвежий"
         score += 10 if trend_bull else 0
 
-        # ── 7. ADX (5m) — 5 pts ───────────────────────────────
-        adx, plus_di, minus_di = calc_adx(df5)
-        adx_val = adx.iloc[-1]
-        adx_trending = adx_val > 20 and plus_di.iloc[-1] > minus_di.iloc[-1]
-        details["adx"] = round(adx_val, 1)
-        score += 5 if adx_trending else 0
+        # ADX — 5 очков
+        adx, pdi, mdi = calc_adx(df5)
+        details["adx"] = round(adx.iloc[-1], 1)
+        score += 5 if adx.iloc[-1] > 20 and pdi.iloc[-1] > mdi.iloc[-1] else 0
 
-        # ── 8. Stochastic (5m) — 5 pts ────────────────────────
-        k, d = calc_stochastic(df5)
-        stoch_bull = k.iloc[-1] < 30 or (k.iloc[-1] > d.iloc[-1] and k.iloc[-1] < 50)
+        # Stochastic — 5 очков
+        k, _ = calc_stochastic(df5)
         details["stoch_k"] = round(k.iloc[-1], 1)
-        score += 5 if stoch_bull else 0
+        score += 5 if k.iloc[-1] < 30 else 0
 
-        # ── 9. Volume surge — 5 pts ───────────────────────────
-        avg_vol  = df5["v"].rolling(20).mean().iloc[-1]
-        last_vol = df5["v"].iloc[-1]
-        vol_surge = last_vol > avg_vol * 1.2
-        details["volume_surge"] = vol_surge
+        # Объём — 5 очков
+        vol_surge = df5["v"].iloc[-1] > df5["v"].rolling(20).mean().iloc[-1] * 1.2
+        details["объём_всплеск"] = vol_surge
         score += 5 if vol_surge else 0
 
-        # ── 10. QQE (5m) — 5 pts ──────────────────────────────
-        qqe_long, _ = calc_qqe(close5)
-        details["qqe"] = "long" if qqe_long.iloc[-1] else "short"
+        # QQE — 5 очков
+        qqe_long, _ = calc_qqe(c5)
+        details["qqe"] = "лонг" if qqe_long.iloc[-1] else "шорт"
         score += 5 if qqe_long.iloc[-1] else 0
 
-        # Clamp
         score = max(0, min(100, score))
+        price = exchange.fetch_ticker(symbol)["last"]
 
     except Exception as e:
-        log.warning(f"TA error for {symbol}: {e}")
+        log.warning(f"Ошибка анализа {symbol}: {e}")
 
-    return {"score": score, "details": details, "price": exchange.fetch_ticker(symbol)["last"]}
+    return {"score": score, "details": details, "price": price}
 
 
 # ─────────────────────────────────────────────────────────────
-#  AI FILTER  (OpenRouter — deepseek-v4-flash:free)
+#  ИИ-ФИЛЬТР
 # ─────────────────────────────────────────────────────────────
 
-def ask_ai(symbol: str, price: float, score: int, details: dict) -> tuple[str, float, str]:
-    """
-    Returns (action, confidence, reasoning).
-    action ∈ {"buy", "wait"}
-    """
-    prompt = f"""You are a crypto scalping assistant. Analyze this real-time data and decide to BUY or WAIT.
+def спросить_ии(symbol, price, score, details) -> tuple:
+    prompt = f"""Ты помощник для крипто-скальпинга. Проанализируй данные и реши: купить (buy) или ждать (wait).
 
-Symbol: {symbol}
-Price: {price}
-TA Score: {score}/100
+Пара: {symbol}
+Цена: {price}
+ТА-скор: {score}/100
 
-Indicators:
-- RSI: {details.get('rsi', 'N/A')} (< 30 oversold, > 70 overbought)
-- MACD: {'bullish' if details.get('macd_bullish') else 'bearish'}
-- Range Filter: {details.get('range_filter', 'N/A')}
-- Supertrend: {details.get('supertrend', 'N/A')}
-- Hull Suite: {details.get('hull', 'N/A')}
-- 1h EMA trend: {details.get('ema_trend_1h', 'N/A')}
-- ADX: {details.get('adx', 'N/A')} (> 20 = trending)
-- Stochastic K: {details.get('stoch_k', 'N/A')}
-- Volume surge: {details.get('volume_surge', False)}
-- QQE: {details.get('qqe', 'N/A')}
+Индикаторы:
+- RSI: {details.get('rsi', '?')} (< 30 = перепроданность)
+- MACD: {details.get('macd', '?')}
+- Range Filter: {details.get('range_filter', '?')}
+- Supertrend: {details.get('supertrend', '?')}
+- Hull Suite: {details.get('hull', '?')}
+- Тренд 1h EMA: {details.get('тренд_1h', '?')}
+- ADX: {details.get('adx', '?')} (> 20 = тренд)
+- Stochastic K: {details.get('stoch_k', '?')}
+- Всплеск объёма: {details.get('объём_всплеск', False)}
+- QQE: {details.get('qqe', '?')}
 
-Strategy: spot scalping, TP={TP_PERCENT}%, SL={SL_PERCENT}%. Enter only on strong confluence.
+Стратегия: спот-скальпинг, TP={TP_PERCENT}%, SL={SL_PERCENT}%. Входить только при сильном стечении факторов.
 
-Respond ONLY with valid JSON (no markdown, no extra text):
-{{"action": "buy" or "wait", "confidence": 0.0-1.0, "reasoning": "one sentence"}}"""
+Ответь ТОЛЬКО валидным JSON без markdown:
+{{"action": "buy" или "wait", "confidence": 0.0-1.0, "reasoning": "одно предложение"}}"""
 
     headers = {
         "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
@@ -342,186 +327,334 @@ Respond ONLY with valid JSON (no markdown, no extra text):
         )
         if resp.status_code == 200:
             content = resp.json()["choices"][0]["message"]["content"].strip()
-            # strip possible markdown code block
             if content.startswith("```"):
                 content = content.split("```")[1]
                 if content.startswith("json"):
                     content = content[4:]
-            start = content.find("{")
-            end   = content.rfind("}") + 1
-            if start != -1:
-                data = json.loads(content[start:end])
-                return (
-                    data.get("action", "wait"),
-                    float(data.get("confidence", 0.0)),
-                    data.get("reasoning", ""),
-                )
+            s, e = content.find("{"), content.rfind("}") + 1
+            if s != -1:
+                data = json.loads(content[s:e])
+                return (data.get("action", "wait"),
+                        float(data.get("confidence", 0)),
+                        data.get("reasoning", ""))
         else:
-            log.warning(f"AI HTTP {resp.status_code}: {resp.text[:200]}")
+            log.warning(f"ИИ вернул HTTP {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
-        log.warning(f"AI error: {e}")
-    return ("wait", 0.0, "AI unavailable")
+        log.warning(f"Ошибка ИИ: {e}")
+    return "wait", 0.0, "ИИ недоступен"
 
 
 # ─────────────────────────────────────────────────────────────
-#  TRADING HELPERS
+#  ТОРГОВЫЕ ФУНКЦИИ
 # ─────────────────────────────────────────────────────────────
 
-def place_buy(symbol: str, amount_usdt: float) -> tuple[float, float]:
-    ticker = exchange.fetch_ticker(symbol)
-    price  = ticker["last"]
-    qty    = amount_usdt / price
-    order  = exchange.create_market_buy_order(symbol, qty)
-    log.info(f"BUY  {qty:.6f} {symbol.split('/')[0]} @ ~{price:.8f}  ({amount_usdt:.2f} USDT)")
+def купить(symbol, amount_usdt):
+    price = exchange.fetch_ticker(symbol)["last"]
+    qty   = amount_usdt / price
+    exchange.create_market_buy_order(symbol, qty)
+    log.info(f"  📈 ПОКУПКА {qty:.6f} {symbol.split('/')[0]} по ~{price:.8f} ({amount_usdt:.2f} USDT)")
     return price, qty
 
-
-def place_tp(symbol: str, qty: float, entry_price: float):
-    tp_price = entry_price * (1 + TP_PERCENT / 100)
+def поставить_тп(symbol, qty, entry_price):
+    tp = entry_price * (1 + TP_PERCENT / 100)
     try:
-        exchange.create_limit_sell_order(symbol, qty, tp_price)
-        log.info(f"TP set @ {tp_price:.8f}")
+        exchange.create_limit_sell_order(symbol, qty, tp)
+        log.info(f"  🎯 Тейк-профит установлен на {tp:.8f}")
     except Exception as e:
-        log.warning(f"Could not set TP limit order: {e}")
+        log.warning(f"  Не удалось поставить TP: {e}")
 
+def продать_по_рынку(symbol, qty, причина=""):
+    try:
+        exchange.create_market_sell_order(symbol, qty)
+        log.info(f"  📉 ПРОДАЖА {qty:.6f} {symbol.split('/')[0]} по рынку{' (' + причина + ')' if причина else ''}")
+    except Exception as e:
+        log.warning(f"  Ошибка продажи: {e}")
 
-def market_sell(symbol: str, qty: float):
-    exchange.create_market_sell_order(symbol, qty)
-    log.info(f"SELL {qty:.6f} {symbol.split('/')[0]} @ market")
+def отменить_все_ордера(symbol):
+    """Отменяет все открытые лимитные ордера по паре (TP лимитки)."""
+    try:
+        открытые = exchange.fetch_open_orders(symbol)
+        for ордер in открытые:
+            exchange.cancel_order(ордер["id"], symbol)
+            log.info(f"  🗑️  Отменён ордер {ордер['id']}")
+    except Exception as e:
+        log.warning(f"  Ошибка отмены ордеров: {e}")
 
+def баланс_монеты(symbol):
+    return exchange.fetch_balance()["free"].get(symbol.split("/")[0], 0.0)
 
-def free_balance(symbol: str) -> float:
-    coin = symbol.split("/")[0]
-    return exchange.fetch_balance()["free"].get(coin, 0.0)
-
-
-def usdt_balance() -> float:
+def баланс_usdt():
     return exchange.fetch_balance()["free"].get("USDT", 0.0)
 
 
 # ─────────────────────────────────────────────────────────────
-#  POSITION MONITOR  (TP / SL / timeout)
+#  МОНИТОРИНГ ПОЗИЦИИ  (обычный таймаут + жёсткий дедлайн 24ч)
 # ─────────────────────────────────────────────────────────────
 
-def monitor_position(symbol: str, entry_price: float, qty: float) -> str:
+def мониторить_позицию(symbol, entry_price, qty, открыта_в: float) -> str:
     """
-    Watches open position until TP, SL, or timeout.
-    Returns 'tp', 'sl', or 'timeout'.
+    Следит за позицией.
+    Уровни закрытия по времени:
+      — TRADE_TIMEOUT (10 мин)  → закрывает по рынку, серия продолжается
+      — TRADE_MAX_LIFETIME (24ч) → жёсткий дедлайн, отменяет все ордера,
+                                   продаёт остаток, серия заканчивается
     """
-    deadline = time.time() + TRADE_TIMEOUT
-    while time.time() < deadline:
+    deadline_обычный  = открыта_в + TRADE_TIMEOUT
+    deadline_24ч      = открыта_в + TRADE_MAX_LIFETIME
+
+    while True:
+        сейчас = time.time()
+
+        # ── Жёсткий дедлайн 24 часа ──────────────────────────
+        if сейчас >= deadline_24ч:
+            log.warning("  🔴 ДЕДЛАЙН 24 ЧАСА — принудительное закрытие позиции!")
+            отменить_все_ордера(symbol)
+            остаток = баланс_монеты(symbol)
+            if остаток > 0:
+                продать_по_рынку(symbol, остаток, "дедлайн 24ч")
+            cur = exchange.fetch_ticker(symbol)["last"]
+            pnl = (cur - entry_price) / entry_price * 100
+            log.warning(f"  Итог за 24ч: {'+' if pnl >= 0 else ''}{pnl:.2f}% от цены входа")
+            return "дедлайн_24ч"
+
+        # ── Обычный 10-минутный таймаут ───────────────────────
+        if сейчас >= deadline_обычный:
+            log.info("  ⏰ Таймаут 10 мин — закрываем позицию")
+            отменить_все_ордера(symbol)
+            остаток = баланс_монеты(symbol)
+            if остаток > 0:
+                продать_по_рынку(symbol, остаток, "таймаут 10 мин")
+            return "timeout"
+
         time.sleep(10)
+
         try:
-            # If coin is gone → TP limit was filled
-            coin_bal = free_balance(symbol)
-            if coin_bal < qty * 0.05:
-                log.info("✅ TP filled!")
+            # ── Проверяем, не сработал ли TP лимиткой ─────────
+            бал = баланс_монеты(symbol)
+            if бал < qty * 0.05:
+                log.info("  ✅ Тейк-профит исполнен!")
                 return "tp"
 
-            cur_price = exchange.fetch_ticker(symbol)["last"]
-            pnl_pct   = (cur_price - entry_price) / entry_price * 100
+            # ── Проверяем стоп-лосс ───────────────────────────
+            cur = exchange.fetch_ticker(symbol)["last"]
+            pnl = (cur - entry_price) / entry_price * 100
 
-            if pnl_pct <= -SL_PERCENT:
-                log.info(f"❌ SL hit  {pnl_pct:.2f}%")
-                market_sell(symbol, coin_bal)
+            прошло_мин = (time.time() - открыта_в) / 60
+            прошло_ч   = прошло_мин / 60
+            if прошло_ч >= 1:
+                log.debug(f"  {symbol}  P&L: {pnl:+.2f}%  держим {прошло_ч:.1f}ч")
+            else:
+                log.debug(f"  {symbol}  P&L: {pnl:+.2f}%  держим {прошло_мин:.0f} мин")
+
+            if pnl <= -SL_PERCENT:
+                log.info(f"  ❌ Стоп-лосс! Убыток {pnl:.2f}%")
+                отменить_все_ордера(symbol)
+                продать_по_рынку(symbol, бал, "стоп-лосс")
                 return "sl"
 
-            log.debug(f"{symbol} P&L: {pnl_pct:+.2f}%")
         except Exception as e:
-            log.warning(f"Monitor error: {e}")
-
-    # Timeout → close
-    log.info("⏰ Timeout — closing position")
-    try:
-        market_sell(symbol, free_balance(symbol))
-    except Exception as e:
-        log.warning(f"Timeout close error: {e}")
-    return "timeout"
+            log.warning(f"  Ошибка мониторинга: {e}")
 
 
 # ─────────────────────────────────────────────────────────────
-#  MAIN LOOP
+#  30-МИНУТНЫЙ ОТЧЁТ
+# ─────────────────────────────────────────────────────────────
+
+def печатать_отчёт():
+    сейчас  = баланс_usdt()
+    старт   = stats["депозит_старт"]
+    дельта  = сейчас - старт
+    знак    = "+" if дельта >= 0 else ""
+    чистый  = stats["прибыль_usdt"] - stats["убыток_usdt"]
+    процент = (дельта / старт * 100) if старт > 0 else 0
+
+    log.info("")
+    log.info("=" * 58)
+    log.info("  📊  ОТЧЁТ ЗА СЕССИЮ")
+    log.info(f"  Время:                {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+    log.info(f"  Работает с:           {stats['старт_время']}")
+    log.info("  ──────────────────────────────────────────────────")
+    log.info(f"  Депозит при старте:   {старт:.2f} USDT")
+    log.info(f"  Баланс сейчас:        {сейчас:.2f} USDT  ({знак}{дельта:.2f})")
+    log.info(f"  Изменение депозита:   {знак}{процент:.2f}%")
+    log.info("  ──────────────────────────────────────────────────")
+    log.info(f"  Сделок проведено:     {stats['сделок_всего']}")
+    log.info(f"  ✅ Тейк-профит:       {stats['тейкпрофит']}")
+    log.info(f"  ❌ Стоп-лосс:         {stats['стоплосс']}")
+    log.info(f"  ⏰ Таймаут 10 мин:    {stats['таймаут']}")
+    log.info(f"  🔴 Дедлайн 24 часа:   {stats['дедлайн_24ч']}")
+    log.info(f"  🔁 Шагов мартингейла: {stats['мартингейл_шагов']}")
+    log.info("  ──────────────────────────────────────────────────")
+    log.info(f"  💰 Прибыль:          +{stats['прибыль_usdt']:.4f} USDT")
+    log.info(f"  💸 Убыток:           -{stats['убыток_usdt']:.4f} USDT")
+    log.info(f"  📈 Чистый P&L:        {'+' if чистый >= 0 else ''}{чистый:.4f} USDT")
+    log.info("=" * 58)
+    log.info("")
+
+    stats["последний_отчёт"] = time.time()
+    сохранить_состояние()
+
+
+# ─────────────────────────────────────────────────────────────
+#  АВТОКОРРЕКТИРОВКА РИСКА
+# ─────────────────────────────────────────────────────────────
+
+def скорректировать_риск(баланс: float):
+    global MIN_SCORE
+    старт = stats["депозит_старт"]
+    if старт == 0:
+        return
+    изм = (баланс - старт) / старт * 100
+    if изм < -30:
+        MIN_SCORE = 80
+        log.warning(f"  ⚠️  Депозит упал на {abs(изм):.1f}% — режим осторожности, MIN_SCORE=80")
+    elif изм < -15:
+        MIN_SCORE = 72
+        log.info(f"  ℹ️  Депозит ниже старта на {abs(изм):.1f}% — MIN_SCORE повышен до 72")
+    else:
+        MIN_SCORE = 65
+        log.info(f"  ✅ Депозит в норме ({'+' if изм >= 0 else ''}{изм:.1f}%) — штатный режим, MIN_SCORE=65")
+
+
+# ─────────────────────────────────────────────────────────────
+#  ГЛАВНЫЙ ЦИКЛ
 # ─────────────────────────────────────────────────────────────
 
 def main():
-    log.info("=" * 60)
-    log.info("  BOT STARTED")
-    log.info(f"  Symbols : {SYMBOLS}")
-    log.info(f"  Deposit : {usdt_balance():.2f} USDT")
-    log.info(f"  Model   : {AI_MODEL}")
-    log.info("=" * 60)
+    восстановлен = загрузить_состояние()
+    баланс_сейчас = баланс_usdt()
+    stats["запусков"] += 1
+
+    if not восстановлен or stats["депозит_старт"] == 0:
+        stats["депозит_старт"] = баланс_сейчас
+        stats["старт_время"]   = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+
+    stats["депозит_текущий"] = баланс_сейчас
+    stats["последний_отчёт"] = time.time()
+
+    log.info("")
+    log.info("=" * 58)
+    log.info("  🤖  БОТ ЗАПУЩЕН")
+    log.info(f"  Запуск №:             {stats['запусков']}")
+    log.info(f"  Дата/время:           {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+    log.info(f"  Работает с:           {stats['старт_время']}")
+    log.info(f"  Баланс:               {баланс_сейчас:.2f} USDT")
+    log.info(f"  Стартовый депозит:    {stats['депозит_старт']:.2f} USDT")
+    log.info(f"  Пар для торговли:     {len(SYMBOLS)}")
+    log.info(f"  Таймаут позиции:      10 мин  /  жёсткий дедлайн: 24 ч")
+    log.info(f"  ИИ модель:            {AI_MODEL}")
+    if восстановлен:
+        log.info("  ♻️  Состояние восстановлено — продолжаем с прошлой сессии")
+    log.info("=" * 58)
+    log.info("")
+
+    скорректировать_риск(баланс_сейчас)
 
     while True:
         try:
-            # ── 1. Score all symbols ──────────────────────────
-            log.info("── Scanning ──")
+            # ── Периодический отчёт ───────────────────────────
+            if time.time() - stats["последний_отчёт"] >= REPORT_INTERVAL:
+                печатать_отчёт()
+
+            # ── 1. Рассчитываем размер входа ──────────────────
+            баланс = баланс_usdt()
+            первый_вход = рассчитать_размер_входа(баланс)
+
+            # ── 2. Скорим все пары ────────────────────────────
+            log.info(f"── Сканирование {len(SYMBOLS)} пар ──")
             scores = {}
             for sym in SYMBOLS:
-                result = get_technical_score(sym)
-                scores[sym] = result
+                res = получить_скор(sym)
+                scores[sym] = res
                 log.info(
-                    f"  {sym:15s}  score={result['score']:3d}/100  "
-                    f"rsi={result['details'].get('rsi','?')}  "
-                    f"rf={result['details'].get('range_filter','?')}  "
-                    f"st={result['details'].get('supertrend','?')}"
+                    f"  {sym:12s}  скор={res['score']:3d}/100  "
+                    f"rsi={res['details'].get('rsi','?'):5}  "
+                    f"rf={res['details'].get('range_filter','?'):5}  "
+                    f"тренд={res['details'].get('тренд_1h','?')}"
                 )
 
-            # Best candidate
-            best = max(scores, key=lambda s: scores[s]["score"])
-            best_score   = scores[best]["score"]
-            best_details = scores[best]["details"]
-            best_price   = scores[best]["price"]
-
-            if best_score < MIN_SCORE:
-                log.info(f"  Best score {best_score} < {MIN_SCORE} — waiting {SCAN_INTERVAL}s")
+            # Фильтруем пары которые вообще прошли порог
+            прошедшие = {s: v for s, v in scores.items() if v["score"] >= MIN_SCORE}
+            if not прошедшие:
+                лучший_скор = max(scores.values(), key=lambda x: x["score"])["score"]
+                log.info(f"  Ни одна пара не прошла порог {MIN_SCORE} (лучший скор: {лучший_скор}) — ждём {SCAN_INTERVAL} сек")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            log.info(f"  ► Selected {best}  score={best_score}")
+            # Берём лучшую
+            лучшая = max(прошедшие, key=lambda s: прошедшие[s]["score"])
+            скор   = прошедшие[лучшая]["score"]
+            детали = прошедшие[лучшая]["details"]
+            цена   = прошедшие[лучшая]["price"]
 
-            # ── 2. AI filter ──────────────────────────────────
-            action, conf, reason = ask_ai(best, best_price, best_score, best_details)
-            log.info(f"  🤖 AI: {action}  conf={conf:.2f}  → {reason}")
+            log.info(f"  ► Выбрана {лучшая}  скор={скор}  цена={цена:.8f}  (прошло порог: {len(прошедшие)} из {len(SYMBOLS)} пар)")
 
-            if action != "buy" or conf < AI_CONFIDENCE_THRESHOLD:
-                log.info(f"  AI rejected — waiting {SCAN_INTERVAL}s")
+            # ── 3. ИИ фильтр ──────────────────────────────────
+            действие, уверенность, причина = спросить_ии(лучшая, цена, скор, детали)
+            log.info(f"  🤖 ИИ: {действие}  уверенность={уверенность:.2f}  → {причина}")
+
+            if действие != "buy" or уверенность < AI_CONFIDENCE_MIN:
+                log.info(f"  ИИ отклонил сделку — ждём {SCAN_INTERVAL} сек")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            # ── 3. Martingale entry loop ──────────────────────
-            step   = 0
-            amount = INITIAL_AMOUNT
+            # ── 4. Вход с мартингейлом ─────────────────────────
+            шаг    = 0
+            сумма  = первый_вход
+            log.info(f"  💰 Первый вход: {сумма:.2f} USDT (баланс {баланс:.2f} USDT)")
 
-            while step <= MAX_STEPS:
-                log.info(f"  ── Step {step}  amount={amount:.2f} USDT ──")
+            while шаг <= MAX_STEPS:
+                log.info(f"  ── Шаг мартингейла {шаг} / сумма {сумма:.2f} USDT ──")
 
-                # Safety: check we have enough balance
-                avail = usdt_balance()
-                if avail < amount:
-                    log.warning(f"  Not enough USDT ({avail:.2f}), skipping entry")
+                if баланс_usdt() < сумма:
+                    log.warning(f"  Недостаточно USDT для входа {сумма:.2f} — прерываем серию")
                     break
 
-                entry_price, qty = place_buy(best, amount)
-                place_tp(best, qty, entry_price)
+                время_входа = time.time()
+                вход_цена, кол_во = купить(лучшая, сумма)
+                поставить_тп(лучшая, кол_во, вход_цена)
 
-                result = monitor_position(best, entry_price, qty)
+                stats["сделок_всего"] += 1
 
-                if result == "tp":
-                    log.info(f"  ✅ Profit taken — series done")
+                результат = мониторить_позицию(лучшая, вход_цена, кол_во, время_входа)
+
+                if результат == "tp":
+                    прибыль = сумма * TP_PERCENT / 100
+                    stats["тейкпрофит"]   += 1
+                    stats["прибыль_usdt"] += прибыль
+                    log.info(f"  ✅ Прибыль зафиксирована ~{прибыль:.4f} USDT — серия закончена")
                     break
-                elif result in ("sl", "timeout"):
-                    step += 1
-                    if step > MAX_STEPS:
-                        log.info(f"  🚫 Max martingale steps reached — series over")
+
+                elif результат == "дедлайн_24ч":
+                    # Уже всё закрыто внутри мониторинга
+                    stats["дедлайн_24ч"]  += 1
+                    stats["убыток_usdt"]  += сумма * SL_PERCENT / 100
+                    log.warning("  Серия прервана по дедлайну 24 часа")
+                    шаг = MAX_STEPS + 1   # выходим из while
+                    break
+
+                elif результат in ("sl", "timeout"):
+                    убыток = сумма * SL_PERCENT / 100
+                    stats["убыток_usdt"] += убыток
+                    if результат == "sl":
+                        stats["стоплосс"] += 1
+                    else:
+                        stats["таймаут"]  += 1
+
+                    шаг += 1
+                    if шаг > MAX_STEPS:
+                        log.info("  🚫 Лимит шагов мартингейла исчерпан — серия окончена")
                         break
-                    amount = round(amount * MARTINGALE_FACTOR, 2)
-                    log.info(f"  ↩ Martingale step {step}  next amount={amount:.2f} USDT")
+                    сумма = round(сумма * MARTINGALE_FACTOR, 2)
+                    stats["мартингейл_шагов"] += 1
+                    log.info(f"  🔁 Мартингейл шаг {шаг} — следующая ставка {сумма:.2f} USDT")
 
-            log.info("  Series finished — pause 30s")
+            сохранить_состояние()
+            log.info("  Серия завершена — пауза 30 сек")
             time.sleep(30)
 
         except Exception as e:
-            log.error(f"Global error: {e}", exc_info=True)
+            log.error(f"Глобальная ошибка: {e}", exc_info=True)
             time.sleep(60)
 
 
