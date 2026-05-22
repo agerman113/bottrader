@@ -26,7 +26,7 @@ SL_PERCENT         = 1.0
 TIMEFRAME_TA       = "5m"
 TIMEFRAME_TREND    = "1h"
 SCAN_INTERVAL      = 300
-MIN_SCORE          = 40
+MIN_SCORE          = 40               # базовый порог (может корректироваться AI)
 TRADE_TIMEOUT      = 600
 TRADE_MAX_LIFETIME = 86400
 REPORT_INTERVAL    = 1800
@@ -35,7 +35,9 @@ STATE_FILE         = "state.json"
 MIN_DEAL_AMOUNT = 6.0
 MAX_DEAL_AMOUNT = 20.0
 
-USE_AI = False
+USE_AI = False           # свой ИИ отключён, используем AI Bybit
+USE_BYBIT_AI = True      # включаем анализ Bybit AI
+USE_NEWS = False         # включать новости (для информации, не влияет на сделку)
 
 # ================== ЛОГИРОВАНИЕ ==================
 logging.basicConfig(
@@ -136,14 +138,34 @@ def продать_все_монеты():
     except Exception as e:
         log.warning(f"  Ошибка при получении баланса: {e}")
 
+def перевести_с_финансирования():
+    """Переводит USDT с Funding на Spot – требует права Transfer у API ключа"""
+    try:
+        funding = exchange.private_get_v5_asset_transfer_query_asset_info()
+        usdt_funding = 0.0
+        for item in funding.get("result", {}).get("assets", []):
+            if item.get("asset") == "USDT":
+                usdt_funding = float(item.get("free", 0))
+                break
+        if usdt_funding > 0.5:
+            log.info(f"  Найдено {usdt_funding:.2f} USDT на финансировании. Перевожу на спот...")
+            exchange.transfer("USDT", usdt_funding, "FUND", "SPOT")
+            log.info("  Перевод выполнен")
+        else:
+            log.info("  На финансировании нет значимого остатка USDT")
+    except Exception as e:
+        log.warning(f"  Ошибка перевода с финансирования: {e}")
+
 def полная_инвентаризация():
     log.info("🔄 Выполняю полную инвентаризацию перед торговлей...")
     отменить_все_ордера()
     продать_все_монеты()
+    # Раскомментируйте, если API ключ имеет право на перевод
+    # перевести_с_финансирования()
     log.info("✅ Инвентаризация завершена")
     time.sleep(2)
 
-# ================== ИНДИКАТОРЫ ==================
+# ================== ИНДИКАТОРЫ (те же) ==================
 def _ema(s, span):
     return s.ewm(span=span, adjust=False).mean()
 
@@ -306,25 +328,62 @@ def получить_скор(symbol: str) -> dict:
 
     return {"score": score, "details": details, "price": price}
 
+# ================== BYBIT AI АНАЛИЗ ==================
+def получить_ai_анализ_bybit(symbol):
+    """Возвращает (trend, bullish_count, bearish_count, support, resistance) или None"""
+    try:
+        # Bybit требует формат пары без слеша, например PEPEUSDT
+        pair = symbol.replace("/", "")
+        url = f"https://api.bybit.com/v5/market/ai-analysis?symbol={pair}"
+        # Публичный ключ не обязателен, но можно передать для повышения лимитов
+        headers = {}
+        if os.getenv("BYBIT_API_KEY"):
+            headers["X-BAPI-API-KEY"] = os.getenv("BYBIT_API_KEY")
+        resp = requests.get(url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("retCode") == 0:
+                result = data["result"]
+                trend = result.get("trend", "neutral").lower()
+                bullish = result.get("bullishIndicators", 0)
+                bearish = result.get("bearishIndicators", 0)
+                support = result.get("support", [])
+                resistance = result.get("resistance", [])
+                return trend, bullish, bearish, support, resistance
+        log.warning(f"AI Bybit ошибка {symbol}: {resp.status_code} {resp.text[:100]}")
+    except Exception as e:
+        log.warning(f"AI Bybit исключение {symbol}: {e}")
+    return None
+
+# ================== НОВОСТИ BYBIT (опционально) ==================
+def получить_новости_bybit(symbol, limit=3):
+    """Возвращает список новостей по монете (только для информации)"""
+    if not USE_NEWS:
+        return []
+    try:
+        pair = symbol.replace("/", "")
+        url = f"https://api.bybit.com/v5/market/news?symbol={pair}&limit={limit}"
+        resp = requests.get(url, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("retCode") == 0:
+                return data["result"].get("news", [])
+    except Exception as e:
+        log.warning(f"Новости ошибка {symbol}: {e}")
+    return []
+
 # ================== РАСЧЁТ РАЗМЕРА ВХОДА ==================
 def рассчитать_размер_входа(баланс_usdt: float) -> float:
     total_factor = 1 + MARTINGALE_FACTOR + MARTINGALE_FACTOR ** 2
     amount = min(баланс_usdt * 0.15, баланс_usdt / total_factor * 0.9)
     return round(max(MIN_DEAL_AMOUNT, min(MAX_DEAL_AMOUNT, amount)), 2)
 
-# ================== ИИ (ОТКЛЮЧЁН) ==================
-def спросить_ии(symbol, price, score, details) -> tuple:
-    if not USE_AI:
-        return "buy", 1.0, "ИИ отключён"
-    return "buy", 1.0, "ИИ отключён"
-
-# ================== ТОРГОВЫЕ ФУНКЦИИ (С ОЖИДАНИЕМ БАЛАНСА) ==================
+# ================== ТОРГОВЫЕ ФУНКЦИИ (с ожиданием баланса) ==================
 def купить(symbol, amount_usdt):
     ticker = exchange.fetch_ticker(symbol)
     price = ticker['last']
     qty = amount_usdt / price
     exchange.create_market_buy_order(symbol, qty)
-    # Ожидаем появления монеты на балансе (до 10 секунд)
     for _ in range(10):
         time.sleep(1)
         bal = баланс_монеты(symbol)
@@ -342,7 +401,6 @@ def поставить_тп(symbol, qty, entry_price):
         log.warning(f"  Сумма TP ({стоимость_ордера:.2f} USDT) ниже {MIN_DEAL_AMOUNT}. Продаю по рынку.")
         продать_по_рынку(symbol, qty, "TP малая сумма")
         return
-    # Дополнительно ждём ещё немного, на всякий случай
     time.sleep(1)
     for попытка in range(3):
         try:
@@ -352,7 +410,6 @@ def поставить_тп(symbol, qty, entry_price):
         except Exception as e:
             log.warning(f"  Попытка {попытка+1} не удалось поставить TP: {e}")
             time.sleep(1)
-    # Если не удалось – продаём по рынку
     log.warning("  Не удалось выставить TP после 3 попыток, продаю по рынку")
     продать_по_рынку(symbol, qty, "ошибка TP")
 
@@ -482,15 +539,15 @@ def main():
 
     log.info("")
     log.info("=" * 58)
-    log.info("  🤖  БОТ ЗАПУЩЕН")
+    log.info("  🤖  БОТ ЗАПУЩЕН (с Bybit AI анализом)")
     log.info(f"  Запуск №:             {stats['запусков']}")
     log.info(f"  Дата/время:           {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
     log.info(f"  Работает с:           {stats['старт_время']}")
     log.info(f"  Баланс:               {баланс_сейчас:.2f} USDT")
     log.info(f"  Стартовый депозит:    {stats['депозит_старт']:.2f} USDT")
     log.info(f"  Пар для торговли:     {len(SYMBOLS)}")
-    log.info(f"  MIN_SCORE:            {MIN_SCORE}")
-    log.info(f"  ИИ модель:            выкл")
+    log.info(f"  MIN_SCORE:            {MIN_SCORE} (базовый)")
+    log.info(f"  Bybit AI:             {'включён' if USE_BYBIT_AI else 'выключен'}")
     log.info("=" * 58)
     log.info("")
 
@@ -514,27 +571,44 @@ def main():
                     f"тренд={res['details'].get('тренд_1h','?')}"
                 )
 
-            прошедшие = {s: v for s, v in scores.items() if v["score"] >= MIN_SCORE}
-            if not прошедшие:
-                лучший_скор = max(scores.values(), key=lambda x: x["score"])["score"]
-                log.info(f"  Ни одна пара не прошла порог {MIN_SCORE} (лучший скор: {лучший_скор}) — ждём {SCAN_INTERVAL} сек")
+            # Выбираем лучшую по сырому скору
+            лучшая = max(scores, key=lambda s: scores[s]["score"])
+            сырой_скор = scores[лучшая]["score"]
+            детали = scores[лучшая]["details"]
+            цена = scores[лучшая]["price"]
+
+            # Дополнительный фильтр Bybit AI
+            финальный_скор = сырой_скор
+            if USE_BYBIT_AI:
+                ai = получить_ai_анализ_bybit(лучшая)
+                if ai:
+                    trend, bull_cnt, bear_cnt, sup, res = ai
+                    log.info(f"  🤖 Bybit AI: тренд={trend}, бычьих={bull_cnt}, медвежьих={bear_cnt}")
+                    if trend == "bullish" and bull_cnt >= 3:
+                        финальный_скор += 15
+                        log.info(f"     ➕ Добавлено +15 (бычий AI)")
+                    elif trend == "bearish" and bear_cnt >= 3:
+                        финальный_скор -= 15
+                        log.info(f"     ➖ Вычтено -15 (медвежий AI)")
+                    # Можно также проверить поддержку/сопротивление (опционально)
+                else:
+                    log.info(f"  🤖 Bybit AI: данные не получены")
+
+            log.info(f"  ► Выбрана {лучшая}  сырой скор={сырой_скор} → финальный скор={финальный_скор}  цена={цена:.8f}")
+
+            if финальный_скор < MIN_SCORE:
+                log.info(f"  Финальный скор {финальный_скор} < порога {MIN_SCORE} — ждём {SCAN_INTERVAL} сек")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            лучшая = max(прошедшие, key=lambda s: прошедшие[s]["score"])
-            скор = прошедшие[лучшая]["score"]
-            детали = прошедшие[лучшая]["details"]
-            цена = прошедшие[лучшая]["price"]
+            # Если хотим выводить новости (только информативно)
+            if USE_NEWS:
+                новости = получить_новости_bybit(лучшая, limit=2)
+                if новости:
+                    for n in новости:
+                        log.info(f"  📰 Новость: {n.get('title', '')[:80]}")
 
-            log.info(f"  ► Выбрана {лучшая}  скор={скор}  цена={цена:.8f}  (прошло порог: {len(прошедшие)} из {len(SYMBOLS)} пар)")
-
-            действие, уверенность, причина = спросить_ии(лучшая, цена, скор, детали)
-            log.info(f"  🤖 ИИ: {действие}  уверенность={уверенность:.2f}  → {причина}")
-
-            if действие != "buy":
-                log.info(f"  ИИ отклонил сделку — ждём {SCAN_INTERVAL} сек")
-                time.sleep(SCAN_INTERVAL)
-                continue
+            log.info(f"  ✅ Сигнал к покупке (финальный скор {финальный_скор} >= {MIN_SCORE})")
 
             сумма = первый_вход
             шаг = 0
