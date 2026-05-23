@@ -24,12 +24,53 @@ load_dotenv()
 
 # ================== НАСТРОЙКИ ==================
 SYMBOLS = [
-    "PEPE/USDT:USDT",  "DOGE/USDT:USDT",  "SHIB/USDT:USDT",
+    # ── Мегакэп / высокая ликвидность ──────────────────────────
+    "BTC/USDT:USDT",   "ETH/USDT:USDT",   "BNB/USDT:USDT",
+    "XRP/USDT:USDT",   "SOL/USDT:USDT",   "ADA/USDT:USDT",
+    "TRX/USDT:USDT",   "TON/USDT:USDT",   "AVAX/USDT:USDT",
+    "DOT/USDT:USDT",   "LTC/USDT:USDT",   "BCH/USDT:USDT",
+    "ATOM/USDT:USDT",  "XLM/USDT:USDT",   "NEAR/USDT:USDT",
+
+    # ── Мемкоины (высокая волатильность) ───────────────────────
+    "DOGE/USDT:USDT",  "SHIB/USDT:USDT",  "PEPE/USDT:USDT",
     "FLOKI/USDT:USDT", "BONK/USDT:USDT",  "WIF/USDT:USDT",
-    "MEME/USDT:USDT",  "SOL/USDT:USDT",   "AVAX/USDT:USDT",
-    "LTC/USDT:USDT",   "LINK/USDT:USDT",  "DOT/USDT:USDT",
-    "ADA/USDT:USDT",   "TRX/USDT:USDT",   "XRP/USDT:USDT",
-    "TON/USDT:USDT",
+    "MEME/USDT:USDT",  "BOME/USDT:USDT",  "DOGS/USDT:USDT",
+    "NEIRO/USDT:USDT", "PNUT/USDT:USDT",  "ACT/USDT:USDT",
+    "POPCAT/USDT:USDT","TURBO/USDT:USDT", "BRETT/USDT:USDT",
+
+    # ── AI / DePIN нарратив ─────────────────────────────────────
+    "FET/USDT:USDT",   "RENDER/USDT:USDT","TAO/USDT:USDT",
+    "WLD/USDT:USDT",   "ARKM/USDT:USDT",  "AGIX/USDT:USDT",
+    "IO/USDT:USDT",    "ONDO/USDT:USDT",  "VIRTUAL/USDT:USDT",
+    "AI16Z/USDT:USDT",
+
+    # ── DeFi / DEX ──────────────────────────────────────────────
+    "UNI/USDT:USDT",   "AAVE/USDT:USDT",  "CRV/USDT:USDT",
+    "DYDX/USDT:USDT",  "JUP/USDT:USDT",   "PENDLE/USDT:USDT",
+    "GMX/USDT:USDT",   "LDO/USDT:USDT",
+
+    # ── L2 / экосистема ─────────────────────────────────────────
+    "ARB/USDT:USDT",   "OP/USDT:USDT",    "MATIC/USDT:USDT",
+    "STX/USDT:USDT",   "IMX/USDT:USDT",   "STRK/USDT:USDT",
+    "ZK/USDT:USDT",    "MANTA/USDT:USDT",
+
+    # ── Gaming / NFT / Metaverse ────────────────────────────────
+    "AXS/USDT:USDT",   "SAND/USDT:USDT",  "MANA/USDT:USDT",
+    "GALA/USDT:USDT",  "ENJ/USDT:USDT",   "ILV/USDT:USDT",
+    "PIXEL/USDT:USDT", "PORTAL/USDT:USDT",
+
+    # ── Инфраструктура / прочее ─────────────────────────────────
+    "LINK/USDT:USDT",  "GRT/USDT:USDT",   "FIL/USDT:USDT",
+    "ICP/USDT:USDT",   "RUNE/USDT:USDT",  "INJ/USDT:USDT",
+    "SUI/USDT:USDT",   "APT/USDT:USDT",   "SEI/USDT:USDT",
+    "TIA/USDT:USDT",   "PYTH/USDT:USDT",  "JTO/USDT:USDT",
+    "W/USDT:USDT",     "ENA/USDT:USDT",   "EIGEN/USDT:USDT",
+    "HBAR/USDT:USDT",  "VET/USDT:USDT",   "ALGO/USDT:USDT",
+    "IOTA/USDT:USDT",  "EOS/USDT:USDT",   "XTZ/USDT:USDT",
+    "THETA/USDT:USDT", "FLOW/USDT:USDT",  "KSM/USDT:USDT",
+    "CHZ/USDT:USDT",   "MASK/USDT:USDT",  "1INCH/USDT:USDT",
+    "COMP/USDT:USDT",  "ZRO/USDT:USDT",   "NOT/USDT:USDT",
+    "HMSTR/USDT:USDT", "CATI/USDT:USDT",
 ]
 
 LEVERAGE           = 3           # плечо (рекомендую 2-3x для консервативной работы)
@@ -47,6 +88,13 @@ MAX_RISK_PCT       = 4.0         # 4.0% при скоре=100
 TP_PERCENT         = 1.5         # % движения в прибыль (на фьючерсах с плечом реальнее)
 SL_PERCENT         = 1.0         # % стоп-лосс
 TRADE_MAX_LIFETIME = 7200        # 2 часа максимум в позиции
+
+# ── Трейлинг после безубытка ──────────────────────────────────
+# Шаг: на сколько % должна вырасти цена, чтобы SL подтянулся
+TRAILING_STEP_PCT   = 0.3        # подтягиваем SL каждые 0.3% роста цены
+# Отступ: SL = пиковая_цена * (1 - TRAILING_OFFSET_PCT / 100)
+TRAILING_OFFSET_PCT = 0.4        # SL на 0.4% ниже пика
+
 MIN_BALANCE        = 5.0
 REPORT_INTERVAL    = 1800
 STATE_FILE         = "state_futures.json"
@@ -596,18 +644,83 @@ def открыть_лонг(symbol: str, margin_usdt: float, tp_price: float, sl
         log.error(f"  ❌ Ошибка открытия лонга: {e}")
         return None, None
 
+# ================== ОБНОВЛЕНИЕ SL НА БИРЖЕ ==================
+def обновить_sl_на_бирже(symbol: str, new_sl: float) -> bool:
+    """Обновляет стоп-лосс через Trading Stop API Bybit."""
+    try:
+        sl_str = exchange.price_to_precision(symbol, new_sl)
+        exchange.set_trading_stop(
+            symbol,
+            params={
+                "category":  "linear",
+                "stopLoss":  float(sl_str),
+                "slTriggerBy": "MarkPrice",
+                "positionIdx": 0,
+            }
+        )
+        log.info(f"  🔧 SL обновлён → {sl_str}")
+        return True
+    except Exception as e:
+        # Fallback: пробуем через приватный REST напрямую
+        try:
+            sl_str = exchange.price_to_precision(symbol, new_sl)
+            coin_sym = symbol.replace("/", "").replace(":USDT", "")
+            exchange.private_post_v5_position_trading_stop({
+                "category":    "linear",
+                "symbol":      coin_sym,
+                "stopLoss":    sl_str,
+                "slTriggerBy": "MarkPrice",
+                "positionIdx": "0",
+            })
+            log.info(f"  🔧 SL обновлён (fallback) → {sl_str}")
+            return True
+        except Exception as e2:
+            log.warning(f"  ⚠️ Не удалось обновить SL: {e} | {e2}")
+            return False
+
 # ================== МОНИТОРИНГ ПОЗИЦИИ ==================
-def мониторить_позицию(symbol: str, entry_price: float, qty: float, открыта_в: float) -> str:
+def мониторить_позицию(symbol: str, entry_price: float, qty: float,
+                        открыта_в: float, sl_цена: float) -> str:
     """
-    Следит за позицией. TP/SL уже выставлены нативно на бирже.
-    Здесь только контроль дедлайна и детектирование закрытия.
+    Трёхфазный мониторинг:
+
+    Фаза 1 — ОБЫЧНАЯ: цена ниже безубытка.
+              SL стоит на исходном уровне (уже задан при открытии).
+
+    Фаза 2 — БЕЗУБЫТОК: цена прошла entry + комиссии.
+              SL переносится в безубыток (+0.05% сверху комиссий).
+              Логируем "🔒 Безубыток зафиксирован".
+
+    Фаза 3 — ТРЕЙЛИНГ: цена продолжает расти.
+              SL тянется за ценой с отступом TRAILING_STEP_PCT.
+              Обновляется только когда цена ушла выше предыдущего хая на TRAILING_STEP_PCT.
     """
     deadline = открыта_в + TRADE_MAX_LIFETIME
     coin     = symbol.split("/")[0]
 
+    # Безубыток = вход + 2 комиссии (вход + выход) + небольшой буфер
+    breakeven_price = entry_price * (1 + BYBIT_FEE * 2 + 0.0005)
+
+    # Трейлинг активируется после безубытка
+    # Шаг трейлинга: каждые TRAILING_STEP_PCT% движения — подтягиваем SL
+    trailing_step    = TRAILING_STEP_PCT / 100
+    trailing_offset  = TRAILING_OFFSET_PCT / 100
+
+    фаза             = 1       # 1=обычная, 2=безубыток, 3=трейлинг
+    текущий_sl       = sl_цена
+    пиковая_цена     = entry_price
+    следующий_трейл  = entry_price * (1 + trailing_step)  # цена, при которой двигаем SL
+
+    log.info(
+        f"  🚦 Мониторинг запущен | вход={entry_price:.8f} "
+        f"| безубыток @ {breakeven_price:.8f} (+{BYBIT_FEE*200+0.05:.2f}%)"
+        f"  | трейлинг шаг={TRAILING_STEP_PCT}% отступ={TRAILING_OFFSET_PCT}%"
+    )
+
     while True:
         сейчас = time.time()
 
+        # ── Дедлайн ──────────────────────────────────────────────
         if сейчас >= deadline:
             log.warning("  ⏰ Дедлайн позиции — принудительное закрытие")
             try:
@@ -616,36 +729,73 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
                 log.warning(f"  Ошибка закрытия по дедлайну: {e}")
             return "таймаут"
 
-        time.sleep(15)
+        time.sleep(10)
 
         try:
-            # Проверяем, жива ли ещё позиция
+            # ── Проверяем жива ли позиция ────────────────────────
             positions = exchange.fetch_positions([symbol])
-            active = [p for p in positions if float(p.get("contracts", 0) or 0) > 0
-                      and p.get("side") == "long"]
+            active = [p for p in positions
+                      if float(p.get("contracts", 0) or 0) > 0 and p.get("side") == "long"]
 
             if not active:
-                # Позиция закрыта биржей (TP или SL)
+                # Позиция закрыта биржей (TP или SL сработал)
                 cur_price = float(exchange.fetch_ticker(symbol)["last"])
-                if cur_price >= entry_price * (1 + TP_PERCENT / 100 * 0.8):
+                if cur_price >= entry_price * (1 + TP_PERCENT / 100 * 0.7):
                     log.info("  ✅ Позиция закрыта по Тейк-профиту")
                     return "tp"
+                elif фаза >= 2:
+                    log.info("  🔒 Позиция закрыта по трейлинг/безубыток SL — без убытка")
+                    return "tp"   # считаем как победу — убытка не было
                 else:
                     log.info("  ❌ Позиция закрыта по Стоп-лоссу")
                     return "sl"
 
-            # Позиция жива: логируем состояние
-            pos        = active[0]
-            cur_price  = float(exchange.fetch_ticker(symbol)["last"])
-            pnl        = float(pos.get("unrealizedPnl", 0) or 0)
-            pnl_pct    = (cur_price - entry_price) / entry_price * 100
+            # ── Текущая цена и P&L ───────────────────────────────
+            pos       = active[0]
+            cur_price = float(exchange.fetch_ticker(symbol)["last"])
+            pnl       = float(pos.get("unrealizedPnl", 0) or 0)
+            pnl_pct   = (cur_price - entry_price) / entry_price * 100
+            до_дед    = int(deadline - сейчас)
 
-            до_tp  = (entry_price * (1 + TP_PERCENT / 100) - cur_price) / cur_price * 100
-            до_дед = int(deadline - сейчас)
+            # ── ФАЗА 1 → 2: БЕЗУБЫТОК ────────────────────────────
+            if фаза == 1 and cur_price >= breakeven_price:
+                фаза = 2
+                новый_sl = entry_price * (1 + BYBIT_FEE * 2 + 0.0003)
+                if обновить_sl_на_бирже(symbol, новый_sl):
+                    текущий_sl      = новый_sl
+                    пиковая_цена    = cur_price
+                    следующий_трейл = cur_price * (1 + trailing_step)
+                    log.info(
+                        f"  🔒 БЕЗУБЫТОК зафиксирован! "
+                        f"SL перенесён → {новый_sl:.8f} "
+                        f"(вход={entry_price:.8f}, покрыты комиссии)"
+                    )
 
+            # ── ФАЗА 2 → 3 и ТРЕЙЛИНГ: подтягиваем SL за ценой ──
+            elif фаза >= 2 and cur_price >= следующий_трейл:
+                фаза = 3
+                пиковая_цена    = max(пиковая_цена, cur_price)
+                новый_sl        = пиковая_цена * (1 - trailing_offset)
+
+                if новый_sl > текущий_sl:  # SL двигаем только вверх
+                    if обновить_sl_на_бирже(symbol, новый_sl):
+                        текущий_sl      = новый_sl
+                        следующий_трейл = cur_price * (1 + trailing_step)
+                        log.info(
+                            f"  📈 ТРЕЙЛИНГ: пик={пиковая_цена:.8f} "
+                            f"→ SL={новый_sl:.8f} "
+                            f"(зафиксировано {(новый_sl-entry_price)/entry_price*100:+.2f}%)"
+                        )
+
+            # Обновляем пик (даже если SL не двигали)
+            if cur_price > пиковая_цена:
+                пиковая_цена = cur_price
+
+            # ── Лог состояния ────────────────────────────────────
+            фаза_лейбл = {1: "обычная", 2: "безубыток 🔒", 3: "трейлинг 📈"}.get(фаза, "?")
             log.info(
-                f"  [{coin}] цена={cur_price:.8f}  P&L={pnl_pct:+.2f}% ({pnl:+.4f}U)"
-                f"  до TP={до_tp:+.2f}%  до дедлайна={до_дед}с"
+                f"  [{coin}] {cur_price:.8f}  P&L={pnl_pct:+.2f}% ({pnl:+.4f}U)"
+                f"  SL={текущий_sl:.8f}  фаза={фаза_лейбл}  дед={до_дед}с"
             )
 
         except Exception as e:
@@ -856,7 +1006,7 @@ def main():
             сохранить_состояние()
 
             # Мониторинг (TP/SL уже на бирже, просто ждём)
-            результат = мониторить_позицию(лучшая, вход_цена, кол_во, время_входа)
+            результат = мониторить_позицию(лучшая, вход_цена, кол_во, время_входа, sl_цена)
 
             # Расчёт реального P&L
             объём     = margin * LEVERAGE
