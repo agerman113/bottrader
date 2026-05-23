@@ -19,24 +19,40 @@ SYMBOLS = [
     "DOT/USDT",  "ADA/USDT",  "TRX/USDT",  "XRP/USDT",  "TON/USDT",
 ]
 
-MARTINGALE_FACTOR  = 1.35
-MAX_STEPS          = 2
-TP_PERCENT         = 1.2   # ИСПРАВЛЕНО: было 0.8% — меньше комиссий (0.2% туда-обратно) почти не остаётся
-SL_PERCENT         = 1.5   # ИСПРАВЛЕНО: было 1.0% — соотношение риск/прибыль хотя бы 1:0.8
-TIMEFRAME_TA       = "5m"
-TIMEFRAME_TREND    = "1h"
-SCAN_INTERVAL      = 300
-MIN_SCORE          = 60    # Нужно большинство бычьих сигналов (нейтральный рынок даёт ~25-40)
-TRADE_TIMEOUT      = 900   # ИСПРАВЛЕНО: было 600 — давать больше времени для TP
-TRADE_MAX_LIFETIME = 86400
-REPORT_INTERVAL    = 1800
-STATE_FILE         = "state.json"
+# Торговые параметры
+LEVERAGE = 2                   # плечо
+RISK_PERCENT = 2.0             # процент от баланса на маржу (не более 5-10%)
+MIN_MARGIN = 1.0               # минимальная маржа в USDT
+MAX_MARGIN = 10.0              # максимальная маржа в USDT
+MARTINGALE_FACTOR = 1.35       # множитель маржи при убытке
+MAX_STEPS = 2                  # максимум шагов мартингейла (0 – выключен)
 
-MIN_DEAL_AMOUNT = 6.0
-MAX_DEAL_AMOUNT = 20.0
+TP_PERCENT = 1.2               # тейк-профит от цены входа (без учёта плеча)
+SL_PERCENT = 1.5               # стоп-лосс
 
-# Комиссия Bybit spot (maker/taker)
-BYBIT_FEE = 0.001  # 0.1%
+TIMEFRAME_TA = "5m"
+TIMEFRAME_TREND = "1h"
+SCAN_INTERVAL = 300            # секунд между сканированиями
+MIN_SCORE = 55                 # порог технического скора
+MIN_BALANCE = 5.0              # минимальный баланс USDT для работы
+
+# Фильтр по уровням поддержки/сопротивления (AI Bybit)
+USE_SUPPORT_RESISTANCE = True  # использовать уровни для фильтрации
+SUPPORT_THRESHOLD = 0.5        # разрешать вход, если цена в пределах 0.5% от поддержки
+RESISTANCE_THRESHOLD = 0.5     # запрещать вход, если цена в пределах 0.5% от сопротивления (для лонга)
+
+# AI Bybit
+USE_BYBIT_AI = True
+
+# Комиссии Bybit для фьючерсов (тейкер – 0.06%, мейкер – 0.02%)
+TAKER_FEE = 0.0006
+MAKER_FEE = 0.0002
+
+# Таймауты
+TRADE_TIMEOUT = 600            # 10 минут
+TRADE_MAX_LIFETIME = 86400     # 24 часа
+REPORT_INTERVAL = 1800         # 30 минут
+STATE_FILE = "futures_state.json"
 
 # ================== ЛОГИРОВАНИЕ ==================
 logging.basicConfig(
@@ -45,17 +61,20 @@ logging.basicConfig(
     datefmt="%d.%m.%Y %H:%M:%S",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("bot.log", encoding="utf-8"),
+        logging.FileHandler("futures_bot.log", encoding="utf-8"),
     ],
 )
 log = logging.getLogger(__name__)
 
-# ================== БИРЖА ==================
+# ================== БИРЖА (ФЬЮЧЕРСЫ) ==================
 exchange = ccxt.bybit({
     "apiKey":    os.getenv("BYBIT_API_KEY"),
     "secret":    os.getenv("BYBIT_API_SECRET"),
     "enableRateLimit": True,
-    "options": {"defaultType": "spot"},
+    "options": {
+        "defaultType": "future",   # USDT-M фьючерсы
+        "leverage": LEVERAGE,
+    },
 })
 
 # ================== СТАТИСТИКА ==================
@@ -114,40 +133,48 @@ def отменить_все_ордера():
     except Exception as e:
         log.warning(f"  Ошибка при получении ордеров: {e}")
 
-def продать_все_монеты():
-    log.info("  💱 Продажа всех монет (кроме USDT)...")
+def закрыть_все_позиции():
+    log.info("  🔒 Закрытие всех открытых позиций...")
     try:
-        баланс = exchange.fetch_balance()
-        свободные = баланс["free"]
-        for монета, количество in свободные.items():
-            if монета == "USDT" or количество == 0:
-                continue
-            пара = f"{монета}/USDT"
-            try:
-                ticker = exchange.fetch_ticker(пара)
-                сумма_usdt = количество * ticker['last']
-                if сумма_usdt < 1.0:
-                    log.info(f"    Пропускаю {количество:.6f} {монета} (сумма {сумма_usdt:.4f} USDT < 1.0)")
-                    continue
-                # ИСПРАВЛЕНО: точность количества перед продажей
-                кол_точное = exchange.amount_to_precision(пара, количество)
-                log.info(f"    Продажа {кол_точное} {монета} по рынку")
-                exchange.create_market_sell_order(пара, кол_точное)
-                time.sleep(0.5)
-            except Exception as e:
-                log.warning(f"    Не удалось продать {монета}: {e}")
+        позиции = exchange.fetch_positions()
+        for pos in позиции:
+            if float(pos.get("contracts", 0)) != 0:
+                symbol = pos["symbol"]
+                side = "sell" if pos["side"] == "long" else "buy"
+                qty = float(pos["contracts"])
+                try:
+                    exchange.create_market_order(symbol, side, qty)
+                    log.info(f"    Закрыта позиция {symbol} {pos['side']} {qty}")
+                except Exception as e:
+                    log.warning(f"    Не удалось закрыть {symbol}: {e}")
     except Exception as e:
-        log.warning(f"  Ошибка при получении баланса: {e}")
+        log.warning(f"  Ошибка при получении позиций: {e}")
+
+def перевести_с_финансирования():
+    """Переводит USDT с Funding на Spot (для фьючерсов не нужен, но можно оставить)"""
+    try:
+        funding = exchange.private_get_v5_asset_transfer_query_asset_info()
+        usdt_funding = 0.0
+        for item in funding.get("result", {}).get("assets", []):
+            if item.get("asset") == "USDT":
+                usdt_funding = float(item.get("free", 0))
+                break
+        if usdt_funding > 0.5:
+            log.info(f"  Найдено {usdt_funding:.2f} USDT на финансировании. Перевожу на линейный счёт...")
+            exchange.transfer("USDT", usdt_funding, "FUND", "LINEAR")
+            log.info("  Перевод выполнен")
+    except Exception as e:
+        log.warning(f"  Ошибка перевода с финансирования: {e}")
 
 def полная_инвентаризация():
     log.info("🔄 Выполняю полную инвентаризацию перед торговлей...")
     отменить_все_ордера()
-    time.sleep(1)
-    продать_все_монеты()
+    закрыть_все_позиции()
+    # перевести_с_финансирования()   # раскомментируйте, если нужно
     log.info("✅ Инвентаризация завершена")
     time.sleep(2)
 
-# ================== ИНДИКАТОРЫ ==================
+# ================== ИНДИКАТОРЫ (те же, что в спот-боте) ==================
 def _ema(s, span):
     return s.ewm(span=span, adjust=False).mean()
 
@@ -234,24 +261,22 @@ def calc_adx(df, period=14):
     adx = _rma(100 * (pdi - mdi).abs() / (pdi + mdi + 1e-10), period)
     return adx, pdi, mdi
 
-# ДОБАВЛЕНО: фильтр объёма (VWAP упрощённый)
 def calc_vwap_deviation(df, period=20):
-    """Возвращает отклонение цены от VWAP — отрицательное значит цена ниже VWAP (потенциал роста)."""
     typical = (df["h"] + df["l"] + df["c"]) / 3
     vwap = (typical * df["v"]).rolling(period).sum() / df["v"].rolling(period).sum()
     deviation_pct = (df["c"] - vwap) / vwap * 100
     return deviation_pct
 
-# ================== ТЕХНИЧЕСКИЙ СКОР ==================
+# ================== ТЕХНИЧЕСКИЙ СКОР (адаптирован) ==================
 def получить_скор(symbol: str) -> dict:
     details = {}
     score = 0
     price = 0
     try:
         raw5 = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=300)
-        raw1h = exchange.fetch_ohlcv(symbol, TIMEFRAME_TREND, limit=300)
-        raw15 = exchange.fetch_ohlcv(symbol, "15m", limit=100)  # ДОБАВЛЕНО: средний таймфрейм
-        if len(raw5) < 100 or len(raw1h) < 100:
+        raw1h = exchange.fetch_ohlcv(symbol, TIMEFRAME_TREND, limit=200)
+        raw15 = exchange.fetch_ohlcv(symbol, "15m", limit=100)
+        if len(raw5) < 100:
             return {"score": 0, "details": {}, "price": 0}
 
         cols = ["ts", "o", "h", "l", "c", "v"]
@@ -260,149 +285,119 @@ def получить_скор(symbol: str) -> dict:
         df15 = pd.DataFrame(raw15, columns=cols).reset_index(drop=True)
         c5, c1h, c15 = df5["c"], df1h["c"], df15["c"]
 
-        # Логика скора: нейтральный рынок ≈ 40-45 очков.
-        # Явно бычий рынок по всем индикаторам → ~80-90.
-        # Явно медвежий → ~10-20.
-        # Порог входа MIN_SCORE=60 — нужно большинство бычьих сигналов.
-
-        # --- RSI (5m) [макс +20] ---
+        # RSI (5m)
         rsi_val = calc_rsi(c5).iloc[-1]
         details["rsi"] = round(rsi_val, 1)
-        if 25 <= rsi_val <= 42:     # перепроданность — лучший вход
+        if rsi_val < 30:
             score += 20
-        elif 42 < rsi_val <= 52:    # нейтральная зона
+        elif rsi_val < 45:
             score += 10
-        elif rsi_val < 25:          # экстремальная перепроданность
-            score += 12
-        elif 52 < rsi_val <= 65:    # слегка перекуплен — нейтрально
+        elif rsi_val > 70:
+            score -= 5
+        else:
             score += 5
-        else:                        # rsi > 65 — поздно
-            score += 0
 
-        # --- RSI (1h) — фильтр старшего тренда [макс +8] ---
+        # RSI (1h)
         rsi_1h = calc_rsi(c1h).iloc[-1]
         details["rsi_1h"] = round(rsi_1h, 1)
         if rsi_1h < 55:
             score += 8
         elif rsi_1h < 65:
             score += 4
-        else:
-            score += 0   # перекуплен на часовом — не штрафуем, просто не добавляем
 
-        # --- MACD (5m) [макс +18] ---
+        # MACD (5m)
         ml, sl, _ = calc_macd(c5)
-        macd_bull  = ml.iloc[-1] > sl.iloc[-1]
+        macd_bull = ml.iloc[-1] > sl.iloc[-1]
         macd_cross = macd_bull and ml.iloc[-2] <= sl.iloc[-2]
         details["macd"] = "бычий" if macd_bull else "медвежий"
         if macd_cross:
-            score += 18   # пересечение вверх — сильный сигнал
+            score += 18
         elif macd_bull:
-            score += 8    # просто бычий MACD
-        else:
-            score += 0    # медвежий — не штрафуем, просто не добавляем
+            score += 8
 
-        # --- Range Filter (5m) [макс +15] ---
-        _, _, _, rf_up, rf_down = calc_range_filter(df5)
-        rf_up_now   = rf_up.iloc[-1]
-        rf_down_now = rf_down.iloc[-1]
-        details["range_filter"] = "вверх" if rf_up_now else ("вниз" if rf_down_now else "бок")
-        if rf_up_now:
+        # Range Filter (5m)
+        _, _, _, rf_up, _ = calc_range_filter(df5)
+        details["range_filter"] = "вверх" if rf_up.iloc[-1] else "вниз"
+        if rf_up.iloc[-1]:
             score += 15
-        else:
-            score += 0    # вниз или нейтраль — не штраф
 
-        # --- Supertrend (5m) [макс +12] ---
+        # Supertrend (5m, 15m)
         st_up, _ = calc_supertrend(df5)
         details["supertrend"] = "вверх" if st_up.iloc[-1] else "вниз"
-        score += 12 if st_up.iloc[-1] else 0
-
-        # --- Supertrend (15m) [макс +8] ---
+        if st_up.iloc[-1]:
+            score += 12
         st_up_15, _ = calc_supertrend(df15)
-        details["supertrend_15m"] = "вверх" if st_up_15.iloc[-1] else "вниз"
-        score += 8 if st_up_15.iloc[-1] else 0
+        if st_up_15.iloc[-1]:
+            score += 8
 
-        # --- Hull MA (5m) [макс +8] ---
+        # Hull MA
         hu_up, _ = calc_hull(c5)
         details["hull"] = "вверх" if hu_up.iloc[-1] else "вниз"
-        score += 8 if hu_up.iloc[-1] else 0
+        if hu_up.iloc[-1]:
+            score += 8
 
-        # --- EMA 50/200 тренд (1h) [макс +10] ---
-        ema50  = _ema(c1h, 50).iloc[-1]
+        # Тренд 1h
+        ema50 = _ema(c1h, 50).iloc[-1]
         ema200 = _ema(c1h, 200).iloc[-1]
         trend_bull = ema50 > ema200
         details["тренд_1h"] = "бычий" if trend_bull else "медвежий"
-        score += 10 if trend_bull else 0
+        if trend_bull:
+            score += 10
 
-        # --- EMA 20/50 тренд (15m) [макс +5] ---
+        # Тренд 15m EMA 20/50
         ema20_15 = _ema(c15, 20).iloc[-1]
         ema50_15 = _ema(c15, 50).iloc[-1]
-        details["тренд_15m"] = "бычий" if ema20_15 > ema50_15 else "медвежий"
-        score += 5 if ema20_15 > ema50_15 else 0
+        if ema20_15 > ema50_15:
+            score += 5
 
-        # --- ADX [макс +8] ---
+        # ADX
         adx, pdi, mdi = calc_adx(df5)
         adx_val = adx.iloc[-1]
         details["adx"] = round(adx_val, 1)
         if adx_val > 25 and pdi.iloc[-1] > mdi.iloc[-1]:
-            score += 8    # сильный восходящий тренд
+            score += 8
         elif adx_val > 20:
-            score += 3    # умеренный тренд
-        else:
-            score += 0    # боковик — нейтрально
+            score += 3
 
-        # --- Stochastic [макс +8] ---
+        # Stochastic
         k, _ = calc_stochastic(df5)
         k_val = k.iloc[-1]
         details["stoch_k"] = round(k_val, 1)
         if k_val < 25:
-            score += 8    # перепроданность
+            score += 8
         elif k_val < 50:
-            score += 4    # ниже середины — умеренно хорошо
-        else:
-            score += 0    # выше 50 — нейтрально
+            score += 4
 
-        # --- Объём [макс +8] ---
-        vol_avg   = df5["v"].rolling(20).mean().iloc[-1]
-        vol_ratio = df5["v"].iloc[-1] / (vol_avg + 1e-10)
-        details["объём_ratio"] = round(vol_ratio, 2)
+        # Объём
+        vol_ratio = df5["v"].iloc[-1] / (df5["v"].rolling(20).mean().iloc[-1] + 1e-10)
+        details["vol_ratio"] = round(vol_ratio, 2)
         if vol_ratio > 1.5:
             score += 8
         elif vol_ratio > 1.2:
             score += 4
-        else:
-            score += 0
 
-        # --- VWAP отклонение [макс +8] ---
+        # VWAP отклонение
         vwap_dev = calc_vwap_deviation(df5).iloc[-1]
         details["vwap_dev"] = round(vwap_dev, 2)
         if -3 <= vwap_dev <= -0.3:
-            score += 8    # цена чуть ниже VWAP — хороший вход
+            score += 8
         elif vwap_dev < -3:
-            score += 4    # сильно ниже VWAP
+            score += 4
         elif vwap_dev <= 1:
-            score += 2    # около VWAP — нейтрально
-        else:
-            score += 0    # выше VWAP — поздно
+            score += 2
 
-        # --- QQE [макс +5] ---
+        # QQE
         qqe_long, _ = calc_qqe(c5)
         details["qqe"] = "лонг" if qqe_long.iloc[-1] else "шорт"
-        score += 5 if qqe_long.iloc[-1] else 0
+        if qqe_long.iloc[-1]:
+            score += 5
 
-        # --- Жёсткий стоп: 3 красных свечи подряд [-15] ---
-        # Единственный штраф — очевидный импульс вниз прямо сейчас
-        last3_bearish = all(
-            df5["c"].iloc[-i] < df5["o"].iloc[-i] for i in range(1, 4)
-        )
+        # Штраф за 3 красные свечи подряд
+        last3_bearish = all(df5["c"].iloc[-i] < df5["o"].iloc[-i] for i in range(1, 4))
         if last3_bearish:
             score -= 15
-            details["свечи_3red"] = True
+            details["3_red"] = True
 
-        # Итоговый диапазон: теоретически 0..143 до штрафа, на практике 0..100
-        # Медвежий рынок без единого бычьего сигнала → ~0-15
-        # Нейтральный (RSI~50, MACD нейтрально, без тренда) → ~25-40
-        # Умеренно бычий → ~50-65
-        # Явно бычий → ~70-90
         score = max(0, min(100, score))
         price = df5["c"].iloc[-1]
 
@@ -411,210 +406,148 @@ def получить_скор(symbol: str) -> dict:
 
     return {"score": score, "details": details, "price": price}
 
-# ================== РАСЧЁТ РАЗМЕРА ВХОДА ==================
-def рассчитать_размер_входа(баланс_usdt: float) -> float:
-    # ИСПРАВЛЕНО: учитываем все шаги мартингейла, чтобы хватило на серию
-    total_factor = 1 + MARTINGALE_FACTOR + MARTINGALE_FACTOR ** 2
-    # Используем не более 60% баланса на всю серию мартингейла
-    amount = min(баланс_usdt * 0.6 / total_factor, MAX_DEAL_AMOUNT)
-    return round(max(MIN_DEAL_AMOUNT, amount), 2)
-
-# ================== ТОРГОВЫЕ ФУНКЦИИ ==================
-def баланс_монеты(symbol):
-    coin = symbol.split("/")[0]
+# ================== BYBIT AI (с уровнями) ==================
+def получить_ai_анализ_bybit(symbol):
+    """Возвращает (trend, bullish_indicators, bearish_indicators, support, resistance)"""
     try:
-        bal = exchange.fetch_balance()
-        return bal["free"].get(coin, 0.0)
-    except:
-        return 0.0
+        pair = symbol.replace("/", "")
+        url = f"https://api.bybit.com/v5/market/ai-analysis?symbol={pair}"
+        headers = {}
+        if os.getenv("BYBIT_API_KEY"):
+            headers["X-BAPI-API-KEY"] = os.getenv("BYBIT_API_KEY")
+        resp = requests.get(url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("retCode") == 0:
+                result = data["result"]
+                trend = result.get("trend", "neutral").lower()
+                bullish = result.get("bullishIndicators", 0)
+                bearish = result.get("bearishIndicators", 0)
+                support = result.get("support", [])
+                resistance = result.get("resistance", [])
+                return trend, bullish, bearish, support, resistance
+    except Exception:
+        pass
+    return None
 
+# ================== РАСЧЁТ МАРЖИ ==================
+def рассчитать_маржу(баланс_usdt: float) -> float:
+    """Маржа в USDT, исходя из процента риска, с учётом множителя мартингейла"""
+    total_factor = 1 + MARTINGALE_FACTOR + MARTINGALE_FACTOR ** 2
+    amount = min(баланс_usdt * RISK_PERCENT / 100, баланс_usdt / total_factor * 0.9)
+    return round(max(MIN_MARGIN, min(MAX_MARGIN, amount)), 2)
+
+# ================== ТОРГОВЫЕ ФУНКЦИИ (ФЬЮЧЕРСЫ) ==================
 def баланс_usdt():
+    """Свободный USDT на фьючерсном счете (коллатерал)"""
     try:
         bal = exchange.fetch_balance()
         return bal["free"].get("USDT", 0.0)
     except:
         return 0.0
 
-def купить_рыночным(symbol, amount_usdt):
-    """
-    Покупает рыночным ордером. Возвращает (entry_price, qty_received).
-    ИСПРАВЛЕНО: не используем встроенный TP/SL параметр (вызывает 170131),
-    вместо этого ставим limit-ордер TP вручную после подтверждения покупки.
-    """
+def установить_плечо(symbol, leverage):
+    try:
+        exchange.set_leverage(leverage, symbol)
+        log.info(f"  Плечо {leverage}x для {symbol}")
+    except Exception as e:
+        log.warning(f"  Не удалось установить плечо {symbol}: {e}")
+
+def открыть_лонг(symbol, маржа_usdt):
+    """Открывает длинную позицию с TP и SL (встроенными параметрами)"""
     try:
         ticker = exchange.fetch_ticker(symbol)
-        price  = ticker['last']
-        qty_raw = amount_usdt / price
-
-        # Приводим к точности биржи
-        qty = float(exchange.amount_to_precision(symbol, qty_raw))
-        if qty <= 0:
-            log.error(f"  Количество {qty} <= 0, пропускаем")
+        цена = ticker['last']
+        количество = (маржа_usdt * LEVERAGE) / цена
+        количество = float(exchange.amount_to_precision(symbol, количество))
+        if количество <= 0:
+            log.error(f"  Количество {количество} <= 0, пропускаем")
             return None, None
 
-        log.info(f"  Отправка рыночного ордера на покупку {qty} {symbol}...")
-        order = exchange.create_market_buy_order(symbol, qty)
+        tp_price = цена * (1 + TP_PERCENT / 100)
+        sl_price = цена * (1 - SL_PERCENT / 100)
 
-        # Ждём появления монет на балансе (до 10 сек)
-        coin = symbol.split("/")[0]
-        реальное_кол = 0.0
-        for attempt in range(10):
-            time.sleep(1)
-            реальное_кол = баланс_монеты(symbol)
-            if реальное_кол > qty * 0.9:
-                log.info(f"  ✅ Монета появилась на балансе через {attempt+1} сек: {реальное_кол}")
-                break
-        else:
-            log.warning(f"  ⚠️ Монета не появилась за 10 сек, используем расчётное кол-во")
-            реальное_кол = qty * (1 - BYBIT_FEE)
-
-        # Реальная цена входа из ордера (если доступна)
-        entry_price = price
-        try:
-            if order.get("average") and float(order["average"]) > 0:
-                entry_price = float(order["average"])
-            elif order.get("price") and float(order.get("price", 0)) > 0:
-                entry_price = float(order["price"])
-        except:
-            pass
-
-        log.info(f"  📈 ПОКУПКА {реальное_кол:.6f} {coin} по ~{entry_price:.8f} ({amount_usdt:.2f} USDT)")
-        return entry_price, реальное_кол
-
+        order = exchange.create_market_buy_order(
+            symbol,
+            количество,
+            params={
+                'takeProfit': tp_price,
+                'stopLoss': sl_price,
+                'leverage': LEVERAGE,
+            }
+        )
+        log.info(f"  📈 ЛОНГ {symbol} маржа {маржа_usdt:.2f} USDT, кол-во {количество}, цена {цена:.8f}")
+        log.info(f"  🎯 TP={tp_price:.8f} (+{TP_PERCENT}%), SL={sl_price:.8f} (-{SL_PERCENT}%)")
+        return цена, количество
     except Exception as e:
-        log.error(f"  ❌ Ошибка при покупке: {e}")
+        log.error(f"  ❌ Ошибка открытия лонга: {e}")
         return None, None
 
-def выставить_tp_ордер(symbol, qty, tp_price):
-    """
-    ИСПРАВЛЕНО: ставим limit-ордер на продажу после покупки.
-    qty — реальное количество монет (уже с учётом комиссии).
-    Делаем 3 попытки с уменьшением qty на случай частичного расхода.
-    """
-    coin = symbol.split("/")[0]
-    tp_price_str = exchange.price_to_precision(symbol, tp_price)
-
-    for attempt in range(3):
-        try:
-            # Берём актуальный баланс монеты
-            актуальное_кол = баланс_монеты(symbol)
-            if актуальное_кол <= 0:
-                log.warning(f"  TP: баланс {coin} = 0, TP не нужен")
-                return None
-
-            # Небольшая "подушка" — продаём чуть меньше, чтобы не словить 170131
-            кол_для_tp = float(exchange.amount_to_precision(symbol, актуальное_кол * 0.999))
-            if кол_для_tp <= 0:
-                кол_для_tp = float(exchange.amount_to_precision(symbol, актуальное_кол))
-
-            log.info(f"  Попытка {attempt+1}: выставляем TP limit {кол_для_tp} {coin} @ {tp_price_str}")
-            order = exchange.create_limit_sell_order(symbol, кол_для_tp, float(tp_price_str))
-            log.info(f"  🎯 TP ордер выставлен: id={order['id']}, цена={tp_price_str}")
-            return order["id"]
-
-        except Exception as e:
-            log.warning(f"  Попытка {attempt+1} не удалось поставить TP: {e}")
-            time.sleep(2)
-
-    log.warning("  Не удалось выставить TP после 3 попыток — будем мониторить вручную")
-    return None
-
-def продать_по_рынку(symbol, qty, причина=""):
-    """Продаёт по рынку с правильной точностью."""
+def закрыть_позицию(symbol):
+    """Закрывает все позиции по символу рыночным ордером"""
     try:
-        актуальное_кол = баланс_монеты(symbol)
-        if актуальное_кол <= 0:
-            log.info(f"  Нечего продавать по {symbol}, баланс = 0")
-            return True
-        # Продаём актуальный баланс, не старое qty (могло измениться)
-        кол = float(exchange.amount_to_precision(symbol, актуальное_кол))
-        exchange.create_market_sell_order(symbol, кол)
-        log.info(f"  📉 ПРОДАЖА {кол} {symbol.split('/')[0]} по рынку{' (' + причина + ')' if причина else ''}")
-        return True
+        позиции = exchange.fetch_positions([symbol])
+        for pos in позиции:
+            if float(pos.get("contracts", 0)) != 0:
+                side = "sell" if pos["side"] == "long" else "buy"
+                qty = float(pos["contracts"])
+                exchange.create_market_order(symbol, side, qty)
+                log.info(f"  🔒 Позиция {symbol} закрыта по рынку")
+                return True
+        return False
     except Exception as e:
-        log.warning(f"  Ошибка продажи: {e}")
+        log.warning(f"  Ошибка закрытия позиции {symbol}: {e}")
         return False
 
-def отменить_ордера_по_паре(symbol):
+def есть_открытая_позиция(symbol):
     try:
-        ордера = exchange.fetch_open_orders(symbol)
-        for ордер in ордера:
-            try:
-                exchange.cancel_order(ордер["id"], symbol)
-                log.info(f"  🗑️  Отменён ордер {ордер['id']} на {symbol}")
-            except Exception as e:
-                log.warning(f"  Ошибка отмены ордера: {e}")
-    except Exception as e:
-        log.warning(f"  Ошибка отмены ордеров: {e}")
+        позиции = exchange.fetch_positions([symbol])
+        for pos in позиции:
+            if float(pos.get("contracts", 0)) != 0:
+                return True
+        return False
+    except:
+        return False
 
-def мониторить_позицию(symbol, entry_price, qty, открыта_в: float, tp_order_id=None) -> str:
-    """
-    Следит за позицией. Приоритет: limit TP-ордер. Fallback: мониторинг цены.
-    ИСПРАВЛЕНО: корректная логика определения TP (монеты исчезли с баланса).
-    """
+def мониторить_позицию(symbol, entry_price, маржа, открыта_в: float) -> str:
+    """Следит за позицией – ждёт, пока TP/SL не закроет или не наступит таймаут"""
     deadline_обычный = открыта_в + TRADE_TIMEOUT
-    deadline_24ч     = открыта_в + TRADE_MAX_LIFETIME
-    coin = symbol.split("/")[0]
+    deadline_24ч = открыта_в + TRADE_MAX_LIFETIME
 
     while True:
         сейчас = time.time()
-
         if сейчас >= deadline_24ч:
             log.warning("  🔴 ДЕДЛАЙН 24 ЧАСА — принудительное закрытие позиции!")
-            отменить_ордера_по_паре(symbol)
-            продать_по_рынку(symbol, qty, "дедлайн 24ч")
+            закрыть_позицию(symbol)
             return "дедлайн_24ч"
 
         if сейчас >= deadline_обычный:
-            log.info("  ⏰ Таймаут — закрываем позицию")
-            отменить_ордера_по_паре(symbol)
-            time.sleep(1)
-            продать_по_рынку(symbol, qty, "таймаут")
+            log.info("  ⏰ Таймаут 10 мин — закрываем позицию")
+            закрыть_позицию(symbol)
             return "timeout"
 
         time.sleep(10)
-        try:
-            бал = баланс_монеты(symbol)
-
-            # TP исполнен — монеты ушли
-            if бал < qty * 0.05:
-                log.info("  ✅ Тейк-профит исполнен!")
-                return "tp"
-
-            cur = exchange.fetch_ticker(symbol)["last"]
-            pnl = (cur - entry_price) / entry_price * 100
-
-            log.info(f"  [{symbol}] цена={cur:.8f}  P&L={pnl:+.2f}%  баланс={бал:.6f} {coin}  "
-                     f"до TP={((entry_price*(1+TP_PERCENT/100))-cur)/cur*100:+.2f}%  "
-                     f"до таймаута={int(deadline_обычный - сейчас)}с")
-
-            # SL — цена упала ниже порога
-            if pnl <= -SL_PERCENT:
-                log.info(f"  ❌ Стоп-лосс! P&L={pnl:.2f}%")
-                отменить_ордера_по_паре(symbol)
-                time.sleep(0.5)
-                продать_по_рынку(symbol, бал, "стоп-лосс")
-                return "sl"
-
-        except Exception as e:
-            log.warning(f"  Ошибка мониторинга: {e}")
+        if not есть_открытая_позиция(symbol):
+            # Позиция закрыта (по TP/SL или внешне)
+            # Попробуем понять, что сработало – по изменению баланса
+            # Для простоты считаем TP (если не было явной ошибки)
+            return "closed"
 
 # ================== ТЕСТОВАЯ СДЕЛКА ==================
 def тестовая_сделка():
-    log.info("🧪 Тестовая сделка (покупка+продажа) для проверки API...")
+    log.info("🧪 Тестовая сделка (фьючерсы) для проверки API...")
     try:
         sym = "DOGE/USDT"
+        установить_плечо(sym, 2)
         ticker = exchange.fetch_ticker(sym)
-        qty_raw = 1.5 / ticker['last']  # ~1.5 USDT (выше минимума биржи)
-        qty = float(exchange.amount_to_precision(sym, qty_raw))
-        log.info(f"  Покупка {qty} {sym} на ~1.5 USDT...")
-        exchange.create_market_buy_order(sym, qty)
-        time.sleep(3)
-        # Продаём актуальный баланс
-        актуальный = баланс_монеты(sym)
-        if актуальный > 0:
-            кол = float(exchange.amount_to_precision(sym, актуальный))
-            exchange.create_market_sell_order(sym, кол)
+        маржа = 1.0
+        кол_во = (маржа * 2) / ticker['last']
+        кол_во = float(exchange.amount_to_precision(sym, кол_во))
+        log.info(f"  Покупка {кол_во} {sym} на маржу {маржа} USDT...")
+        order = exchange.create_market_buy_order(sym, кол_во)
+        time.sleep(2)
+        # Закрываем
+        exchange.create_market_sell_order(sym, кол_во)
         log.info("  ✅ Тестовая сделка успешна!")
     except Exception as e:
         log.error(f"  ❌ Тестовая сделка не удалась: {e}")
@@ -623,16 +556,16 @@ def тестовая_сделка():
 # ================== ОТЧЁТЫ ==================
 def печатать_отчёт():
     сейчас = баланс_usdt()
-    старт  = stats["депозит_старт"]
+    старт = stats["депозит_старт"]
     дельта = сейчас - старт
-    знак   = "+" if дельта >= 0 else ""
+    знак = "+" if дельта >= 0 else ""
     чистый = stats["прибыль_usdt"] - stats["убыток_usdt"]
     процент = (дельта / старт * 100) if старт > 0 else 0
     winrate = (stats["тейкпрофит"] / stats["сделок_всего"] * 100) if stats["сделок_всего"] > 0 else 0
 
     log.info("")
     log.info("=" * 60)
-    log.info("  📊  ОТЧЁТ ЗА СЕССИЮ")
+    log.info("  📊  ОТЧЁТ (ФЬЮЧЕРСЫ)")
     log.info(f"  Время:                {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
     log.info(f"  Работает с:           {stats['старт_время']}")
     log.info("  ──────────────────────────────────────────────────────────")
@@ -667,24 +600,31 @@ def main():
 
     if not восстановлен or stats["депозит_старт"] == 0:
         stats["депозит_старт"] = баланс_сейчас
-        stats["старт_время"]   = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        stats["старт_время"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
 
     stats["депозит_текущий"] = баланс_сейчас
     stats["последний_отчёт"] = time.time()
 
     log.info("")
     log.info("=" * 60)
-    log.info("  🤖  БОТ ЗАПУЩЕН")
+    log.info("  🤖  ФЬЮЧЕРСНЫЙ БОТ ЗАПУЩЕН")
     log.info(f"  Запуск №:             {stats['запусков']}")
     log.info(f"  Дата/время:           {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
     log.info(f"  Работает с:           {stats['старт_время']}")
     log.info(f"  Баланс:               {баланс_сейчас:.2f} USDT")
-    log.info(f"  Стартовый депозит:    {stats['депозит_старт']:.2f} USDT")
+    log.info(f"  Плечо:                {LEVERAGE}x")
+    log.info(f"  Риск на сделку:       {RISK_PERCENT}% от баланса")
     log.info(f"  Пар для торговли:     {len(SYMBOLS)}")
     log.info(f"  MIN_SCORE:            {MIN_SCORE}")
     log.info(f"  TP / SL:              {TP_PERCENT}% / {SL_PERCENT}%")
+    log.info(f"  AI Bybit:             {'включён' if USE_BYBIT_AI else 'выключен'}")
+    log.info(f"  Уровни sup/res:       {'вкл' if USE_SUPPORT_RESISTANCE else 'выкл'}")
     log.info("=" * 60)
     log.info("")
+
+    # Устанавливаем плечо для всех символов
+    for sym in SYMBOLS:
+        установить_плечо(sym, LEVERAGE)
 
     while True:
         try:
@@ -692,9 +632,21 @@ def main():
                 печатать_отчёт()
 
             баланс = баланс_usdt()
-            первый_вход = рассчитать_размер_входа(баланс)
+            if баланс < MIN_BALANCE:
+                log.warning(f"  🛑 СТОП: баланс {баланс:.2f} USDT < {MIN_BALANCE}. Пополните счёт. Пауза 10 мин.")
+                time.sleep(600)
+                continue
 
-            log.info(f"── Сканирование {len(SYMBOLS)} пар ──")
+            # Просадка >25% от старта – пауза 60 мин
+            if stats["депозит_старт"] > 0:
+                просадка = (stats["депозит_старт"] - баланс) / stats["депозит_старт"] * 100
+                if просадка > 25:
+                    log.warning(f"  ⛔ Просадка {просадка:.1f}% превысила 25% – пауза 60 мин")
+                    time.sleep(3600)
+                    continue
+
+            # Сканируем
+            log.info(f"── Сканирование {len(SYMBOLS)} пар (баланс={баланс:.2f} USDT, порог={MIN_SCORE}) ──")
             scores = {}
             for sym in SYMBOLS:
                 try:
@@ -703,112 +655,132 @@ def main():
                     log.info(
                         f"  {sym:12s}  скор={res['score']:3d}/100  "
                         f"rsi={res['details'].get('rsi','?'):5}  "
-                        f"rf={res['details'].get('range_filter','вниз'):5}  "
-                        f"st={res['details'].get('supertrend','?'):5}  "
-                        f"macd={res['details'].get('macd','?'):8}  "
-                        f"тренд1h={res['details'].get('тренд_1h','?')}"
+                        f"rf={res['details'].get('range_filter','?'):5}  "
+                        f"st={res['details'].get('supertrend','?'):5}"
                     )
                 except Exception as e:
                     log.warning(f"  Ошибка скора {sym}: {e}")
                     scores[sym] = {"score": 0, "details": {}, "price": 0}
 
             if not scores:
-                log.warning("  Нет данных по парам, ждём...")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
             лучшая = max(scores, key=lambda s: scores[s]["score"])
-            финальный_скор = scores[лучшая]["score"]
+            сырой_скор = scores[лучшая]["score"]
             цена = scores[лучшая]["price"]
+            финальный_скор = сырой_скор
 
-            log.info(f"  ► Выбрана {лучшая}  скор={финальный_скор}  цена={цена:.8f}")
+            # AI Bybit с уровнями поддержки/сопротивления
+            if USE_BYBIT_AI:
+                ai = получить_ai_анализ_bybit(лучшая)
+                if ai:
+                    trend, bull_cnt, bear_cnt, support, resistance = ai
+                    log.info(f"  🤖 Bybit AI: тренд={trend}, бычьих={bull_cnt}, медвежьих={bear_cnt}")
+                    log.info(f"     Поддержка: {support}, Сопротивление: {resistance}")
+                    if trend == "bullish" and bull_cnt >= 3:
+                        финальный_скор += 15
+                    elif trend == "bearish" and bear_cnt >= 3:
+                        финальный_скор -= 15
+
+                    # Фильтр по уровням
+                    if USE_SUPPORT_RESISTANCE and support and len(support) > 0:
+                        ближ_под = min(support, key=lambda x: abs(x - цена))
+                        dist_to_support = abs(цена - ближ_под) / цена * 100
+                        if dist_to_support <= SUPPORT_THRESHOLD:
+                            log.info(f"     ✅ Цена близка к поддержке {ближ_под} (отклонение {dist_to_support:.2f}%)")
+                            финальный_скор += 10
+                    if USE_SUPPORT_RESISTANCE and resistance and len(resistance) > 0:
+                        ближ_рез = min(resistance, key=lambda x: abs(x - цена))
+                        dist_to_res = abs(цена - ближ_рез) / цена * 100
+                        if dist_to_res <= RESISTANCE_THRESHOLD:
+                            log.info(f"     ⚠️ Цена близка к сопротивлению {ближ_рез} (отклонение {dist_to_res:.2f}%) – не входим")
+                            финальный_скор = 0  # блокируем вход
+                else:
+                    log.info(f"  🤖 Bybit AI: данные не получены")
+
+            log.info(f"  ► Выбрана {лучшая}  сырой скор={сырой_скор} → финальный скор={финальный_скор}  цена={цена:.8f}")
 
             if финальный_скор < MIN_SCORE:
-                log.info(f"  Скор {финальный_скор} < порога {MIN_SCORE} — ждём {SCAN_INTERVAL} сек")
+                log.info(f"  Финальный скор {финальный_скор} < порога {MIN_SCORE} — ждём {SCAN_INTERVAL} сек")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            # ИСПРАВЛЕНО: проверяем что хватает баланса хотя бы на первый вход
-            if баланс < первый_вход:
-                log.warning(f"  ⚠️ Баланс {баланс:.2f} USDT < первый вход {первый_вход:.2f} USDT — ждём")
+            if есть_открытая_позиция(лучшая):
+                log.info("  Позиция уже открыта, ждём")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
+            маржа = рассчитать_маржу(баланс)
             log.info(f"  ✅ Сигнал к покупке (скор {финальный_скор} >= {MIN_SCORE})")
-            log.info(f"  💰 Первый вход: {первый_вход:.2f} USDT (баланс {баланс:.2f} USDT)")
+            log.info(f"  💰 Первая маржа: {маржа:.2f} USDT (баланс {баланс:.2f} USDT)")
 
-            сумма = первый_вход
             шаг = 0
+            текущая_маржа = маржа
             успех = False
 
             while шаг <= MAX_STEPS:
-                log.info(f"  ── Шаг мартингейла {шаг} / сумма {сумма:.2f} USDT ──")
-
-                текущий_баланс = баланс_usdt()
-                if текущий_баланс < сумма * 0.95:
-                    log.warning(f"  Недостаточно USDT ({текущий_баланс:.2f}) для входа {сумма:.2f} — прерываем серию")
+                log.info(f"  ── Шаг мартингейла {шаг} / маржа {текущая_маржа:.2f} USDT ──")
+                if баланс_usdt() < текущая_маржа * 1.05:
+                    log.warning(f"  Недостаточно USDT для маржи {текущая_маржа:.2f} — прерываем серию")
                     break
 
                 время_входа = time.time()
-                вход_цена, кол_во = купить_рыночным(лучшая, сумма)
-                if вход_цена is None or кол_во is None or кол_во <= 0:
-                    log.warning("  Покупка не удалась, прерываем серию")
+                цена_входа, кол_во = открыть_лонг(лучшая, текущая_маржа)
+                if цена_входа is None:
+                    log.warning("  Не удалось открыть позицию, прерываем серию")
                     break
 
                 stats["сделок_всего"] += 1
                 сохранить_состояние()
 
-                # Рассчитываем TP и SL цены
-                tp_цена = вход_цена * (1 + TP_PERCENT / 100)
-                sl_цена = вход_цена * (1 - SL_PERCENT / 100)
-                log.info(f"  🎯 Вход={вход_цена:.8f}  TP={tp_цена:.8f} (+{TP_PERCENT}%)  SL={sl_цена:.8f} (-{SL_PERCENT}%)")
+                результат = мониторить_позицию(лучшая, цена_входа, текущая_маржа, время_входа)
 
-                # Выставляем limit TP-ордер
-                time.sleep(1)  # даём бирже время обработать покупку
-                tp_order_id = выставить_tp_ордер(лучшая, кол_во, tp_цена)
-
-                # Мониторим позицию
-                результат = мониторить_позицию(лучшая, вход_цена, кол_во, время_входа, tp_order_id)
-
-                if результат == "tp":
-                    # Реальная прибыль с учётом комиссий
-                    прибыль_брутто = сумма * TP_PERCENT / 100
-                    комиссии = сумма * BYBIT_FEE * 2  # вход + выход
-                    прибыль_нетто = прибыль_брутто - комиссии
-                    stats["тейкпрофит"] += 1
-                    stats["прибыль_usdt"] += max(0, прибыль_нетто)
-                    log.info(f"  ✅ Прибыль зафиксирована ~{прибыль_нетто:.4f} USDT (после комиссий) — серия закончена")
+                if результат == "closed":
+                    # Сработал TP или SL – по умолчанию считаем TP (прибыль)
+                    # Узнать точно можно только по изменению баланса, но для простоты:
+                    # Сначала проверяем, не упал ли баланс резко.
+                    новый_баланс = баланс_usdt()
+                    изменение = новый_баланс - баланс
+                    if изменение > 0:
+                        прибыль_нетто = изменение
+                        stats["тейкпрофит"] += 1
+                        stats["прибыль_usdt"] += прибыль_нетто
+                        log.info(f"  ✅ Прибыль зафиксирована +{прибыль_нетто:.4f} USDT — серия закончена")
+                    else:
+                        убыток_нетто = -изменение
+                        stats["стоплосс"] += 1
+                        stats["убыток_usdt"] += убыток_нетто
+                        log.warning(f"  ❌ Убыток {убыток_нетто:.4f} USDT")
                     успех = True
                     break
 
-                elif результат == "sl":
-                    убыток = сумма * SL_PERCENT / 100
-                    stats["стоплосс"] += 1
-                    stats["убыток_usdt"] += убыток
-                    log.warning(f"  ❌ Убыток ~{убыток:.4f} USDT")
-                    шаг += 1
-                    if шаг <= MAX_STEPS:
-                        сумма = round(сумма * MARTINGALE_FACTOR, 2)
-                        stats["мартингейл_шагов"] += 1
-                        log.info(f"  🔁 Мартингейл шаг {шаг} — следующая ставка {сумма:.2f} USDT")
-                    else:
-                        log.info("  🚫 Лимит шагов мартингейла исчерпан — серия окончена")
-                        break
-
                 elif результат == "timeout":
-                    # ИСПРАВЛЕНО: таймаут = продали по рынку, убыток только комиссии
-                    # Не увеличиваем ставку мартингейла — это не настоящий убыток
-                    комиссии = сумма * BYBIT_FEE * 2
+                    # Таймаут – считаем убытком только комиссии
+                    комиссии = текущая_маржа * TAKER_FEE * 2  # вход+выход
                     stats["таймаут"] += 1
                     stats["убыток_usdt"] += комиссии
                     log.warning(f"  ⏰ Таймаут, убыток на комиссиях ~{комиссии:.4f} USDT — серия окончена")
-                    # При таймауте НЕ делаем следующий шаг мартингейла
                     break
 
                 elif результат == "дедлайн_24ч":
                     stats["дедлайн_24ч"] += 1
-                    stats["убыток_usdt"] += сумма * SL_PERCENT / 100
+                    stats["убыток_usdt"] += текущая_маржа * SL_PERCENT / 100
                     log.warning("  Серия прервана по дедлайну 24 часа")
+                    break
+
+                # Если что-то пошло не так и позиция не закрылась – выходим
+                if есть_открытая_позиция(лучшая):
+                    log.warning("  Позиция всё ещё открыта, закрываем принудительно")
+                    закрыть_позицию(лучшая)
+
+                шаг += 1
+                if шаг <= MAX_STEPS:
+                    текущая_маржа = round(текущая_маржа * MARTINGALE_FACTOR, 2)
+                    stats["мартингейл_шагов"] += 1
+                    log.info(f"  🔁 Мартингейл шаг {шаг} — следующая маржа {текущая_маржа:.2f} USDT")
+                else:
+                    log.info("  🚫 Лимит шагов мартингейла исчерпан — серия окончена")
                     break
 
             сохранить_состояние()
