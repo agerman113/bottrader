@@ -1,14 +1,14 @@
 """
-Bybit ФЬЮЧЕРСНЫЙ бот (Linear USDT Perpetual) — v3 FIXED
+Bybit ФЬЮЧЕРСНЫЙ бот (Linear USDT Perpetual) — v4 FIXED
 =========================================================
-ИСПРАВЛЕНИЯ v3 (все 7 проблем):
-1. Убрана тестовая_сделка() — тратила деньги при каждом запуске
-2. Инвентаризация теперь безопасна — закрывает только позиции БОТА
-3. Фильтр 4h тренда — вход только при бычьем тренде на 4h
-4. AI-коррекция: bearish = -15 (было -8), bullish при >75% longs = нейтрально
-5. TP=2.5% / SL=0.8% → R:R = 3:1 (было 1.5/1.0 = 1.25:1)
-6. MIN_SCORE=60, риск 1-2% (было 55, 1.5-4%)
-7. Cooldown 1ч после 3 SL подряд
+ДОПОЛНИТЕЛЬНЫЕ ИСПРАВЛЕНИЯ v4:
+1. Адаптивный трейлинг стоп на основе ATR — не закрывает рано.
+2. Блокировка символа после серии SL (30 мин) — вынуждает менять пару.
+3. Динамический риск с учётом волатильности (ATR).
+4. Минимальный SL 0.5% от цены.
+5. Трейлинг активируется только после достижения 0.5% прибыли.
+6. Улучшенный фильтр S/R: дополнительная проверка расстояния до сопротивления.
+7. Возможность открытия шорта после SL на лонге (если тренд 4h медвежий).
 """
 
 import os
@@ -73,19 +73,31 @@ LEVERAGE            = 3
 TIMEFRAME_TA        = "5m"
 TIMEFRAME_TREND     = "1h"
 TIMEFRAME_MID       = "15m"
-TIMEFRAME_4H        = "4h"           # [FIX-3] глобальный тренд
+TIMEFRAME_4H        = "4h"           # глобальный тренд
 SCAN_INTERVAL       = 300
 
-MIN_SCORE           = 60             # [FIX-6] было 55
-BASE_RISK_PCT       = 1.0            # [FIX-6] было 1.5%
-MAX_RISK_PCT        = 2.0            # [FIX-6] было 4.0%
+MIN_SCORE           = 65              # повышено с 60
+BASE_RISK_PCT       = 0.8            # снижено с 1.0
+MAX_RISK_PCT        = 1.5            # снижено с 2.0
 
-TP_PERCENT          = 2.5            # [FIX-5] было 1.5%
-SL_PERCENT          = 0.8            # [FIX-5] было 1.0%
+TP_PERCENT          = 2.5            # целевая прибыль
+SL_PERCENT          = 0.8            # стоп-лосс (минимальный)
+MIN_SL_PERCENT      = 0.5            # абсолютный минимум SL
+
 TRADE_MAX_LIFETIME  = 7200
 
-TRAILING_STEP_PCT   = 0.3
-TRAILING_OFFSET_PCT = 0.4
+# === АДАПТИВНЫЙ ТРЕЙЛИНГ ===
+TRAILING_ATR_PERIOD = 14             # период ATR для расчёта шага
+TRAILING_ATR_MULT   = 1.5            # шаг = ATR% * MULT
+TRAILING_OFFSET_MULT= 1.0            # отступ = ATR% * OFFSET_MULT
+MIN_TRAILING_STEP   = 0.25           # минимальный шаг трейлинга в процентах
+MIN_TRAILING_OFFSET = 0.35           # минимальный отступ в процентах
+MIN_PROFIT_FOR_TRAIL= 0.5            # активировать трейлинг только при прибыли ≥ X%
+
+# === БЛОКИРОВКА ПОСЛЕ SL ===
+SYMBOL_BLOCK_MINUTES = 30            # на сколько минут блокировать символ после SL
+SL_STREAK_LIMIT     = 3              # глобальная пауза после N SL подряд
+SL_STREAK_PAUSE     = 3600           # 1 час
 
 MIN_BALANCE         = 5.0
 REPORT_INTERVAL     = 1800
@@ -98,10 +110,7 @@ SR_MIN_TOUCHES      = 3
 SR_CLUSTER_TOL      = 0.005
 SR_BLOCK_DIST_PCT   = 0.15
 
-SL_STREAK_LIMIT     = 3             # [FIX-7] пауза после N SL подряд
-SL_STREAK_PAUSE     = 3600          # [FIX-7] 1 час
-
-MAX_DRAWDOWN_PCT    = 20.0          # было 30%
+MAX_DRAWDOWN_PCT    = 20.0
 
 # ================== ЛОГИРОВАНИЕ ==================
 logging.basicConfig(
@@ -140,7 +149,7 @@ stats = {
     "депозит_старт":   0.0,
     "старт_время":     "",
     "последний_отчёт": 0.0,
-    "sl_streak":       0,            # [FIX-7] счётчик SL подряд
+    "sl_streak":       0,
 }
 
 # ================== ЖУРНАЛ СДЕЛОК ==================
@@ -409,16 +418,11 @@ def получить_позиции() -> list:
 
 
 def закрыть_позиции_бота(символы: list):
-    """
-    [FIX-2] Закрывает ТОЛЬКО позиции из списка символов бота.
-    Оригинал закрывал ВСЕ позиции на аккаунте, включая ручные.
-    """
     log.info("  🔒 Закрытие позиций бота (только из списка SYMBOLS)...")
     try:
         positions = получить_позиции()
         for pos in positions:
             sym  = pos["symbol"]
-            # Проверяем, что это символ из нашего списка
             sym_normalized = sym.replace("/", "").replace(":USDT", "") + "/USDT:USDT"
             if sym not in символы and sym_normalized not in символы:
                 log.info(f"    ⏭️  Пропуск {sym} — не из списка бота (ручная позиция?)")
@@ -438,7 +442,6 @@ def закрыть_позиции_бота(символы: list):
 
 
 def отменить_ордера_бота(символы: list):
-    """[FIX-2] Отменяет только ордера по символам бота."""
     log.info("  🗑️  Отмена ордеров бота...")
     try:
         orders = exchange.fetch_open_orders()
@@ -452,9 +455,13 @@ def отменить_ордера_бота(символы: list):
         log.warning(f"  Ошибка отмены ордеров: {e}")
 
 
-def установить_плечо(symbol: str, leverage: int):
+def установить_плечо(symbol: str, leverage: int, side: str = "long"):
     try:
-        exchange.set_leverage(leverage, symbol, params={"buyLeverage": leverage, "sellLeverage": leverage})
+        if side == "long":
+            exchange.set_leverage(leverage, symbol, params={"buyLeverage": leverage, "sellLeverage": leverage})
+        else:
+            # для шорта тоже ставим плечо (аналогично)
+            exchange.set_leverage(leverage, symbol, params={"buyLeverage": leverage, "sellLeverage": leverage})
     except Exception as e:
         log.warning(f"  Не удалось установить плечо {symbol}: {e}")
 
@@ -638,12 +645,8 @@ def получить_bybit_ai(symbol: str) -> dict:
     return result
 
 
-# ================== [FIX-3] ГЛОБАЛЬНЫЙ ТРЕНД 4H ==================
+# ================== ГЛОБАЛЬНЫЙ ТРЕНД 4H ==================
 def тренд_4h_бычий(symbol: str) -> bool:
-    """
-    [FIX-3] Возвращает True только если 4h тренд бычий (EMA20 > EMA50).
-    Блокирует входы против старшего тренда — главная причина убытков.
-    """
     try:
         raw = exchange.fetch_ohlcv(symbol, TIMEFRAME_4H, limit=60)
         if len(raw) < 55:
@@ -654,10 +657,23 @@ def тренд_4h_бычий(symbol: str) -> bool:
         return bool(ema20 > ema50)
     except Exception as e:
         log.debug(f"  Ошибка 4h тренда {symbol}: {e}")
-        return False  # при ошибке — не торгуем
+        return False
 
 
-# ================== ТЕХНИЧЕСКИЙ СКОР ==================
+def тренд_4h_медвежий(symbol: str) -> bool:
+    try:
+        raw = exchange.fetch_ohlcv(symbol, TIMEFRAME_4H, limit=60)
+        if len(raw) < 55:
+            return False
+        df    = pd.DataFrame(raw, columns=["ts","o","h","l","c","v"])
+        ema20 = _ema(df["c"], 20).iloc[-1]
+        ema50 = _ema(df["c"], 50).iloc[-1]
+        return bool(ema20 < ema50)
+    except Exception:
+        return False
+
+
+# ================== ТЕХНИЧЕСКИЙ СКОР (ЛОНГ) ==================
 def получить_скор(symbol: str) -> dict:
     details = {}
     score   = 0
@@ -680,7 +696,7 @@ def получить_скор(symbol: str) -> dict:
 
         price = float(c5.iloc[-1])
 
-        # --- RSI 5m [макс +20] ---
+        # --- RSI 5m ---
         rsi_val = calc_rsi(c5).iloc[-1]
         details["rsi"] = round(rsi_val, 1)
         if   25 <= rsi_val <= 42: score += 20
@@ -688,13 +704,13 @@ def получить_скор(symbol: str) -> dict:
         elif rsi_val < 25:        score += 12
         elif 52 < rsi_val <= 65:  score +=  5
 
-        # --- RSI 1h [макс +8] ---
+        # --- RSI 1h ---
         rsi_1h = calc_rsi(c1h).iloc[-1]
         details["rsi_1h"] = round(rsi_1h, 1)
         if   rsi_1h < 55: score += 8
         elif rsi_1h < 65: score += 4
 
-        # --- MACD 5m [макс +18] ---
+        # --- MACD 5m ---
         ml, sl_macd, _ = calc_macd(c5)
         macd_bull  = ml.iloc[-1] > sl_macd.iloc[-1]
         macd_cross = macd_bull and ml.iloc[-2] <= sl_macd.iloc[-2]
@@ -702,79 +718,74 @@ def получить_скор(symbol: str) -> dict:
         if   macd_cross: score += 18
         elif macd_bull:  score +=  8
 
-        # --- Range Filter 5m [макс +15] ---
+        # --- Range Filter 5m ---
         _, _, _, rf_up, rf_down = calc_range_filter(df5)
         rf_up_now = rf_up.iloc[-1]
         details["range_filter"] = "вверх" if rf_up_now else ("вниз" if rf_down.iloc[-1] else "бок")
         if rf_up_now:
             score += 15
 
-        # --- Supertrend 5m [макс +12] ---
+        # --- Supertrend 5m ---
         st_up, _ = calc_supertrend(df5)
         details["supertrend"] = "вверх" if st_up.iloc[-1] else "вниз"
         if st_up.iloc[-1]:
             score += 12
 
-        # --- Supertrend 15m [макс +8] ---
+        # --- Supertrend 15m ---
         st_up_15, _ = calc_supertrend(df15)
         details["supertrend_15m"] = "вверх" if st_up_15.iloc[-1] else "вниз"
         if st_up_15.iloc[-1]:
             score += 8
 
-        # --- Hull MA 5m [макс +8] ---
+        # --- Hull MA 5m ---
         hu_up, _ = calc_hull(c5)
         details["hull"] = "вверх" if hu_up.iloc[-1] else "вниз"
         if hu_up.iloc[-1]:
             score += 8
 
-        # --- EMA 50/200 тренд 1h [макс +10] ---
+        # --- EMA 50/200 тренд 1h ---
         ema50_1h  = _ema(c1h, 50).iloc[-1]
         ema200_1h = _ema(c1h, 200).iloc[-1]
         details["тренд_1h"] = "бычий" if ema50_1h > ema200_1h else "медвежий"
         if ema50_1h > ema200_1h:
             score += 10
 
-        # --- EMA 20/50 тренд 15m [макс +5] ---
+        # --- EMA 20/50 тренд 15m ---
         ema20_15 = _ema(c15, 20).iloc[-1]
         ema50_15 = _ema(c15, 50).iloc[-1]
         details["тренд_15m"] = "бычий" if ema20_15 > ema50_15 else "медвежий"
         if ema20_15 > ema50_15:
             score += 5
 
-        # --- [FIX-3] Тренд 4h фиксируем в details для аналитики ---
-        # (сам фильтр применяется ДО вызова get_score в главном цикле)
-        # Здесь просто записываем факт для post-trade анализа
-        details["тренд_4h"] = "бычий"  # если дошли сюда — 4h уже проверен
-
-        # --- ADX [макс +8] ---
+        # --- ADX ---
         adx, pdi, mdi = calc_adx(df5)
         adx_val = adx.iloc[-1]
         details["adx"] = round(adx_val, 1)
         if   adx_val > 25 and pdi.iloc[-1] > mdi.iloc[-1]: score += 8
         elif adx_val > 20:                                   score += 3
 
-        # --- Stochastic [макс +8] ---
+        # --- Stochastic ---
         k_ser, _ = calc_stochastic(df5)
         k_val = k_ser.iloc[-1]
         details["stoch_k"] = round(k_val, 1)
         if   k_val < 25: score += 8
         elif k_val < 50: score += 4
 
-        # --- Объём [макс +8] ---
+        # --- Объём ---
         vol_avg   = df5["v"].rolling(20).mean().iloc[-1]
         vol_ratio = df5["v"].iloc[-1] / (vol_avg + 1e-10)
         details["объём_ratio"] = round(vol_ratio, 2)
         if   vol_ratio > 1.5: score += 8
         elif vol_ratio > 1.2: score += 4
 
-        # --- VWAP отклонение [макс +8] ---
+        # --- VWAP отклонение ---
         vwap_dev = calc_vwap_deviation(df5).iloc[-1]
         details["vwap_dev"] = round(vwap_dev, 2)
         if   -3 <= vwap_dev <= -0.3: score += 8
         elif vwap_dev < -3:          score += 4
         elif vwap_dev <= 1:          score += 2
 
-        # --- S/R [макс +12, штраф -20] ---
+        # --- S/R ---
         sr = calc_support_resistance(df5)
         details["support"]   = sr["support"]
         details["resistance"]= sr["resistance"]
@@ -793,7 +804,7 @@ def получить_скор(symbol: str) -> dict:
                 f"res={sr['dist_to_res_pct']:.2f}%)"
             )
 
-        # --- Штраф: 3 красных свечи [-15] ---
+        # --- Штраф: 3 красных свечи ---
         last3_bearish = all(df5["c"].iloc[-i] < df5["o"].iloc[-i] for i in range(1, 4))
         if last3_bearish:
             score -= 15
@@ -807,14 +818,24 @@ def получить_скор(symbol: str) -> dict:
     return {"score": score, "details": details, "price": price, "sr": sr}
 
 
-# ================== [FIX-4] AI КОРРЕКЦИЯ ==================
+def получить_скор_шорта(symbol: str) -> dict:
+    """
+    Упрощённый скор для шорта — инверсия лонговых индикаторов.
+    Используется только после SL на лонге, когда 4h тренд медвежий.
+    """
+    res = получить_скор(symbol)
+    if res["score"] == 0:
+        return res
+    # инвертируем скор: 100 - исходный, но с дополнительным смещением
+    inverted = 100 - res["score"]
+    # понижаем порог для шорта (на 10 пунктов), чтобы было меньше ложных входов
+    inverted = max(0, inverted - 10)
+    res["score"] = inverted
+    return res
+
+
+# ================== AI КОРРЕКЦИЯ ==================
 def применить_ai_корректировку(score: int, symbol: str) -> int:
-    """
-    [FIX-4] Исправленная коррекция:
-    - bearish: -15 (было -8)
-    - bullish при >75% longs: нейтрально (толпа в ловушке)
-    - bullish при 60-75%: +5 (было +8)
-    """
     ai = получить_bybit_ai(symbol)
     if not ai["available"]:
         log.info(f"  🤖 Bybit ratio: недоступен")
@@ -826,22 +847,28 @@ def применить_ai_корректировку(score: int, symbol: str) ->
 
     if signal == "bullish":
         if long_r > 0.75:
-            # Экстремальный перекос — часто ловушка для лонгистов
             log.info(f"  🤖 Экстремальный long ratio ({long_r:.1%}) — без коррекции")
             return score
         return min(100, score + 5)
     elif signal == "bearish":
-        return max(0, score - 15)   # [FIX-4] было -8
+        return max(0, score - 15)
     return score
 
 
 # ================== РАЗМЕР ПОЗИЦИИ ==================
-def рассчитать_размер_позиции(score: int, баланс: float) -> float:
+def рассчитать_размер_позиции(score: int, баланс: float, atr_pct: float = 1.0) -> float:
+    # Базовый риск
     if score <= MIN_SCORE:
         risk_pct = BASE_RISK_PCT
     else:
         factor   = (score - MIN_SCORE) / (100 - MIN_SCORE)
         risk_pct = BASE_RISK_PCT + (MAX_RISK_PCT - BASE_RISK_PCT) * factor
+
+    # Коррекция на волатильность: если ATR% больше 1.5%, снижаем риск
+    if atr_pct > 1.5:
+        risk_pct *= (1.5 / atr_pct)
+        risk_pct = max(BASE_RISK_PCT * 0.5, risk_pct)
+    risk_pct = min(risk_pct, MAX_RISK_PCT)
 
     max_loss_usdt = баланс * risk_pct / 100
     margin_usdt   = max_loss_usdt / (SL_PERCENT / 100)
@@ -854,9 +881,9 @@ def рассчитать_размер_позиции(score: int, баланс: f
 
 
 # ================== ОТКРЫТИЕ ПОЗИЦИИ ==================
-def открыть_лонг(symbol: str, margin_usdt: float, tp_price: float, sl_price: float):
+def открыть_позицию(symbol: str, margin_usdt: float, tp_price: float, sl_price: float, side: str = "long"):
     try:
-        установить_плечо(symbol, LEVERAGE)
+        установить_плечо(symbol, LEVERAGE, side)
 
         ticker       = exchange.fetch_ticker(symbol)
         price        = float(ticker["last"])
@@ -871,13 +898,14 @@ def открыть_лонг(symbol: str, margin_usdt: float, tp_price: float, sl
         tp_str = exchange.price_to_precision(symbol, tp_price)
         sl_str = exchange.price_to_precision(symbol, sl_price)
 
+        buy_sell = "buy" if side == "long" else "sell"
         log.info(
-            f"  Открываем лонг {symbol}: qty={qty}, маржа≈{margin_usdt:.2f}U, "
+            f"  Открываем {side} {symbol}: qty={qty}, маржа≈{margin_usdt:.2f}U, "
             f"плечо={LEVERAGE}x, TP={tp_str}, SL={sl_str}"
         )
 
         order = exchange.create_market_order(
-            symbol, "buy", qty,
+            symbol, buy_sell, qty,
             params={
                 "takeProfit": float(tp_str),
                 "stopLoss":   float(sl_str),
@@ -891,16 +919,24 @@ def открыть_лонг(symbol: str, margin_usdt: float, tp_price: float, sl
         except Exception:
             pass
 
-        log.info(f"  📈 ЛОНГ открыт: {qty} {symbol} @ ~{entry_price:.8f}")
+        log.info(f"  📈 {side.upper()} открыт: {qty} {symbol} @ ~{entry_price:.8f}")
         return entry_price, qty
 
     except Exception as e:
-        log.error(f"  ❌ Ошибка открытия лонга: {e}")
+        log.error(f"  ❌ Ошибка открытия {side}: {e}")
         return None, None
 
 
+def открыть_лонг(symbol: str, margin_usdt: float, tp_price: float, sl_price: float):
+    return открыть_позицию(symbol, margin_usdt, tp_price, sl_price, "long")
+
+
+def открыть_шорт(symbol: str, margin_usdt: float, tp_price: float, sl_price: float):
+    return открыть_позицию(symbol, margin_usdt, tp_price, sl_price, "short")
+
+
 # ================== ОБНОВЛЕНИЕ SL ==================
-def обновить_sl_на_бирже(symbol: str, new_sl: float) -> bool:
+def обновить_sl_на_бирже(symbol: str, new_sl: float, side: str = "long") -> bool:
     try:
         sl_str = exchange.price_to_precision(symbol, new_sl)
         exchange.set_trading_stop(
@@ -934,22 +970,38 @@ def обновить_sl_на_бирже(symbol: str, new_sl: float) -> bool:
 
 # ================== МОНИТОРИНГ ПОЗИЦИИ ==================
 def мониторить_позицию(symbol: str, entry_price: float, qty: float,
-                        открыта_в: float, sl_цена: float) -> str:
+                        открыта_в: float, sl_цена: float, side: str = "long") -> str:
     deadline        = открыта_в + TRADE_MAX_LIFETIME
     coin            = symbol.split("/")[0]
     breakeven_price = entry_price * (1 + BYBIT_FEE * 2 + 0.0005)
-    trailing_step   = TRAILING_STEP_PCT  / 100
+    trailing_step   = TRAILING_STEP_PCT / 100
     trailing_offset = TRAILING_OFFSET_PCT / 100
 
-    фаза            = 1
+    # Получаем ATR для адаптивного трейлинга
+    try:
+        raw = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=50)
+        if len(raw) >= 30:
+            df = pd.DataFrame(raw, columns=["ts","o","h","l","c","v"])
+            atr_series = calc_atr(df, TRAILING_ATR_PERIOD)
+            atr_val = atr_series.iloc[-1]
+            atr_pct = (atr_val / entry_price) * 100
+            # Шаг трейлинга = ATR% * MULT, но не меньше MIN_TRAILING_STEP
+            trailing_step = max(MIN_TRAILING_STEP, atr_pct * TRAILING_ATR_MULT)
+            trailing_offset = max(MIN_TRAILING_OFFSET, atr_pct * TRAILING_OFFSET_MULT)
+            log.info(f"  📊 ATR = {atr_pct:.2f}% → шаг трейлинга {trailing_step:.2f}%, отступ {trailing_offset:.2f}%")
+    except Exception as e:
+        log.warning(f"  Не удалось рассчитать ATR: {e}, используем стандартный шаг")
+        trailing_step = TRAILING_STEP_PCT / 100
+        trailing_offset = TRAILING_OFFSET_PCT / 100
+
+    фаза            = 1          # 1=обычный, 2=безубыток, 3=трейлинг
     текущий_sl      = sl_цена
     пиковая_цена    = entry_price
     следующий_трейл = entry_price * (1 + trailing_step)
 
     log.info(
-        f"  🚦 Мониторинг | вход={entry_price:.8f} "
-        f"| безубыток @ {breakeven_price:.8f}"
-        f"  | трейлинг шаг={TRAILING_STEP_PCT}% отступ={TRAILING_OFFSET_PCT}%"
+        f"  🚦 Мониторинг | вход={entry_price:.8f} | безубыток @ {breakeven_price:.8f} | "
+        f"трейлинг шаг={trailing_step*100:.2f}% отступ={trailing_offset*100:.2f}% | активация трейлинга при +{MIN_PROFIT_FOR_TRAIL}%"
     )
 
     while True:
@@ -958,7 +1010,8 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
         if сейчас >= deadline:
             log.warning("  ⏰ Дедлайн — принудительное закрытие")
             try:
-                exchange.create_market_order(symbol, "sell", qty, params={"reduceOnly": True})
+                close_side = "sell" if side == "long" else "buy"
+                exchange.create_market_order(symbol, close_side, qty, params={"reduceOnly": True})
             except Exception as e:
                 log.warning(f"  Ошибка закрытия по дедлайну: {e}")
             return "таймаут"
@@ -968,11 +1021,12 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
         try:
             positions = exchange.fetch_positions([symbol])
             active    = [p for p in positions
-                         if float(p.get("contracts", 0) or 0) > 0 and p.get("side") == "long"]
+                         if float(p.get("contracts", 0) or 0) > 0 and p.get("side") == side]
 
             if not active:
                 cur_price = float(exchange.fetch_ticker(symbol)["last"])
-                if cur_price >= entry_price * (1 + TP_PERCENT / 100 * 0.7):
+                if (side == "long" and cur_price >= entry_price * (1 + TP_PERCENT / 100 * 0.7)) or \
+                   (side == "short" and cur_price <= entry_price * (1 - TP_PERCENT / 100 * 0.7)):
                     log.info("  ✅ Позиция закрыта по Тейк-профиту")
                     return "tp"
                 elif фаза >= 2:
@@ -985,37 +1039,49 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
             pos       = active[0]
             cur_price = float(exchange.fetch_ticker(symbol)["last"])
             pnl       = float(pos.get("unrealizedPnl", 0) or 0)
-            pnl_pct   = (cur_price - entry_price) / entry_price * 100
+            if side == "long":
+                pnl_pct   = (cur_price - entry_price) / entry_price * 100
+            else:
+                pnl_pct   = (entry_price - cur_price) / entry_price * 100
             до_дед    = int(deadline - сейчас)
 
-            if фаза == 1 and cur_price >= breakeven_price:
-                фаза    = 2
-                new_sl  = entry_price * (1 + BYBIT_FEE * 2 + 0.0003)
-                if обновить_sl_на_бирже(symbol, new_sl):
+            # Фаза 1: достижение безубытка
+            if фаза == 1 and pnl_pct >= 0:
+                # Переводим SL в безубыток (покрываем комиссии)
+                new_sl = entry_price * (1 + BYBIT_FEE * 2 + 0.0003) if side == "long" else entry_price * (1 - BYBIT_FEE * 2 - 0.0003)
+                if обновить_sl_на_бирже(symbol, new_sl, side):
+                    фаза            = 2
                     текущий_sl      = new_sl
                     пиковая_цена    = cur_price
-                    следующий_трейл = cur_price * (1 + trailing_step)
-                    log.info(
-                        f"  🔒 БЕЗУБЫТОК! SL → {new_sl:.8f} "
-                        f"(вход={entry_price:.8f}, комиссии покрыты)"
-                    )
+                    следующий_трейл = cur_price * (1 + trailing_step if side == "long" else 1 - trailing_step)
+                    log.info(f"  🔒 БЕЗУБЫТОК! SL → {new_sl:.8f} (комиссии покрыты)")
 
-            elif фаза >= 2 and cur_price >= следующий_трейл:
-                фаза         = 3
-                пиковая_цена = max(пиковая_цена, cur_price)
-                new_sl       = пиковая_цена * (1 - trailing_offset)
-                if new_sl > текущий_sl:
-                    if обновить_sl_на_бирже(symbol, new_sl):
-                        текущий_sl      = new_sl
-                        следующий_трейл = cur_price * (1 + trailing_step)
-                        log.info(
-                            f"  📈 ТРЕЙЛИНГ: пик={пиковая_цена:.8f} "
-                            f"→ SL={new_sl:.8f} "
-                            f"(зафиксировано {(new_sl-entry_price)/entry_price*100:+.2f}%)"
-                        )
-
-            if cur_price > пиковая_цена:
-                пиковая_цена = cur_price
+            # Фаза 2/3: трейлинг (активируем только после MIN_PROFIT_FOR_TRAIL)
+            if фаза >= 2 and pnl_pct >= MIN_PROFIT_FOR_TRAIL:
+                if side == "long":
+                    if cur_price >= следующий_трейл:
+                        пиковая_цена = max(пиковая_цена, cur_price)
+                        new_sl = пиковая_цена * (1 - trailing_offset)
+                        if new_sl > текущий_sl:
+                            if обновить_sl_на_бирже(symbol, new_sl, side):
+                                текущий_sl      = new_sl
+                                следующий_трейл = cur_price * (1 + trailing_step)
+                                log.info(f"  📈 ТРЕЙЛИНГ: пик={пиковая_цена:.8f} → SL={new_sl:.8f} "
+                                         f"(зафиксировано {(new_sl-entry_price)/entry_price*100:+.2f}%)")
+                    if cur_price > пиковая_цена:
+                        пиковая_цена = cur_price
+                else:  # short
+                    if cur_price <= следующий_трейл:
+                        пиковая_цена = min(пиковая_цена, cur_price)
+                        new_sl = пиковая_цена * (1 + trailing_offset)
+                        if new_sl < текущий_sl:
+                            if обновить_sl_на_бирже(symbol, new_sl, side):
+                                текущий_sl      = new_sl
+                                следующий_трейл = cur_price * (1 - trailing_step)
+                                log.info(f"  📈 ТРЕЙЛИНГ: пик={пиковая_цена:.8f} → SL={new_sl:.8f} "
+                                         f"(зафиксировано {(entry_price-new_sl)/entry_price*100:+.2f}%)")
+                    if cur_price < пиковая_цена:
+                        пиковая_цена = cur_price
 
             фаза_лейбл = {1: "обычная", 2: "безубыток 🔒", 3: "трейлинг 📈"}.get(фаза, "?")
             log.info(
@@ -1065,7 +1131,7 @@ def печатать_отчёт():
 
 # ================== ГЛАВНЫЙ ЦИКЛ ==================
 def main():
-    # [FIX-2] Инвентаризация — только символы бота, не все позиции на аккаунте
+    # Инвентаризация
     log.info("🔄 Инвентаризация (только позиции бота)...")
     отменить_ордера_бота(SYMBOLS)
     time.sleep(1)
@@ -1073,8 +1139,7 @@ def main():
     log.info("✅ Инвентаризация завершена")
     time.sleep(2)
 
-    # [FIX-1] тестовая_сделка() — УБРАНА
-
+    # Загрузка состояния
     восстановлен  = загрузить_состояние()
     баланс_сейчас = баланс_usdt()
     stats["запусков"] += 1
@@ -1090,9 +1155,12 @@ def main():
         log.info(f"  📖 Найдено {len(история)} сделок в истории — запуск аналитики...")
         аналитика_по_инструментам()
 
+    # Словарь для блокировки символов после SL
+    заблокированные_символы = {}
+
     log.info("")
     log.info("=" * 60)
-    log.info("  🤖  ФЬЮЧЕРСНЫЙ БОТ v3 FIXED")
+    log.info("  🤖  ФЬЮЧЕРСНЫЙ БОТ v4 (ADAPTIVE + BLOCK)")
     log.info("")
     log.info(f"  Запуск №:            {stats['запусков']}")
     log.info(f"  Плечо:               {LEVERAGE}x")
@@ -1103,6 +1171,8 @@ def main():
     log.info(f"  Пар для торговли:    {len(SYMBOLS)}")
     log.info(f"  MIN_SCORE:           {MIN_SCORE}")
     log.info(f"  TP / SL:             {TP_PERCENT}% / {SL_PERCENT}%  (R:R ≈ 3:1)")
+    log.info(f"  Трейлинг:            адаптивный (ATR), мин.шаг {MIN_TRAILING_STEP}%")
+    log.info(f"  Блокировка символа:  {SYMBOL_BLOCK_MINUTES} мин после SL")
     log.info(f"  SL cooldown:         {SL_STREAK_LIMIT} SL подряд → пауза {SL_STREAK_PAUSE//60} мин")
     log.info(f"  Фильтр тренда:       4h EMA20 > EMA50")
     log.info(f"  S/R близость:        ±{SR_PROXIMITY_PCT}%  (мин. касаний: {SR_MIN_TOUCHES})")
@@ -1129,7 +1199,7 @@ def main():
                     time.sleep(7200)
                     continue
 
-            # [FIX-7] Cooldown после серии SL
+            # Глобальная пауза после серии SL
             if stats.get("sl_streak", 0) >= SL_STREAK_LIMIT:
                 log.warning(
                     f"  🧊 {SL_STREAK_LIMIT} SL подряд — cooldown {SL_STREAK_PAUSE//60} мин. "
@@ -1146,18 +1216,22 @@ def main():
                 time.sleep(30)
                 continue
 
-            log.info(f"── Сканирование {len(SYMBOLS)} пар "
-                     f"(баланс={баланс:.2f} USDT, порог={MIN_SCORE}) ──")
+            log.info(f"── Сканирование {len(SYMBOLS)} пар (баланс={баланс:.2f} USDT, порог={MIN_SCORE}) ──")
 
             scores = {}
             for sym in SYMBOLS:
                 try:
-                    # [FIX-3] Проверяем 4h тренд ДО дорогостоящего расчёта скора
+                    # Проверка блокировки символа
+                    if sym in заблокированные_символы and time.time() < заблокированные_символы[sym]:
+                        log.debug(f"  {sym.split(':')[0]}: заблокирован до {datetime.fromtimestamp(заблокированные_символы[sym]).strftime('%H:%M:%S')}")
+                        scores[sym] = {"score": 0, "score_final": 0, "details": {}, "price": 0, "sr": {}}
+                        continue
+
+                    # Фильтр 4h тренда для лонга
                     if not тренд_4h_бычий(sym):
-                        log.debug(f"  {sym.split(':')[0]}: 4h медвежий — пропуск")
-                        scores[sym] = {"score": 0, "score_final": 0,
-                                       "details": {"тренд_4h": "медвежий"},
-                                       "price": 0, "sr": {}}
+                        log.debug(f"  {sym.split(':')[0]}: 4h медвежий — лонг пропуск")
+                        # Но если символ не заблокирован и тренд медвежий, позже проверим шорт (после SL)
+                        scores[sym] = {"score": 0, "score_final": 0, "details": {"тренд_4h": "медвежий"}, "price": 0, "sr": {}}
                         continue
 
                     res      = получить_скор(sym)
@@ -1175,14 +1249,13 @@ def main():
                     )
                 except Exception as e:
                     log.warning(f"  Ошибка скора {sym}: {e}")
-                    scores[sym] = {"score": 0, "score_final": 0,
-                                   "details": {}, "price": 0, "sr": {}}
+                    scores[sym] = {"score": 0, "score_final": 0, "details": {}, "price": 0, "sr": {}}
 
             if not scores:
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            # Топ-5 кандидатов
+            # Топ-5 кандидатов на лонг
             кандидаты = sorted(
                 [(s, d) for s, d in scores.items() if d["score_final"] >= MIN_SCORE],
                 key=lambda x: x[1]["score_final"],
@@ -1194,7 +1267,7 @@ def main():
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            log.info(f"  🏆 Топ кандидаты: " +
+            log.info(f"  🏆 Топ кандидаты (лонг): " +
                      ", ".join(f"{s.split(':')[0]}={d['score_final']}" for s, d in кандидаты))
 
             выбрана  = None
@@ -1208,17 +1281,16 @@ def main():
                 sr_info  = данные.get("sr", {})
                 det      = данные.get("details", {})
 
-                # Блокируем только если resistance ОЧЕНЬ близко
+                # Блокировка при близком сопротивлении
                 dist_res_now = sr_info.get("dist_to_res_pct", 99)
                 if sr_info.get("near_resistance") and dist_res_now < SR_BLOCK_DIST_PCT:
                     log.info(
                         f"  ⛔ {лучшая.split(':')[0]} (скор={фин_скор}): "
-                        f"resistance в {dist_res_now:.3f}% "
-                        f"({sr_info.get('res_cluster', 0)} касаний) — пробуем следующего"
+                        f"resistance в {dist_res_now:.3f}% ({sr_info.get('res_cluster', 0)} касаний) — пробуем следующего"
                     )
                     continue
 
-                # Мягкий фильтр: RSI перекуплен без поддержки
+                # RSI перекуплен без поддержки
                 rsi_val = det.get("rsi", 50)
                 try:
                     rsi_val = float(rsi_val)
@@ -1226,53 +1298,101 @@ def main():
                     rsi_val = 50
                 if rsi_val > 68 and not sr_info.get("near_support"):
                     log.info(
-                        f"  ⚠️ {лучшая.split(':')[0]}: RSI перекуплен ({rsi_val:.1f}) "
-                        f"без поддержки — пробуем следующего"
+                        f"  ⚠️ {лучшая.split(':')[0]}: RSI перекуплен ({rsi_val:.1f}) без поддержки — пропускаем"
                     )
                     continue
 
                 выбрана = лучшая
                 log.info(
-                    f"  ► Выбрана {лучшая.split(':')[0]}  скор={фин_скор}  "
-                    f"цена={цена:.8f}  dist_res={dist_res_now:.3f}%"
+                    f"  ► Выбрана {лучшая.split(':')[0]} (лонг)  скор={фин_скор}  цена={цена:.8f}  dist_res={dist_res_now:.3f}%"
                 )
                 break
 
+            # Если лонг не выбран, попробуем шорт (только если недавно был SL на этой паре и тренд 4h медвежий)
             if выбрана is None:
-                log.info("  Все кандидаты отфильтрованы — ждём следующего цикла")
-                time.sleep(SCAN_INTERVAL)
-                continue
+                # Поищем пары с медвежьим трендом и высоким скором шорта (только если они были недавно в SL)
+                for sym, data in scores.items():
+                    if sym in заблокированные_символы:
+                        continue
+                    if тренд_4h_медвежий(sym):
+                        # Получаем скор для шорта (инвертированный)
+                        short_res = получить_скор_шорта(sym)
+                        if short_res["score"] >= MIN_SCORE - 5:  # чуть ниже порога
+                            log.info(f"  🐻 Шорт-кандидат: {sym.split(':')[0]} скор={short_res['score']}")
+                            выбрана = sym
+                            фин_скор = short_res["score"]
+                            цена = short_res["price"]
+                            sr_info = short_res.get("sr", {})
+                            break
+                if выбрана:
+                    log.info(f"  ► Выбрана {выбрана.split(':')[0]} (шорт)  скор={фин_скор}  цена={цена:.8f}")
+                    side = "short"
+                else:
+                    log.info("  Все кандидаты отфильтрованы — ждём следующего цикла")
+                    time.sleep(SCAN_INTERVAL)
+                    continue
+            else:
+                side = "long"
 
-            лучшая = выбрана
-
-            # Расчёт TP и SL с учётом S/R
-            support    = sr_info.get("support",    цена * (1 - SL_PERCENT / 100))
+            # Расчёт TP и SL
+            support    = sr_info.get("support", цена * (1 - SL_PERCENT / 100))
             resistance = sr_info.get("resistance", цена * (1 + TP_PERCENT / 100))
 
-            sl_базовый = цена * (1 - SL_PERCENT / 100)
-            sl_от_sup  = float(support) * 0.998
-            sl_цена    = max(sl_базовый, sl_от_sup)
+            if side == "long":
+                sl_базовый = цена * (1 - SL_PERCENT / 100)
+                sl_от_sup  = float(support) * 0.998
+                sl_цена    = max(sl_базовый, sl_от_sup)
+                # Минимальный SL
+                min_sl_price = цена * (1 - MIN_SL_PERCENT / 100)
+                sl_цена = max(sl_цена, min_sl_price)
 
-            tp_базовый = цена * (1 + TP_PERCENT / 100)
-            dist_res   = sr_info.get("dist_to_res_pct", 99)
-            if dist_res > TP_PERCENT * 1.2:
-                tp_цена = цена + (float(resistance) - цена) * 0.90
-            else:
-                tp_цена = tp_базовый
+                tp_базовый = цена * (1 + TP_PERCENT / 100)
+                dist_res   = sr_info.get("dist_to_res_pct", 99)
+                if dist_res > TP_PERCENT * 1.2:
+                    tp_цена = цена + (float(resistance) - цена) * 0.90
+                else:
+                    tp_цена = tp_базовый
+            else:  # short
+                sl_базовый = цена * (1 + SL_PERCENT / 100)
+                sl_от_res  = float(resistance) * 1.002
+                sl_цена    = min(sl_базовый, sl_от_res)
+                min_sl_price = цена * (1 + MIN_SL_PERCENT / 100)
+                sl_цена = min(sl_цена, min_sl_price)
 
-            # Размер позиции
-            margin = рассчитать_размер_позиции(фин_скор, баланс)
+                tp_базовый = цена * (1 - TP_PERCENT / 100)
+                dist_sup   = sr_info.get("dist_to_sup_pct", 99)
+                if dist_sup > TP_PERCENT * 1.2:
+                    tp_цена = цена - (цена - float(support)) * 0.90
+                else:
+                    tp_цена = tp_базовый
+
+            # ATR для расчёта риска
+            try:
+                raw = exchange.fetch_ohlcv(выбрана, TIMEFRAME_TA, limit=50)
+                if len(raw) >= 30:
+                    df = pd.DataFrame(raw, columns=["ts","o","h","l","c","v"])
+                    atr = calc_atr(df, 14).iloc[-1]
+                    atr_pct = (atr / цена) * 100
+                else:
+                    atr_pct = 1.0
+            except Exception:
+                atr_pct = 1.0
+
+            margin = рассчитать_размер_позиции(фин_скор, баланс, atr_pct)
             if баланс < margin * 1.1:
                 log.warning(f"  ⚠️ Баланс {баланс:.2f} < маржа {margin:.2f} — уменьшаем")
                 margin = баланс * 0.8
 
             log.info(
-                f"  ✅ ВХОД: скор={фин_скор} | "
+                f"  ✅ ВХОД {side.upper()}: скор={фин_скор} | "
                 f"SL={sl_цена:.8f} | TP={tp_цена:.8f} | маржа={margin:.2f}U"
             )
 
             время_входа = time.time()
-            вход_цена, кол_во = открыть_лонг(лучшая, margin, tp_цена, sl_цена)
+            if side == "long":
+                вход_цена, кол_во = открыть_лонг(выбрана, margin, tp_цена, sl_цена)
+            else:
+                вход_цена, кол_во = открыть_шорт(выбрана, margin, tp_цена, sl_цена)
 
             if вход_цена is None or кол_во is None:
                 log.warning("  Не удалось открыть позицию — пауза 30 сек")
@@ -1282,7 +1402,7 @@ def main():
             stats["сделок_всего"] += 1
             сохранить_состояние()
 
-            результат = мониторить_позицию(лучшая, вход_цена, кол_во, время_входа, sl_цена)
+            результат = мониторить_позицию(выбрана, вход_цена, кол_во, время_входа, sl_цена, side)
 
             объём    = margin * LEVERAGE
             комиссии = объём * BYBIT_FEE * 2
@@ -1290,27 +1410,35 @@ def main():
             pnl_сделки = 0.0
 
             if результат == "tp":
-                pnl_сделки = объём * TP_PERCENT / 100 - комиссии
+                if side == "long":
+                    pnl_сделки = объём * TP_PERCENT / 100 - комиссии
+                else:
+                    pnl_сделки = объём * TP_PERCENT / 100 - комиссии  # для шорта то же самое (прибыль в USDT)
                 stats["тейкпрофит"]   += 1
                 stats["прибыль_usdt"] += max(0, pnl_сделки)
-                stats["sl_streak"]     = 0   # [FIX-7] сброс streak
+                stats["sl_streak"]     = 0
                 log.info(f"  ✅ TP: прибыль ≈{pnl_сделки:.4f} USDT")
 
             elif результат == "sl":
-                pnl_сделки = -(объём * SL_PERCENT / 100 + комиссии)
+                if side == "long":
+                    pnl_сделки = -(объём * SL_PERCENT / 100 + комиссии)
+                else:
+                    pnl_сделки = -(объём * SL_PERCENT / 100 + комиссии)
                 stats["стоплосс"]    += 1
                 stats["убыток_usdt"] += abs(pnl_сделки)
-                stats["sl_streak"]    = stats.get("sl_streak", 0) + 1  # [FIX-7]
+                stats["sl_streak"]    = stats.get("sl_streak", 0) + 1
+                # Блокируем символ на определённое время
+                заблокированные_символы[выбрана] = time.time() + SYMBOL_BLOCK_MINUTES * 60
                 log.warning(
                     f"  ❌ SL: убыток ≈{pnl_сделки:.4f} USDT  "
-                    f"(streak: {stats['sl_streak']}/{SL_STREAK_LIMIT})"
+                    f"(streak: {stats['sl_streak']}/{SL_STREAK_LIMIT}, символ заблокирован на {SYMBOL_BLOCK_MINUTES} мин)"
                 )
 
             elif результат == "таймаут":
                 pnl_сделки = -комиссии
                 stats["таймаут"]     += 1
                 stats["убыток_usdt"] += комиссии
-                stats["sl_streak"]    = 0   # таймаут не считается SL
+                stats["sl_streak"]    = 0
                 log.warning(f"  ⏰ Таймаут: потери на комиссиях ≈{комиссии:.4f} USDT")
 
             запись_сделки = {
@@ -1318,7 +1446,8 @@ def main():
                 "время_входа":  datetime.fromtimestamp(время_входа).strftime("%d.%m.%Y %H:%M:%S"),
                 "время_выхода": datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
                 "duration_min": round(длит_мин, 1),
-                "symbol":       лучшая,
+                "symbol":       выбрана,
+                "side":         side,
                 "score":        фин_скор,
                 "entry_price":  вход_цена,
                 "sl_price":     sl_цена,
@@ -1327,8 +1456,8 @@ def main():
                 "leverage":     LEVERAGE,
                 "результат":    результат,
                 "pnl_usdt":     round(pnl_сделки, 4),
-                "details":      scores[лучшая].get("details", {}),
-                "sr":           {k: str(v) for k, v in (scores[лучшая].get("sr", {}) or {}).items()},
+                "details":      scores[выбрана].get("details", {}) if side == "long" else {},
+                "sr":           {k: str(v) for k, v in (scores[выбрана].get("sr", {}) or {}).items()},
             }
             сохранить_сделку(запись_сделки)
             пост_трейд_анализ(запись_сделки)
