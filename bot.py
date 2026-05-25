@@ -59,19 +59,33 @@ import ccxt
 import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
-from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Tuple, Optional, Any, Union
-from scipy import stats as scipy_stats
+from datetime import datetime, timezone
+from typing import Dict, List, Tuple, Optional, Any
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_score
 from statsmodels.tsa.stattools import coint, adfuller
-from statsmodels.regression.linear_model import OLS
 import warnings
 warnings.filterwarnings('ignore')
 
 load_dotenv()
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on", "да", "вкл"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 # ============================================================
 # █████████████████████████████████████████████████████████
@@ -171,9 +185,9 @@ MA2_LENGTH = 50
 MA_TIMEFRAME = "5m"
 
 # --- ФИЛЬТРЫ ------------------------------------------------------------
-SESSION_FILTER_ENABLED = True
-SESSION_BLOCK_START = 0
-SESSION_BLOCK_END = 4
+SESSION_FILTER_ENABLED = _env_bool("SESSION_FILTER_ENABLED", True)
+SESSION_BLOCK_START = _env_int("SESSION_BLOCK_START", 0)
+SESSION_BLOCK_END = _env_int("SESSION_BLOCK_END", 4)
 
 DAILY_LOSS_LIMIT_PCT = 3.0
 DAILY_LOSS_PAUSE_SEC = 10800  # 3 часа
@@ -233,7 +247,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s]  %(message)s",
     datefmt="%d.%m.%Y %H:%M:%S",
     handlers=[
-        logging.StreamHandler(),
+        logging.StreamHandler(sys.stdout),
         logging.FileHandler("bot_v10_ultimate.log", encoding="utf-8"),
     ],
 )
@@ -1596,13 +1610,13 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
                 if side == "long":
                     if cur_price > пиковая_цена: пиковая_цена = cur_price
                     new_sl_trail = пиковая_цена * (1 - trailing_offset)
-                    if new_sl_trail > текущий_sl and обновить_sl_на_бирже(symbol, new_sl_trail, side):
+                    if new_sl_trail > текущий_sl + entry_price * trailing_step and обновить_sl_на_бирже(symbol, new_sl_trail, side):
                         текущий_sl = new_sl_trail
                         log.info(f"ТРЕЙЛИНГ: пик={пиковая_цена:.8f} → SL={new_sl_trail:.8f}")
                 else:
                     if cur_price < пиковая_цена: пиковая_цена = cur_price
                     new_sl_trail = пиковая_цена * (1 + trailing_offset)
-                    if new_sl_trail < текущий_sl and обновить_sl_на_бирже(symbol, new_sl_trail, side):
+                    if new_sl_trail < текущий_sl - entry_price * trailing_step and обновить_sl_на_бирже(symbol, new_sl_trail, side):
                         текущий_sl = new_sl_trail
                         log.info(f"ТРЕЙЛИНГ: пик={пиковая_цена:.8f} → SL={new_sl_trail:.8f}")
             
@@ -1775,7 +1789,6 @@ def сохранить_состояние():
         log.warning(f"Не удалось сохранить состояние: {e}")
 
 def загрузить_состояние():
-    global stats
     if not os.path.exists(STATE_FILE): return False
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
@@ -1912,8 +1925,11 @@ def этап_1_проверка_окружения() -> Tuple[bool, List[str]]:
     elif len(api_key) < 10: errors.append("BYBIT_API_KEY слишком короткий")
     if not api_secret: errors.append("BYBIT_API_SECRET не задан")
     elif len(api_secret) < 10: errors.append("BYBIT_API_SECRET слишком короткий")
-    if not os.path.exists(".env"): warnings.append(".env файл не найден")
+    if not os.path.exists(".env"): warnings.append("⚠ .env файл не найден; используются переменные окружения контейнера")
     return len(errors) == 0, errors + warnings
+
+def _сообщение_предстарта_это_предупреждение(msg: str) -> bool:
+    return msg.startswith("⚠") or "рекомендуется" in msg or "Уже" in msg or "Мало" in msg
 
 def этап_2_проверка_подключения() -> Tuple[bool, List[str]]:
     errors = []
@@ -1931,11 +1947,11 @@ def этап_3_проверка_конфигурации() -> Tuple[bool, List[s
     errors, warnings = [], []
     rr = TP_PERCENT / SL_PERCENT
     if rr < 2.0: errors.append(f"RR {rr:.1f}:1 слишком низкий")
-    elif rr < 2.5: warnings.append(f"RR {rr:.1f}:1 можно повысить")
-    if LEVERAGE > 5: warnings.append(f"Плечо {LEVERAGE}x высокое")
+    elif rr < 2.5: warnings.append(f"⚠ RR {rr:.1f}:1 можно повысить")
+    if LEVERAGE > 5: warnings.append(f"⚠ Плечо {LEVERAGE}x высокое")
     if MIN_SCORE < 65: errors.append(f"MIN_SCORE={MIN_SCORE} < 65")
     if BASE_RISK_PCT > 3.0: errors.append(f"BASE_RISK_PCT={BASE_RISK_PCT}% слишком высок")
-    if DAILY_LOSS_LIMIT_PCT > 5.0: warnings.append(f"DAILY_LOSS_LIMIT_PCT={DAILY_LOSS_LIMIT_PCT}% высокий")
+    if DAILY_LOSS_LIMIT_PCT > 5.0: warnings.append(f"⚠ DAILY_LOSS_LIMIT_PCT={DAILY_LOSS_LIMIT_PCT}% высокий")
     if ATR_SL_MULT < 1.5: errors.append(f"ATR_SL_MULT={ATR_SL_MULT} слишком мал")
     log.info(f"Конфигурация: TP={TP_PERCENT}% | SL={SL_PERCENT}% | RR={rr:.1f}:1")
     return len(errors) == 0, errors + warnings
@@ -1948,9 +1964,9 @@ def этап_4_проверка_рынка() -> Tuple[bool, List[str]]:
         try:
             ticker = exchange.fetch_ticker(sym)
             if float(ticker["last"]) > 0: доступные += 1
-        except Exception as e: warnings.append(f"Пара {sym} недоступна: {e}")
+        except Exception as e: warnings.append(f"⚠ Пара {sym} недоступна: {e}")
     if доступные == 0: errors.append("Ни одна тестовая пара не доступна")
-    elif доступные < len(test_symbols)//2: warnings.append(f"Доступно только {доступные}/{len(test_symbols)} пар")
+    elif доступные < len(test_symbols)//2: warnings.append(f"⚠ Доступно только {доступные}/{len(test_symbols)} пар")
     else: log.info(f"Рынок: {доступные}/{len(test_symbols)} тестовых пар доступны")
     return len(errors) == 0, errors + warnings
 
@@ -1960,14 +1976,14 @@ def этап_5_проверка_существующих_позиций() -> Tup
         positions = exchange.fetch_positions()
         открытые = [p for p in positions if float(p.get("contracts", 0) or 0) > 0]
         if открытые:
-            for p in открытые: warnings.append(f"Уже открыта позиция: {p.get('symbol')} {p.get('side')} qty={p.get('contracts')}")
+            for p in открытые: warnings.append(f"⚠ Уже открыта позиция: {p.get('symbol')} {p.get('side')} qty={p.get('contracts')}")
         else: log.info("Открытых позиций нет — готов к торговле")
-    except Exception as e: warnings.append(f"Не удалось проверить позиции: {e}")
+    except Exception as e: warnings.append(f"⚠ Не удалось проверить позиции: {e}")
     if os.path.exists(TRADES_FILE):
         try:
             with open(TRADES_FILE, "r", encoding="utf-8") as f: история = json.load(f)
             log.info(f"История: {len(история)} сделок найдено")
-        except: warnings.append(f"Файл {TRADES_FILE} повреждён")
+        except: warnings.append(f"⚠ Файл {TRADES_FILE} повреждён")
     return len(errors) == 0, errors + warnings
 
 def запустить_предстартовую_проверку() -> bool:
@@ -1988,8 +2004,9 @@ def запустить_предстартовую_проверку() -> bool:
         try:
             ок, сообщения = функция()
             for msg in сообщения:
-                if "⚠" in msg or "рекомендуется" in msg or "Уже" in msg or "Мало" in msg:
-                    log.warning(f"⚠️ {msg}")
+                if _сообщение_предстарта_это_предупреждение(msg):
+                    clean_msg = msg[1:].strip() if msg.startswith("⚠") else msg
+                    log.warning(f"⚠️ {clean_msg}")
                 else:
                     log.error(f"❌ {msg}")
                     все_ошибки.append(f"[{название}] {msg}")
@@ -2019,8 +2036,6 @@ def запустить_предстартовую_проверку() -> bool:
 # ============================================================
 
 def main():
-    global stats, ml_model
-    
     # Загружаем ML модель
     if ML_ENABLED:
         try:
@@ -2217,13 +2232,14 @@ def main():
                 active_symbols = [p['symbol'] for p in получить_позиции()]
                 all_symbols = active_symbols + [выбрана]
                 allocations = optimize_portfolio_allocation(all_symbols)
-                max_risk_for_trade = allocations.get(выбрана, MAX_PORTFOLIO_RISK) * баланс
+                max_loss_for_trade = allocations.get(выбрана, MAX_PORTFOLIO_RISK) * баланс
+                max_margin_for_trade = max_loss_for_trade / (sl_dist_pct / 100)
             else:
-                max_risk_for_trade = баланс * 0.95
+                max_margin_for_trade = баланс * 0.95
             
             история_сделок = загрузить_историю()
             margin = рассчитать_размер_позиции(фин_скор, свободный, sl_dist_pct, история_сделок)
-            margin = min(margin, max_risk_for_trade)
+            margin = min(margin, max_margin_for_trade, свободный * 0.95)
             
             if свободный < margin * 1.1:
                 log.warning(f"⚠️ Баланс {свободный:.2f} < маржа {margin:.2f} — уменьшаем")
