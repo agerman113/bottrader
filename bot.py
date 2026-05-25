@@ -2126,7 +2126,7 @@ def main():
                 res["score_final"] = ai_score
                 scores[sym] = res
                 det = res.get("details", {})
-                log.debug(f"{sym.split(':')[0]:12s} скор={ai_score:3d}/100 rsi={det.get('rsi', '?')} rf={det.get('range_filter', '?')} st={det.get('supertrend', '?')}")
+                log.debug(f"{sym.split(':')[0]:12s} скор={ai_score:3.0f}/100 rsi={det.get('rsi', '?')} rf={det.get('range_filter', '?')} st={det.get('supertrend', '?')}")
             
             if not scores:
                 log.info(f"Нет кандидатов — ждём {SCAN_INTERVAL} сек")
