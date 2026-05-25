@@ -171,7 +171,7 @@ MA2_LENGTH = 50
 MA_TIMEFRAME = "5m"
 
 # --- ФИЛЬТРЫ ------------------------------------------------------------
-SESSION_FILTER_ENABLED = True
+SESSION_FILTER_ENABLED = False
 SESSION_BLOCK_START = 0
 SESSION_BLOCK_END = 4
 
