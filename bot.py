@@ -16,36 +16,36 @@ SYMBOLS = [
     "FLOKI/USDT:USDT", "BONK/USDT:USDT", "WIF/USDT:USDT"
 ]
 
-# --- Основные параметры ---
 LEVERAGE = 2
 INITIAL_MARGIN = 2.0
 MARTINGALE_FACTOR = 1.5
 MAX_MARGIN = 8.0
 MAX_FLIPS = 3
 
-# --- Параметры выхода (модернизированы) ---
-TAKE_PROFIT_PCT = 4.0                     # увеличено с 3% до 4% для покрытия комиссий
-TRAILING_ACTIVATE_PCT = 0.8              # чуть выше, чтобы не ложное срабатывание
+TAKE_PROFIT_PCT = 4.0
+TRAILING_ACTIVATE_PCT = 0.8
 TRAILING_STEP_PCT = 0.3
 STOP_LOSS_INITIAL_PCT = 1.0
 
-# --- Фильтры (новые) ---
-MIN_ADX = 25                              # минимальный ADX для входа (сильный тренд)
-MAX_ADX_NEUTRAL = 20                      # ниже этого – флет, не торгуем
-MIN_ATR_PCT = 0.5                         # минимальная волатильность (ATR/цена в %)
+MIN_ADX = 25
+MAX_ADX_NEUTRAL = 20
+MIN_ATR_PCT = 0.5
 
-USE_LIMIT_ENTRY = False                   # если True – входим лимитным ордером (мейкер комиссия)
+USE_LIMIT_ENTRY = False
 TIMEFRAME_TREND = "1h"
 TIMEFRAME_ADX = "1h"
 
 SCAN_INTERVAL = 300
 MIN_BALANCE = 5.0
 REPORT_INTERVAL = 1800
-MAX_DAILY_LOSS_PCT = 10.0                # максимальная дневная просадка
-MAX_LOSING_SERIES_PER_DAY = 3            # после 3 убыточных серий – пауза
+MAX_DAILY_LOSS_PCT = 10.0
+MAX_LOSING_SERIES_PER_DAY = 3
 
 STATE_FILE = "flip_martingale_advanced.json"
 LOG_FILE = "flip_bot_advanced.log"
+
+TAKER_FEE = 0.00055
+MAKER_FEE = 0.0002
 
 # ================== ЛОГИРОВАНИЕ ==================
 logging.basicConfig(
@@ -158,7 +158,7 @@ def установить_плечо(symbol: str, leverage: int):
     except Exception as e:
         log.warning(f"Не удалось установить плечо для {symbol}: {e}")
 
-# ================== РАСШИРЕННЫЙ АНАЛИЗ (ADX, ATR, тренд) ==================
+# ================== АНАЛИЗ РЫНКА (ADX, ATR, тренд) ==================
 def ema(series, span):
     return series.ewm(span=span, adjust=False).mean()
 
@@ -166,17 +166,26 @@ def rma(series, span):
     return series.ewm(alpha=1/span, adjust=False).mean()
 
 def calc_adx(high, low, close, period=14):
-    """Возвращает ADX (значение) и плюс/минус DI."""
+    """
+    Возвращает ADX (значение) и плюс/минус DI.
+    Исправлена ошибка DeprecationWarning для np.maximum.
+    """
     high = np.array(high)
     low = np.array(low)
     close = np.array(close)
+
     up_move = high[1:] - high[:-1]
     down_move = low[:-1] - low[1:]
+
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    tr = np.maximum(high[1:] - low[1:],
-                    np.abs(high[1:] - close[:-1]),
-                    np.abs(low[1:] - close[:-1]))
+
+    # Исправлено: np.maximum с двумя аргументами, затем результат с третьим
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+
     atr = rma(pd.Series(tr), period).values[-1] if len(tr) > 0 else 0
     plus_di = 100 * rma(pd.Series(plus_dm), period).values[-1] / atr if atr != 0 else 0
     minus_di = 100 * rma(pd.Series(minus_dm), period).values[-1] / atr if atr != 0 else 0
@@ -206,7 +215,7 @@ def анализ_рынка(symbol: str):
         adx_val, _, _ = calc_adx(df["h"].values, df["l"].values, df["c"].values, period=14)
         # ATR в процентах
         atr = rma((df["h"] - df["l"]), 14).iloc[-1]
-        atr_pct = (atr / close.iloc[-1]) * 100
+        atr_pct = (atr / close.iloc[-1]) * 100 if close.iloc[-1] != 0 else 0
         can_trade = (adx_val > MIN_ADX) and (atr_pct > MIN_ATR_PCT)
         log.info(f"  📊 {symbol.split(':')[0]}: тренд={'вверх' if trend_up else 'вниз'}, ADX={adx_val:.1f}, ATR%={atr_pct:.2f}% -> {'✅ можно' if can_trade else '❌ нельзя'}")
         return {"can_trade": can_trade, "trend_up": trend_up, "adx": adx_val, "atr_pct": atr_pct}
@@ -214,7 +223,7 @@ def анализ_рынка(symbol: str):
         log.warning(f"Ошибка анализа {symbol}: {e}")
         return {"can_trade": False, "trend_up": None, "adx": 0, "atr_pct": 0}
 
-# ================== ПРОВЕРКА ЛИМИТОВ (дневной убыток) ==================
+# ================== ПРОВЕРКА ДНЕВНЫХ ЛИМИТОВ ==================
 def проверить_дневные_лимиты() -> bool:
     today = datetime.now().strftime("%Y-%m-%d")
     if stats["последняя_дата_сброса"] != today:
@@ -233,58 +242,70 @@ def проверить_дневные_лимиты() -> bool:
             log.warning(f"  🛑 {MAX_LOSING_SERIES_PER_DAY} убыточные серии за сегодня. Пауза {3600 - int(elapsed)} сек.")
             return False
         else:
-            # сбрасываем счётчик после часа
             stats["убыточные_серии_сегодня"] = 0
             сохранить_состояние()
     return True
 
-# ================== ОТКРЫТИЕ ПОЗИЦИИ (с возможностью лимитного ордера) ==================
+# ================== ОТКРЫТИЕ ПОЗИЦИИ (исправлено) ==================
 def открыть_позицию(symbol: str, side: str, margin_usdt: float):
-    установить_плечо(symbol, LEVERAGE)
-    ticker = exchange.fetch_ticker(symbol)
-    price = ticker["last"]
-    size_usdt = margin_usdt * LEVERAGE
-    qty = size_usdt / price
-    qty = float(exchange.amount_to_precision(symbol, qty))
-    if qty <= 0:
+    try:
+        установить_плечо(symbol, LEVERAGE)
+        ticker = exchange.fetch_ticker(symbol)
+        price = ticker.get("last")
+        if price is None or price <= 0:
+            log.error(f"  Не удалось получить цену {symbol}")
+            return None
+
+        size_usdt = margin_usdt * LEVERAGE
+        qty = size_usdt / price
+        qty = float(exchange.amount_to_precision(symbol, qty))
+        if qty <= 0:
+            log.error(f"  Некорректное количество {qty} для {symbol}")
+            return None
+
+        tp_price = price * (1 + TAKE_PROFIT_PCT/100) if side == "buy" else price * (1 - TAKE_PROFIT_PCT/100)
+        sl_price = price * (1 - STOP_LOSS_INITIAL_PCT/100) if side == "buy" else price * (1 + STOP_LOSS_INITIAL_PCT/100)
+
+        if USE_LIMIT_ENTRY:
+            limit_price = price * 0.999 if side == "buy" else price * 1.001
+            order = exchange.create_limit_order(symbol, side, qty, limit_price,
+                                                params={"takeProfit": tp_price, "stopLoss": sl_price})
+            entry_price = limit_price
+        else:
+            order = exchange.create_market_order(symbol, side, qty,
+                                                 params={"takeProfit": tp_price, "stopLoss": sl_price})
+            entry_price = order.get("average", price)
+            if entry_price is None:
+                entry_price = price
+
+        log.info(f"  📈 {side.upper()} {symbol} | маржа={margin_usdt:.2f}U | qty={qty} | вход={entry_price:.8f}")
+        log.info(f"     TP={tp_price:.8f} (+{TAKE_PROFIT_PCT}%)  SL={sl_price:.8f}")
+        return {
+            "symbol": symbol,
+            "side": side,
+            "margin": margin_usdt,
+            "entry_price": entry_price,
+            "qty": qty,
+            "tp_price": tp_price,
+            "sl_price": sl_price,
+            "start_time": time.time(),
+            "phase": 1,
+            "peak_price": entry_price,
+            "current_sl": sl_price,
+        }
+    except Exception as e:
+        log.error(f"  ❌ Ошибка открытия позиции: {e}")
         return None
-    tp_price = price * (1 + TAKE_PROFIT_PCT/100) if side == "buy" else price * (1 - TAKE_PROFIT_PCT/100)
-    sl_price = price * (1 - STOP_LOSS_INITIAL_PCT/100) if side == "buy" else price * (1 + STOP_LOSS_INITIAL_PCT/100)
-    if USE_LIMIT_ENTRY:
-        # лимитный ордер на покупку/продажу чуть лучше рыночной цены (мейкер)
-        limit_price = price * 0.999 if side == "buy" else price * 1.001
-        order = exchange.create_limit_order(symbol, side, qty, limit_price,
-                                            params={"takeProfit": tp_price, "stopLoss": sl_price})
-        entry_price = limit_price
-    else:
-        order = exchange.create_market_order(symbol, side, qty,
-                                             params={"takeProfit": tp_price, "stopLoss": sl_price})
-        entry_price = order.get("average", price)
-    log.info(f"  📈 {side.upper()} {symbol} | маржа={margin_usdt:.2f}U | qty={qty} | вход={entry_price:.8f}")
-    log.info(f"     TP={tp_price:.8f} (+{TAKE_PROFIT_PCT}%)  SL={sl_price:.8f}")
-    return {
-        "symbol": symbol,
-        "side": side,
-        "margin": margin_usdt,
-        "entry_price": entry_price,
-        "qty": qty,
-        "tp_price": tp_price,
-        "sl_price": sl_price,
-        "start_time": time.time(),
-        "phase": 1,
-        "peak_price": entry_price,
-        "current_sl": sl_price,
-    }
 
 # ================== ОБНОВЛЕНИЕ SL ==================
 def обновить_sl(symbol: str, new_sl: float):
     try:
         exchange.set_trading_stop(symbol, stopLoss=new_sl, params={"category": "linear"})
         log.info(f"  🔧 SL обновлён → {new_sl:.8f}")
-    except:
-        pass
+    except Exception as e:
+        log.warning(f"  ⚠️ Не удалось обновить SL: {e}")
 
-# ================== МОНИТОРИНГ ПОЗИЦИИ (трейлинг) ==================
+# ================== МОНИТОРИНГ ПОЗИЦИИ ==================
 def мониторить_позицию(pos_info: dict) -> str:
     symbol = pos_info["symbol"]
     side = pos_info["side"]
@@ -297,13 +318,16 @@ def мониторить_позицию(pos_info: dict) -> str:
     peak_price = pos_info["peak_price"]
 
     deadline = start_time + 3600
-    breakeven_price = entry * (1 + TRAILING_ACTIVATE_PCT/100) if side=="buy" else entry * (1 - TRAILING_ACTIVATE_PCT/100)
+    breakeven_price = entry * (1 + TRAILING_ACTIVATE_PCT/100) if side == "buy" else entry * (1 - TRAILING_ACTIVATE_PCT/100)
 
     while True:
         if time.time() > deadline:
-            log.warning("  ⏰ Таймаут 1 час")
-            close_side = "sell" if side=="buy" else "buy"
-            exchange.create_market_order(symbol, close_side, qty, params={"reduceOnly": True})
+            log.warning("  ⏰ Таймаут 1 час – закрываем принудительно")
+            close_side = "sell" if side == "buy" else "buy"
+            try:
+                exchange.create_market_order(symbol, close_side, qty, params={"reduceOnly": True})
+            except:
+                pass
             return "timeout"
 
         time.sleep(10)
@@ -312,28 +336,29 @@ def мониторить_позицию(pos_info: dict) -> str:
             active = [p for p in positions if float(p.get("contracts", 0)) != 0 and p.get("side") == side]
             if not active:
                 cur = exchange.fetch_ticker(symbol)["last"]
-                if (side=="buy" and cur >= tp_price*0.99) or (side=="sell" and cur <= tp_price*1.01):
+                if (side == "buy" and cur >= tp_price * 0.99) or (side == "sell" and cur <= tp_price * 1.01):
                     return "tp"
                 else:
                     return "sl"
+
             cur = exchange.fetch_ticker(symbol)["last"]
-            pnl_pct = ((cur - entry)/entry*100) if side=="buy" else ((entry - cur)/entry*100)
+            pnl_pct = ((cur - entry) / entry * 100) if side == "buy" else ((entry - cur) / entry * 100)
 
             if phase == 1 and pnl_pct >= TRAILING_ACTIVATE_PCT:
                 phase = 2
-                new_sl = entry * (1 + (TRAILING_ACTIVATE_PCT-0.1)/100) if side=="buy" else entry * (1 - (TRAILING_ACTIVATE_PCT-0.1)/100)
+                new_sl = entry * (1 + (TRAILING_ACTIVATE_PCT - 0.1)/100) if side == "buy" else entry * (1 - (TRAILING_ACTIVATE_PCT - 0.1)/100)
                 обновить_sl(symbol, new_sl)
                 current_sl = new_sl
-                log.info(f"  🔒 Безубыток, SL={new_sl:.8f}")
+                log.info(f"  🔒 Безубыток активирован, SL={new_sl:.8f}")
 
             if phase >= 2:
-                if (side=="buy" and cur > peak_price) or (side=="sell" and cur < peak_price):
+                if (side == "buy" and cur > peak_price) or (side == "sell" and cur < peak_price):
                     peak_price = cur
-                    if side=="buy":
+                    if side == "buy":
                         new_sl = peak_price * (1 - TRAILING_STEP_PCT/100)
                     else:
                         new_sl = peak_price * (1 + TRAILING_STEP_PCT/100)
-                    if (side=="buy" and new_sl > current_sl) or (side=="sell" and new_sl < current_sl):
+                    if (side == "buy" and new_sl > current_sl) or (side == "sell" and new_sl < current_sl):
                         обновить_sl(symbol, new_sl)
                         current_sl = new_sl
                         phase = 3
@@ -343,6 +368,7 @@ def мониторить_позицию(pos_info: dict) -> str:
             pos_info["peak_price"] = peak_price
             pos_info["current_sl"] = current_sl
             pos_info["phase"] = phase
+
         except Exception as e:
             log.warning(f"  Ошибка мониторинга: {e}")
 
@@ -411,8 +437,9 @@ def main():
                 сохранить_состояние()
                 result = мониторить_позицию(pos)
 
+                fee_rate = MAKER_FEE if USE_LIMIT_ENTRY else TAKER_FEE
                 size = margin * LEVERAGE
-                fee = size * (0.0002 if USE_LIMIT_ENTRY else 0.00055) * 2
+                fee = size * fee_rate * 2
                 pnl = 0.0
                 if result == "tp":
                     pnl = size * TAKE_PROFIT_PCT / 100 - fee
@@ -431,7 +458,6 @@ def main():
 
                     # Переворот с проверкой тренда (не слепой)
                     if flip_count < MAX_FLIPS:
-                        # Проверяем актуальный тренд перед переворотом
                         анализ = анализ_рынка(best_pair)
                         if not анализ["can_trade"]:
                             log.info("  Тренд ослаб, переворот отменяем, серия окончена")
@@ -458,7 +484,7 @@ def main():
             # Серия завершена
             log.info("  🎯 Серия завершена. Пауза 30 сек")
             time.sleep(30)
-            полная_инвентаризация()  # подчищаем на всякий случай
+            полная_инвентаризация()
 
             # Отчёт каждые 30 минут
             if time.time() - stats["последний_отчёт"] >= REPORT_INTERVAL:
