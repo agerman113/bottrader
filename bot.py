@@ -20,27 +20,25 @@ LEVERAGE = 2
 INITIAL_MARGIN = 2.0
 MARTINGALE_FACTOR = 1.5
 MAX_MARGIN = 8.0
-MAX_FLIPS = 3                       # максимум переворотов (всего сделок в серии)
+MAX_FLIPS = 3
 
 # Время экспирации для каждого шага (секунды)
 EXPIRE_TIMES = [60, 300, 900]       # 1 мин, 5 мин, 15 мин
 
 # Фильтр тренда (опционально)
-USE_TREND_FILTER = True              # если True, торгуем только по тренду (EMA 1h)
+USE_TREND_FILTER = True
 TIMEFRAME_TREND = "1h"
 
-SCAN_INTERVAL = 300                  # 5 минут между сканированиями
+SCAN_INTERVAL = 300
 MIN_BALANCE = 5.0
 REPORT_INTERVAL = 1800
 
-# Защита от просадки
 MAX_DAILY_LOSS_PCT = 10.0
 MAX_LOSING_SERIES_PER_DAY = 3
 
 STATE_FILE = "binary_flip_martingale.json"
 LOG_FILE = "binary_bot.log"
 
-# Комиссия тейкер (фьючерсы)
 TAKER_FEE = 0.00055
 
 # ================== ЛОГИРОВАНИЕ ==================
@@ -81,20 +79,27 @@ stats = {
 }
 
 def сохранить_состояние():
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(stats, f, ensure_ascii=False, indent=2)
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(stats, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.warning(f"Не сохранить состояние: {e}")
 
 def загрузить_состояние():
     global stats
     if not os.path.exists(STATE_FILE):
         return False
-    with open(STATE_FILE, "r", encoding="utf-8") as f:
-        saved = json.load(f)
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            saved = json.load(f)
         for key in stats:
             if key in saved:
                 stats[key] = saved[key]
-    log.info(f"Состояние восстановлено из {STATE_FILE}")
-    return True
+        log.info(f"Состояние восстановлено из {STATE_FILE}")
+        return True
+    except Exception as e:
+        log.warning(f"Не удалось загрузить состояние: {e}")
+        return False
 
 # ================== ИНВЕНТАРИЗАЦИЯ ==================
 def отменить_все_ордера():
@@ -137,9 +142,10 @@ def установить_плечо(symbol: str, leverage: int):
     except Exception as e:
         log.warning(f"Не удалось установить плечо для {symbol}: {e}")
 
-# ================== ОПРЕДЕЛЕНИЕ ТРЕНДА (опционально) ==================
+# ================== ОПРЕДЕЛЕНИЕ ТРЕНДА ==================
 def определить_тренд(symbol: str) -> str:
-    """Возвращает 'up', 'down' или 'neutral' на основе EMA50/200 на 1h."""
+    if not USE_TREND_FILTER:
+        return "up"
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME_TREND, limit=200)
         if len(ohlcv) < 200:
@@ -175,10 +181,14 @@ def открыть_позицию(symbol: str, side: str, margin_usdt: float):
             log.error(f"  Некорректное количество {qty}")
             return None
 
+        # Открываем рыночный ордер
         order = exchange.create_market_order(symbol, side, qty)
         entry_price = order.get("average", price)
         if entry_price is None:
             entry_price = price
+
+        # Ждём, чтобы позиция точно появилась в системе
+        time.sleep(2)
 
         log.info(f"  📈 {side.upper()} {symbol} | маржа={margin_usdt:.2f}U | qty={qty} | вход={entry_price:.8f}")
         return {
@@ -193,47 +203,46 @@ def открыть_позицию(symbol: str, side: str, margin_usdt: float):
         log.error(f"  ❌ Ошибка открытия: {e}")
         return None
 
-# ================== МОНИТОРИНГ ПОЗИЦИИ (таймер) ==================
+# ================== МОНИТОРИНГ ПОЗИЦИИ ПО ТАЙМЕРУ ==================
 def мониторить_позицию(pos_info: dict, expire_sec: int) -> str:
     """
-    Ждёт expire_sec секунд, затем закрывает позицию по рынку.
-    Возвращает 'profit', если P&L > 0 (после комиссий), иначе 'loss'.
+    Ждёт заданное количество секунд, затем закрывает позицию по рынку.
+    Возвращает 'profit' если P&L положительный, иначе 'loss'.
     """
     symbol = pos_info["symbol"]
     side = pos_info["side"]
     entry = pos_info["entry_price"]
     qty = pos_info["qty"]
-    start = pos_info["open_time"]
+    open_time = pos_info["open_time"]
 
-    deadline = start + expire_sec
+    deadline = open_time + expire_sec
     log.info(f"  ⏳ Позиция удерживается {expire_sec} сек (до {datetime.fromtimestamp(deadline).strftime('%H:%M:%S')})")
 
+    # Ждём до таймаута, не закрывая досрочно
     while time.time() < deadline:
         time.sleep(5)
-        # Проверим, не закрыли ли позицию внешне (на всякий случай)
-        try:
-            positions = exchange.fetch_positions([symbol])
-            active = [p for p in positions if float(p.get("contracts", 0)) != 0 and p.get("side") == side]
-            if not active:
-                # позиция уже закрыта
-                cur = exchange.fetch_ticker(symbol)["last"]
-                pnl_pct = ((cur - entry) / entry * 100) if side == "buy" else ((entry - cur) / entry * 100)
-                log.info(f"  Позиция закрыта досрочно, P&L={pnl_pct:+.2f}%")
-                return "profit" if pnl_pct > 0 else "loss"
-        except:
-            pass
 
-    # Время истекло – закрываем позицию по рынку
+    # Время истекло – принудительно закрываем по рынку
     try:
         close_side = "sell" if side == "buy" else "buy"
         exchange.create_market_order(symbol, close_side, qty, params={"reduceOnly": True})
+
+        # Дадим время на обновление баланса
+        time.sleep(1)
         cur = exchange.fetch_ticker(symbol)["last"]
         pnl_pct = ((cur - entry) / entry * 100) if side == "buy" else ((entry - cur) / entry * 100)
         log.info(f"  ⏰ Экспирация! Закрыто. P&L={pnl_pct:+.2f}%")
         return "profit" if pnl_pct > 0 else "loss"
     except Exception as e:
         log.error(f"  Ошибка закрытия по таймеру: {e}")
-        return "loss"
+        # Пытаемся ещё раз продать по рынку (если позиция всё ещё открыта)
+        try:
+            exchange.create_market_order(symbol, close_side, qty, params={"reduceOnly": True})
+            cur = exchange.fetch_ticker(symbol)["last"]
+            pnl_pct = ((cur - entry) / entry * 100) if side == "buy" else ((entry - cur) / entry * 100)
+            return "profit" if pnl_pct > 0 else "loss"
+        except:
+            return "loss"
 
 # ================== ДНЕВНЫЕ ЛИМИТЫ ==================
 def проверить_дневные_лимиты() -> bool:
@@ -293,24 +302,18 @@ def main():
 
     while True:
         try:
-            # Дневные лимиты
             if not проверить_дневные_лимиты():
                 time.sleep(600)
                 continue
 
-            # Выбор монеты
+            # Выбор монеты с трендом (если фильтр включён)
             best_pair = None
             best_trend = None
             for sym in SYMBOLS:
-                if USE_TREND_FILTER:
-                    trend = определить_тренд(sym)
-                    if trend in ["up", "down"]:
-                        best_pair = sym
-                        best_trend = trend
-                        break
-                else:
+                trend = определить_тренд(sym)
+                if trend == "up" or trend == "down":
                     best_pair = sym
-                    best_trend = "up"   # любое направление
+                    best_trend = trend
                     break
             if best_pair is None:
                 log.info("  Нет монеты с определённым трендом, ждём...")
@@ -344,21 +347,19 @@ def main():
 
                 result = мониторить_позицию(pos, expire_sec)
 
-                # Расчёт P&L
+                # Расчёт оценочного P&L (приблизительный)
                 size = margin * LEVERAGE
                 fee = size * TAKER_FEE * 2
                 if result == "profit":
-                    # Прибыль – закрытие в плюс (даже крошечный плюс)
-                    # Реальную прибыль вычисляем как изменение баланса, но для простоты берём фикс 1% от объёма
-                    # Но можно просто засчитать как успех без точной суммы, потом баланс покажет.
-                    pnl_est = size * 0.01 - fee   # предположим 1% профита (адаптируйте)
+                    # Прибыль считаем как 0.5% от объёма (минимальная прибыль, чтобы покрыть комиссии)
+                    pnl_est = size * 0.005 - fee
                     stats["прибыльных"] += 1
                     stats["прибыль_usdt"] += max(0, pnl_est)
                     log.info(f"  ✅ Прибыльная сделка! Оценочно +{pnl_est:.4f} USDT")
                     series_profit = True
                     break
                 else:
-                    pnl_est = -(size * 0.01 + fee)   # убыток ~1%
+                    pnl_est = -(size * 0.005 + fee)
                     stats["убыточных"] += 1
                     stats["убыток_usdt"] += abs(pnl_est)
                     stats["ежедневный_убыток"] += abs(pnl_est)
@@ -372,20 +373,20 @@ def main():
                         log.info(f"  🔁 Переворот! Новая сторона {current_side.upper()}, новая маржа {margin:.2f}U")
                         continue
                     else:
-                        # Серия убыточна
                         stats["убыточные_серии_сегодня"] += 1
                         stats["последняя_убыточная_серия_время"] = time.time()
                         log.warning(f"  🚫 Серия убыточна, лимит переворотов исчерпан")
                         break
 
             # Серия завершена
-            if not series_profit and stats["убыточные_серии_сегодня"] >= MAX_LOSING_SERIES_PER_DAY:
-                log.warning("  Достигнут лимит убыточных серий за день – пауза 1 час")
-                time.sleep(3600)
+            if not series_profit:
+                log.warning("  Серия убыточна")
+            else:
+                log.info("  Серия прибыльна – сброс мартингейла")
 
             log.info("  🎯 Серия завершена. Пауза 30 сек")
             time.sleep(30)
-            полная_инвентаризация()   # очистка на всякий случай
+            полная_инвентаризация()
 
             # Отчёт по времени
             if time.time() - stats["последний_отчёт"] >= REPORT_INTERVAL:
