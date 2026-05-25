@@ -425,6 +425,97 @@ def calc_support_resistance(df: pd.DataFrame, period: int = SR_PERIOD) -> dict:
 
 # ============================================================
 # ██████████████████████████████████████████████████████
+# █████████████████   ФИЛЬТРЫ И КРОССОВЕРЫ   ██████████████████
+# ============================================================
+
+def проверить_ma_кроссовер(df: pd.DataFrame, side: str = "long") -> bool:
+    if not MA_CROSSOVER_ENABLED: return True
+    try:
+        min_len = max(MA1_LENGTH, MA2_LENGTH) * 2 + 5
+        if len(df) < min_len: return True
+        ma1 = calc_ma(df, MA1_TYPE, MA1_LENGTH)
+        ma2 = calc_ma(df, MA2_TYPE, MA2_LENGTH)
+        return bool(ma1.iloc[-1] > ma2.iloc[-1]) if side == "long" else bool(ma1.iloc[-1] < ma2.iloc[-1])
+    except Exception as e:
+        log.warning(f"Ошибка MA кроссовера: {e}")
+        return True
+
+def volume_spike_guard(df: pd.DataFrame) -> bool:
+    try:
+        vol_avg = df["v"].rolling(VOLUME_AVG_PERIOD).mean().iloc[-1]
+        vol_now = df["v"].iloc[-1]
+        ratio = vol_now / (vol_avg + 1e-10)
+        if ratio > VOLUME_SPIKE_MULT:
+            log.info(f"Volume Spike Guard: объём {ratio:.1f}x > {VOLUME_SPIKE_MULT}x")
+            return False
+        return True
+    except Exception: return True
+
+def торговля_разрешена_по_времени() -> bool:
+    if not SESSION_FILTER_ENABLED: return True
+    now_utc = datetime.now(timezone.utc)
+    hour = now_utc.hour
+    if SESSION_BLOCK_START < SESSION_BLOCK_END:
+        blocked = SESSION_BLOCK_START <= hour < SESSION_BLOCK_END
+    else:
+        blocked = hour >= SESSION_BLOCK_START or hour < SESSION_BLOCK_END
+    if blocked: log.info(f"Session Filter: час {hour} UTC заблокирован")
+    return not blocked
+
+def получить_bybit_ai(symbol: str) -> dict:
+    result = {"signal": "neutral", "long_ratio": 0.5, "short_ratio": 0.5, "available": False}
+    try:
+        coin = symbol.split("/")[0]
+        url = f"https://api.bybit.com/v5/market/account-ratio?category=linear&symbol={coin}USDT&period=1h&limit=1"
+        resp = requests.get(url, timeout=5)
+        data = resp.json()
+        if data.get("retCode") == 0:
+            items = data.get("result", {}).get("list", [])
+            if items:
+                buy_r = float(items[0].get("buyRatio", 0.5))
+                sell_r = float(items[0].get("sellRatio", 0.5))
+                result.update({"long_ratio": buy_r, "short_ratio": sell_r, "available": True})
+                if buy_r > 0.6: result["signal"] = "bullish"
+                elif buy_r < 0.4: result["signal"] = "bearish"
+    except Exception as e:
+        log.debug(f"Bybit ratio недоступен: {e}")
+    return result
+
+def тренд_4h_бычий(symbol: str) -> bool:
+    try:
+        raw = exchange.fetch_ohlcv(symbol, TIMEFRAME_4H, limit=60)
+        if len(raw) < 55: return False
+        df = pd.DataFrame(raw, columns=["ts","o","h","l","c","v"])
+        return bool(_ema(df["c"], 20).iloc[-1] > _ema(df["c"], 50).iloc[-1])
+    except Exception: return False
+
+def тренд_4h_медвежий(symbol: str) -> bool:
+    try:
+        raw = exchange.fetch_ohlcv(symbol, TIMEFRAME_4H, limit=60)
+        if len(raw) < 55: return False
+        df = pd.DataFrame(raw, columns=["ts","o","h","l","c","v"])
+        return bool(_ema(df["c"], 20).iloc[-1] < _ema(df["c"], 50).iloc[-1])
+    except Exception: return False
+
+# ============================================================
+# ████████████████████████████████████████████████████
+# █████████████████   БАЙЕСОВСКИЙ ТРЕНД   █████████████████████
+# ============================================================
+
+def bayes_trend_probability(df: pd.DataFrame) -> float:
+    try:
+        close = df["c"]
+        ema20 = _ema(close, 20).iloc[-1]
+        ema50 = _ema(close, 50).iloc[-1]
+        rsi = calc_rsi(close).iloc[-1]
+        adx, _, _ = calc_adx(df)
+        adx_val = adx.iloc[-1]
+        z = ((ema20/ema50 - 1)*100 + (rsi - 50)/25 + (adx_val - 25)/10)
+        return float(np.clip(1.0 / (1.0 + np.exp(-z)), 0.0, 1.0))
+    except Exception: return 0.5
+
+# ============================================================
+# ██████████████████████████████████████████████████████
 # █████████████████   КВАНТОВЫЙ МОДУЛЬ (Ernest Chan)   ██████████
 # ============================================================
 
@@ -1069,112 +1160,6 @@ def run_monte_carlo_simulation(trades: List[dict], simulations: int = MONTE_CARL
         log.error(f"Ошибка Monte Carlo: {e}")
         return {"valid": False, "message": str(e)}
 
-
-# ============================================================
-# █████████████████████████████████████████████████████
-# █████████████████   ФИЛЬТРЫ И КРОССОВЕРЫ   ████████████████████
-# ============================================================
-
-def проверить_ma_кроссовер(df: pd.DataFrame, side: str = "long") -> bool:
-    """Проверяет MA кроссовер."""
-    if not MA_CROSSOVER_ENABLED: return True
-    try:
-        min_len = max(MA1_LENGTH, MA2_LENGTH) * 2 + 5
-        if len(df) < min_len: return True
-        ma1 = calc_ma(df, MA1_TYPE, MA1_LENGTH)
-        ma2 = calc_ma(df, MA2_TYPE, MA2_LENGTH)
-        return bool(ma1.iloc[-1] > ma2.iloc[-1]) if side == "long" else bool(ma1.iloc[-1] < ma2.iloc[-1])
-    except Exception as e:
-        log.warning(f"Ошибка MA кроссовера: {e}")
-        return True
-
-
-def volume_spike_guard(df: pd.DataFrame) -> bool:
-    """Защита от всплесков объема."""
-    try:
-        vol_avg = df["v"].rolling(VOLUME_AVG_PERIOD).mean().iloc[-1]
-        vol_now = df["v"].iloc[-1]
-        ratio = vol_now / (vol_avg + 1e-10)
-        if ratio > VOLUME_SPIKE_MULT:
-            log.info(f"Volume Spike Guard: объём {ratio:.1f}x > {VOLUME_SPIKE_MULT}x")
-            return False
-        return True
-    except Exception: return True
-
-
-def торговля_разрешена_по_времени() -> bool:
-    """Проверяет, разрешена ли торговля по времени."""
-    if not SESSION_FILTER_ENABLED: return True
-    now_utc = datetime.now(timezone.utc)
-    hour = now_utc.hour
-    if SESSION_BLOCK_START < SESSION_BLOCK_END:
-        blocked = SESSION_BLOCK_START <= hour < SESSION_BLOCK_END
-    else:
-        blocked = hour >= SESSION_BLOCK_START or hour < SESSION_BLOCK_END
-    if blocked: log.info(f"Session Filter: час {hour} UTC заблокирован")
-    return not blocked
-
-
-def получить_bybit_ai(symbol: str) -> dict:
-    """Получает AI сигналы от Bybit."""
-    result = {"signal": "neutral", "long_ratio": 0.5, "short_ratio": 0.5, "available": False}
-    try:
-        coin = symbol.split("/")[0]
-        url = f"https://api.bybit.com/v5/market/account-ratio?category=linear&symbol={coin}USDT&period=1h&limit=1"
-        resp = requests.get(url, timeout=5)
-        data = resp.json()
-        if data.get("retCode") == 0:
-            items = data.get("result", {}).get("list", [])
-            if items:
-                buy_r = float(items[0].get("buyRatio", 0.5))
-                sell_r = float(items[0].get("sellRatio", 0.5))
-                result.update({"long_ratio": buy_r, "short_ratio": sell_r, "available": True})
-                if buy_r > 0.6: result["signal"] = "bullish"
-                elif buy_r < 0.4: result["signal"] = "bearish"
-    except Exception as e:
-        log.debug(f"Bybit ratio недоступен: {e}")
-    return result
-
-
-def тренд_4h_бычий(symbol: str) -> bool:
-    """Проверяет бычий тренд на 4h."""
-    try:
-        raw = exchange.fetch_ohlcv(symbol, TIMEFRAME_4H, limit=60)
-        if len(raw) < 55: return False
-        df = pd.DataFrame(raw, columns=["ts","o","h","l","c","v"])
-        return bool(_ema(df["c"], 20).iloc[-1] > _ema(df["c"], 50).iloc[-1])
-    except Exception: return False
-
-
-def тренд_4h_медвежий(symbol: str) -> bool:
-    """Проверяет медвежий тренд на 4h."""
-    try:
-        raw = exchange.fetch_ohlcv(symbol, TIMEFRAME_4H, limit=60)
-        if len(raw) < 55: return False
-        df = pd.DataFrame(raw, columns=["ts","o","h","l","c","v"])
-        return bool(_ema(df["c"], 20).iloc[-1] < _ema(df["c"], 50).iloc[-1])
-    except Exception: return False
-
-
-# ============================================================
-# ████████████████████████████████████████████████████
-# █████████████████   БАЙЕСОВСКИЙ ТРЕНД   █████████████████████
-# ============================================================
-
-def bayes_trend_probability(df: pd.DataFrame) -> float:
-    """Рассчитывает вероятность тренда с помощью байесовского подхода."""
-    try:
-        close = df["c"]
-        ema20 = _ema(close, 20).iloc[-1]
-        ema50 = _ema(close, 50).iloc[-1]
-        rsi = calc_rsi(close).iloc[-1]
-        adx, _, _ = calc_adx(df)
-        adx_val = adx.iloc[-1]
-        z = ((ema20/ema50 - 1)*100 + (rsi - 50)/25 + (adx_val - 25)/10)
-        return float(np.clip(1.0 / (1.0 + np.exp(-z)), 0.0, 1.0))
-    except Exception: return 0.5
-
-
 # ============================================================
 # █████████████████████████████████████████████████████
 # █████████████████   РАСШИРЕННАЯ СКОРИНГОВАЯ СИСТЕМА   ████████████
@@ -1258,8 +1243,10 @@ def получить_скор(symbol: str, use_quant: bool = True, use_order_flo
         elif vol_ratio > 1.2: score += 4
         
         sr = calc_support_resistance(df_ta)
-        details.update({"support": sr["support"], "resistance": sr["resistance"],
-                       "dist_sup": sr["dist_to_sup_pct"], "dist_res": sr["dist_to_res_pct"]})
+        details.update({
+            "support": sr["support"], "resistance": sr["resistance"],
+            "dist_sup": sr["dist_to_sup_pct"], "dist_res": sr["dist_to_res_pct"]
+        })
         if sr["near_support"]:
             score += 15
             details["sr_signal"] = f"у поддержки ✅ ({sr['sup_cluster']} касаний)"
@@ -1547,8 +1534,8 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
     log.info(f"Мониторинг {coin} {side} вход={entry_price:.8f} SL={sl_цена:.8f} TP={tp_цена:.8f} BE={breakeven_price:.8f}")
     
     while True:
-        если = time.time()
-        if если >= deadline:
+        сейчас = time.time()
+        if сейчас >= deadline:
             log.warning("Дедлайн — принудительное закрытие")
             закрыть_позицию_с_подтверждением(symbol, qty, side)
             return "таймаут"
@@ -1567,7 +1554,7 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
             qty_actual = abs(float(pos.get("contracts", 0) or 0))
             pnl_real = float(pos.get("unrealizedPnl", 0) or 0)
             pnl_pct = ((cur_price - entry_price) / entry_price * 100) if side == "long" else ((entry_price - cur_price) / entry_price * 100)
-            до_дед = int(deadline - если)
+            до_дед = int(deadline - сейчас)
             
             # Частичный безубыток
             if PARTIAL_BE_ENABLED and not partial_done and pnl_pct >= PARTIAL_BE_PROFIT:
@@ -1592,7 +1579,7 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
                 закрыть_позицию_с_подтверждением(symbol, qty_actual, side)
                 return "tp" if pnl_pct > 0 else "sl"
             
-            # Полный безубыток
+            # Полный безубыток (если не было частичного)
             if not partial_done and фаза == 1 and pnl_pct >= 0.3:
                 new_sl_be = entry_price * (1 + BYBIT_FEE * 2 + 0.0003) if side == "long" else entry_price * (1 - BYBIT_FEE * 2 - 0.0003)
                 if обновить_sl_на_бирже(symbol, new_sl_be, side):
@@ -1735,15 +1722,20 @@ def рассчитать_метрики(сделки: List[dict]) -> dict:
 def быстрый_walk_forward(история: List[dict], window: int = 50, step: int = 10) -> dict:
     if len(история) < window * 2:
         return {"стабильность": False, "рекомендация": "Недостаточно данных"}
-    positive_windows = sum(1 for i in range(0, len(история) - window, step) 
-                         if sum(t['pnl_usdt'] for t in история[i+window:i+window+step]) > 0)
-    total_windows = sum(1 for i in range(0, len(история) - window, step) if len(история[i+window:i+window+step]) >= 5)
+    positive_windows = 0
+    total_windows = 0
+    for i in range(0, len(история) - window, step):
+        out_sample = история[i+window:i+window+step]
+        if len(out_sample) < 5: continue
+        pnl_out = sum(t['pnl_usdt'] for t in out_sample)
+        if pnl_out > 0: positive_windows += 1
+        total_windows += 1
     if total_windows == 0: return {"стабильность": False, "рекомендация": "Недостаточно данных"}
     stability = positive_windows / total_windows > 0.6
     return {
         "стабильность": stability, "положительные_окна": positive_windows,
         "всего_окон": total_windows,
-        "рекомендация": "Стратегия робастна" if stability else "Стратегия нестабильна"
+        "рекомендация": "Стратегия робастна" if stability else "Стратегия нестабильна – нужна оптимизация"
     }
 
 def сохранить_метрики(метрики: dict):
@@ -1852,6 +1844,61 @@ def пост_трейд_анализ(запись: dict):
     log.info("━" * 60)
     log.info("")
 
+# ============================================================
+# ██████████████████████████████████████████████████████
+# █████████████████   ОТЧЁТЫ   ██████████████████████████████████
+# ============================================================
+
+def печатать_отчёт():
+    баланс = полный_баланс_usdt()
+    старт = stats["депозит_старт"]
+    дельта = баланс - старт
+    чистый = stats["прибыль_usdt"] - stats["убыток_usdt"]
+    пct = (дельта / старт * 100) if старт > 0 else 0
+    всего = stats["сделок_всего"]
+    tp_ = stats["тейкпрофит"]
+    sl_ = stats["стоплосс"]
+    wr = (tp_ / всего * 100) if всего > 0 else 0.0
+    
+    log.info("")
+    log.info("=" * 65)
+    log.info("📊 ОТЧЁТ ГИБРИДНОГО БОТА v10 ULTIMATE")
+    log.info(f"Баланс: {баланс:.2f} USDT ({дельта:+.2f} USDT / {пct:+.2f}%)")
+    log.info(f"Сделок: {всего} TP={tp_} SL={sl_} Таймаут={stats['таймаут']}")
+    log.info(f"WinRate: {wr:.1f}%")
+    log.info(f"Прибыль/Убыток: {stats['прибыль_usdt']:.4f} / {stats['убыток_usdt']:.4f} USDT")
+    log.info(f"Чистый P&L: {чистый:+.4f} USDT")
+    log.info("=" * 65)
+    log.info("")
+    
+    stats["последний_отчёт"] = time.time()
+    сохранить_состояние()
+    отчёт_по_индикаторам()
+    
+    история = загрузить_историю()
+    if len(история) > 5:
+        метрики = рассчитать_метрики(история)
+        if метрики:
+            log.info("📉 МЕТРИКИ СТРАТЕГИИ:")
+            log.info(f"Sharpe: {метрики.get('sharpe_ratio',0)} Sortino: {метрики.get('sortino_ratio',0)} Calmar: {метрики.get('calmar_ratio',0)}")
+            log.info(f"Max Drawdown: {метрики.get('max_drawdown_pct',0)}% Recovery: {метрики.get('recovery_factor',0)}")
+            сохранить_метрики(метрики)
+        if len(история) > 100:
+            wf = быстрый_walk_forward(история)
+            log.info(f"🔄 Walk-Forward: {wf.get('рекомендация')} (окна: {wf.get('положительные_окна',0)}/{wf.get('всего_окон',0)})")
+    
+    if MONTE_CARLO_ENABLED and len(история) > 20:
+        if time.time() - stats.get("monte_carlo_last_run", 0) > 3600:
+            mc_result = run_monte_carlo_simulation(история)
+            if mc_result["valid"]:
+                stats["monte_carlo_last_run"] = time.time()
+                log.info("🎲 MONTE CARLO СИМУЛЯЦИЯ:")
+                log.info(f"5-й перцентиль: {mc_result['percentile_5']:.2f} USDT")
+                log.info(f"50-й перцентиль: {mc_result['percentile_50']:.2f} USDT")
+                log.info(f"95-й перцентиль: {mc_result['percentile_95']:.2f} USDT")
+                log.info(f"Вероятность убытка: {mc_result['loss_probability']:.1f}%")
+                log.info(f"Средняя max просадка: {mc_result['avg_max_drawdown']:.2f} USDT")
+
 
 # ============================================================
 # ██████████████████████████████████████████████████████
@@ -1946,8 +1993,10 @@ def запустить_предстартовую_проверку() -> bool:
                 else:
                     log.error(f"❌ {msg}")
                     все_ошибки.append(f"[{название}] {msg}")
-            log.info(f"{'✅' if ок else '❌'} {название} — {'ПРОЙДЕН' if ок else 'ПРОВАЛЕН'}")
-            если не ок: все_ок = False
+            if ок: log.info(f"✅ {название} — ПРОЙДЕН")
+            else:
+                log.error(f"❌ {название} — ПРОВАЛЕН")
+                все_ок = False
         except Exception as e:
             log.error(f"💥 Исключение в {название}: {e}")
             все_ошибки.append(f"[{название}] Исключение: {e}")
@@ -1962,62 +2011,6 @@ def запустить_предстартовую_проверку() -> bool:
     log.info("=" * 65)
     log.info("")
     return все_ок
-
-
-# ============================================================
-# █████████████████████████████████████████████████████
-# █████████████████   ОТЧЁТЫ   ██████████████████████████████████
-# ============================================================
-
-def печатать_отчёт():
-    баланс = полный_баланс_usdt()
-    старт = stats["депозит_старт"]
-    дельта = баланс - старт
-    чистый = stats["прибыль_usdt"] - stats["убыток_usdt"]
-    пct = (дельта / старт * 100) if старт > 0 else 0
-    всего = stats["сделок_всего"]
-    tp_ = stats["тейкпрофит"]
-    sl_ = stats["стоплосс"]
-    wr = (tp_ / всего * 100) if всего > 0 else 0.0
-    
-    log.info("")
-    log.info("=" * 65)
-    log.info("📊 ОТЧЁТ ГИБРИДНОГО БОТА v10 ULTIMATE")
-    log.info(f"Баланс: {баланс:.2f} USDT ({дельта:+.2f} USDT / {пct:+.2f}%)")
-    log.info(f"Сделок: {всего} TP={tp_} SL={sl_} Таймаут={stats['таймаут']}")
-    log.info(f"WinRate: {wr:.1f}%")
-    log.info(f"Прибыль/Убыток: {stats['прибыль_usdt']:.4f} / {stats['убыток_usdt']:.4f} USDT")
-    log.info(f"Чистый P&L: {чистый:+.4f} USDT")
-    log.info("=" * 65)
-    log.info("")
-    
-    stats["последний_отчёт"] = time.time()
-    сохранить_состояние()
-    отчёт_по_индикаторам()
-    
-    история = загрузить_историю()
-    if len(история) > 5:
-        метрики = рассчитать_метрики(история)
-        if метрики:
-            log.info("📉 МЕТРИКИ СТРАТЕГИИ:")
-            log.info(f"Sharpe: {метрики.get('sharpe_ratio',0)} Sortino: {метрики.get('sortino_ratio',0)} Calmar: {метрики.get('calmar_ratio',0)}")
-            log.info(f"Max Drawdown: {метрики.get('max_drawdown_pct',0)}% Recovery: {метрики.get('recovery_factor',0)}")
-            сохранить_метрики(метрики)
-        if len(история) > 100:
-            wf = быстрый_walk_forward(история)
-            log.info(f"🔄 Walk-Forward: {wf.get('рекомендация')} (окна: {wf.get('положительные_окна',0)}/{wf.get('всего_окон',0)})")
-    
-    if MONTE_CARLO_ENABLED and len(история) > 20:
-        if time.time() - stats.get("monte_carlo_last_run", 0) > 3600:
-            mc_result = run_monte_carlo_simulation(история)
-            if mc_result["valid"]:
-                stats["monte_carlo_last_run"] = time.time()
-                log.info("🎲 MONTE CARLO СИМУЛЯЦИЯ:")
-                log.info(f"5-й перцентиль: {mc_result['percentile_5']:.2f} USDT")
-                log.info(f"50-й перцентиль: {mc_result['percentile_50']:.2f} USDT")
-                log.info(f"95-й перцентиль: {mc_result['percentile_95']:.2f} USDT")
-                log.info(f"Вероятность убытка: {mc_result['loss_probability']:.1f}%")
-                log.info(f"Средняя max просадка: {mc_result['avg_max_drawdown']:.2f} USDT")
 
 
 # ============================================================
@@ -2305,6 +2298,7 @@ def main():
             пост_трейд_анализ(запись)
             сохранить_состояние()
             
+            # Обучение ML модели с периодичностью
             if ML_ENABLED:
                 stats["ml_trades_since_retrain"] += 1
                 if stats["ml_trades_since_retrain"] >= ML_RETRAIN_INTERVAL:
