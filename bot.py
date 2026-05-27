@@ -85,6 +85,7 @@ try:
         check_slippage,
         is_high_impact_news,
         send_telegram_message,
+        is_false_breakout,
     )
 except ImportError as e:
     log.critical(f"Ошибка импорта модулей: {e}")
