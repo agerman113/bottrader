@@ -2,18 +2,17 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-Bybit ГИБРИДНЫЙ ПРОФЕССИОНАЛЬНЫЙ БОТ — v11.1 Ultimate Pro Fixed
+Bybit ГИБРИДНЫЙ ПРОФЕССИОНАЛЬНЫЙ БОТ — v12.0 Ultimate Pro Fixed
 ================================================================================
-Версия: 11.1 Ultimate Pro Fixed
+Версия: 12.0 Ultimate Pro Fixed
 Дата: 28.05.2026
 
-Исправления:
-- Полная защита от крахов и зависаний
-- Корректный расчёт P&L с учётом комиссий и проскальзывания
-- Блокировка символов между перезапусками
-- Очистка старых ML-записей
-- Защита от дублирования ордеров
-- Улучшенный мониторинг позиций
+Исправления и улучшения:
+- Динамический риск-менеджмент (ATR, корреляция, ликвидность)
+- Улучшенный мониторинг позиций (защита от зависания, уведомления)
+- Оптимизированный главный цикл (проверка соединения, повторные попытки)
+- Расширенная отладка (логирование, бэктестинг, визуализация)
+- Поддержка Telegram-уведомлений
 ================================================================================
 """
 
@@ -24,18 +23,21 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, Any
+import pandas as pd
+import numpy as np
+import requests
 
 # ============================================================
 # ЛОГИРОВАНИЕ
 # ============================================================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format="%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d - %(message)s",
     datefmt="%d.%m.%Y %H:%M:%S",
     handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("bot_v11_fixed.log", encoding="utf-8"),
-    ],
+        logging.FileHandler("bot_v12.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
 )
 log = logging.getLogger(__name__)
 
@@ -46,7 +48,7 @@ try:
     from config import *
     from engine import (
         exchange,
-        ml_model as engine_ml_model,
+        ml_model,
         load_state,
         save_state,
         get_free_balance,
@@ -62,7 +64,9 @@ try:
         apply_ai_correction,
         calc_position_size,
         open_position,
+        open_position_with_retries,
         close_position_with_confirm,
+        emergency_close_position,
         confirm_entry,
         monitor_position,
         print_report,
@@ -76,6 +80,11 @@ try:
         get_order_flow_signals,
         get_quant_signals,
         calc_exact_pnl,
+        check_correlation,
+        check_liquidity,
+        check_slippage,
+        is_high_impact_news,
+        send_telegram_message,
     )
 except ImportError as e:
     log.critical(f"Ошибка импорта модулей: {e}")
@@ -85,8 +94,6 @@ except ImportError as e:
 # ============================================================
 # ИНИЦИАЦИЯ ML
 # ============================================================
-ml_model = engine_ml_model
-
 def init_ml():
     """Инициализация ML модели."""
     global ml_model
@@ -178,6 +185,16 @@ def preflight_check() -> bool:
     else:
         log.info("✅ Открытых позиций нет")
 
+    # 5. Проверка Telegram
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        try:
+            send_telegram_message(f"🤖 Бот {BOT_VERSION} запущен и проходит предстартовую проверку")
+            log.info("✅ Telegram уведомления включены")
+        except Exception as e:
+            log.warning(f"⚠️ Ошибка отправки тестового уведомления в Telegram: {e}")
+    else:
+        log.info("ℹ️ Telegram уведомления отключены")
+
     log.info("")
     log.info("=" * 65)
     if all_ok:
@@ -226,19 +243,41 @@ def block_symbol(symbol: str, minutes: int):
     log.info(f"🔒 {symbol.split(':')[0]} заблокирован на {minutes} мин")
 
 # ============================================================
+# ПРОВЕРКА СОЕДИНЕНИЯ С БИРЖЕЙ
+# ============================================================
+def check_connection() -> bool:
+    """Проверяет соединение с биржей."""
+    try:
+        exchange.fetch_ticker("BTC/USDT:USDT")
+        return True
+    except Exception as e:
+        log.error(f"Нет соединения с биржей: {e}")
+        return False
+
+# ============================================================
 # СКАНИРОВАНИЕ
 # ============================================================
 def scan_for_trade() -> Tuple[Optional[str], int, float, Dict, str]:
-    """Сканирует рынок в поисках сделок."""
+    """Сканирует рынок в поисках сделок с учётом всех фильтров."""
     global stats
 
     log.info(f"── Сканирование {len(SYMBOLS)} пар (баланс={get_free_balance():.2f}U) ──")
 
-    scores = {}
+    candidates = []
+    open_positions = get_positions()
 
     for sym in SYMBOLS:
-        # Пропускаем заблокированные
+        # Пропускаем заблокированные символы
         if is_symbol_blocked(sym):
+            continue
+
+        # Проверяем новости
+        if is_high_impact_news(sym):
+            log.info(f"⚠️ Новости для {sym.split(':')[0]} — пропускаем")
+            continue
+
+        # Проверяем ликвидность
+        if not check_liquidity(sym):
             continue
 
         # Фильтр 4H тренда
@@ -253,20 +292,28 @@ def scan_for_trade() -> Tuple[Optional[str], int, float, Dict, str]:
         # AI корректировка
         ai_score = apply_ai_correction(result["score"], sym)
         result["score_final"] = ai_score
-        scores[sym] = result
+
+        # Проверяем корреляцию с открытыми позициями
+        if not check_correlation(sym, open_positions):
+            continue
+
+        # Проверяем ложные пробои
+        df_ta = result.get("df_ta")
+        if df_ta is not None and is_false_breakout(df_ta, "long"):
+            log.info(f"⚠️ Ложный пробой для {sym.split(':')[0]}")
+            continue
+
+        candidates.append((sym, result))
 
         log.debug(f"{sym.split(':')[0]:12s} скор={ai_score:3.0f}/100")
 
-    if not scores:
+    if not candidates:
         log.info("Нет кандидатов на лонг")
         return None, 0, 0.0, {}, "long"
 
     # Сортируем по скору
-    candidates = sorted(
-        [(s, d) for s, d in scores.items() if d.get("score_final", 0) >= MIN_SCORE],
-        key=lambda x: x[1]["score_final"],
-        reverse=True
-    )[:5]  # Топ 5 кандидатов
+    candidates.sort(key=lambda x: x[1]["score_final"], reverse=True)
+    candidates = candidates[:5]  # Топ 5 кандидатов
 
     # Выбираем лучший кандидат
     for best, data in candidates:
@@ -302,6 +349,10 @@ def scan_for_trade() -> Tuple[Optional[str], int, float, Dict, str]:
     for sym in SYMBOLS:
         if is_symbol_blocked(sym):
             continue
+        if is_high_impact_news(sym):
+            continue
+        if not check_liquidity(sym):
+            continue
         if trend_4h_bearish(sym):
             short_res = get_score_short(sym)
             if short_res["score"] >= MIN_SCORE:
@@ -309,6 +360,11 @@ def scan_for_trade() -> Tuple[Optional[str], int, float, Dict, str]:
                 if MA_CROSSOVER_ENABLED and not det_sh.get("ma_cross", True):
                     continue
                 if not det_sh.get("vol_spike_ok", True):
+                    continue
+                df_ta = short_res.get("df_ta")
+                if df_ta is not None and is_false_breakout(df_ta, "short"):
+                    continue
+                if not check_correlation(sym, open_positions):
                     continue
                 log.info(f"🐻 Шорт: {sym.split(':')[0]} скор={short_res['score']}")
                 return sym, short_res["score"], short_res["price"], short_res.get("sr", {}), "short"
@@ -328,6 +384,8 @@ def main():
     # Предстартовая проверка
     if not preflight_check():
         log.error("🛑 Ошибки предстартовой проверки")
+        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+            send_telegram_message("🚨 Ошибки предстартовой проверки! Бот остановлен.")
         return
 
     # Инициализация ML
@@ -358,12 +416,22 @@ def main():
     log.info("=" * 65)
     log.info("")
 
-    # Очистка старых ML записей (если бот был перезапущен)
+    # Очистка старых ML записей
     pending_ml_entries.clear()
+
+    # Отправляем уведомление о старте
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        send_telegram_message(f"🤖 Бот {BOT_VERSION} запущен!\nБаланс: {balance_now:.2f} USDT")
 
     # Главный цикл
     while True:
         try:
+            # Проверка соединения
+            if not check_connection():
+                log.error("🚨 Нет соединения с биржей! Пауза 30 сек...")
+                time.sleep(30)
+                continue
+
             # Отчёт
             if time.time() - stats.get("last_report", 0) >= REPORT_INTERVAL:
                 print_report(stats)
@@ -376,6 +444,8 @@ def main():
             # Проверка свободного баланса
             if free_balance < MIN_BALANCE:
                 log.warning(f"🛑 Баланс {free_balance:.2f} < {MIN_BALANCE}. Пауза 10 мин.")
+                if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                    send_telegram_message(f"🛑 Низкий баланс: {free_balance:.2f} USDT")
                 time.sleep(600)
                 continue
 
@@ -384,12 +454,16 @@ def main():
                 drawdown = (stats["deposit_start"] - balance) / stats["deposit_start"] * 100
                 if drawdown > MAX_DRAWDOWN_PCT:
                     log.warning(f"⛔ Просадка {drawdown:.1f}% > {MAX_DRAWDOWN_PCT}%. Пауза 2ч.")
+                    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                        send_telegram_message(f"⛔ Просадка {drawdown:.1f}% > {MAX_DRAWDOWN_PCT}%!")
                     time.sleep(7200)
                     continue
 
             # Дневной лимит
             if is_daily_loss_exceeded(stats):
                 log.warning(f"⛔ Дневной лимит убытков. Пауза {DAILY_LOSS_PAUSE_SEC // 60} мин.")
+                if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                    send_telegram_message(f"⛔ Дневной лимит убытков достигнут!")
                 time.sleep(DAILY_LOSS_PAUSE_SEC)
                 continue
 
@@ -405,12 +479,18 @@ def main():
                 stats["sl_streak"] = 0
                 save_state(stats)
                 save_blocked_symbols(stats)
+                if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                    send_telegram_message(f"🧊 {SL_STREAK_LIMIT} SL подряд — cooldown")
                 time.sleep(SL_STREAK_PAUSE + SL_STREAK_EXTRA_PAUSE)
                 continue
 
             # Активные позиции
             active_positions = get_positions()
-            if active_positions:
+            if len(active_positions) >= MAX_OPEN_POSITIONS:
+                log.info(f"⏳ Достигнут лимит открытых позиций ({MAX_OPEN_POSITIONS})")
+                time.sleep(60)
+                continue
+            elif active_positions:
                 log.info(f"⏳ Открытые позиции: {[p['symbol'] for p in active_positions]}")
                 time.sleep(60)
                 continue
@@ -486,10 +566,10 @@ def main():
                     time.sleep(30)
                     continue
 
-            # Открытие позиции
+            # Открытие позиции (с повторными попытками)
             balance_before = get_total_balance()
             entry_time = time.time()
-            entry_price, qty = open_position(selected, margin, tp_price, sl_price, side)
+            entry_price, qty = open_position_with_retries(selected, margin, tp_price, sl_price, side)
 
             if entry_price is None or qty is None:
                 log.warning("Не удалось открыть позицию — пауза 30 сек")
@@ -511,6 +591,14 @@ def main():
             save_state(stats)
             save_blocked_symbols(stats)
 
+            # Уведомление об открытии позиции
+            if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                send_telegram_message(
+                    f"🆕 Открыта позиция: {selected.split(':')[0]} {side.upper()}\n"
+                    f"Скор: {score}/100 | Маржа: {margin:.2f} USDT\n"
+                    f"SL: {sl_price:.8f} | TP: {tp_price:.8f}"
+                )
+
             # Мониторинг
             result = "sl"
             try:
@@ -521,7 +609,7 @@ def main():
             except Exception as e:
                 log.error(f"💥 Краш мониторинга: {e}")
                 try:
-                    close_position_with_confirm(selected, qty, side)
+                    emergency_close_position(selected, side)
                 except Exception:
                     pass
                 result = "sl"
@@ -539,6 +627,8 @@ def main():
                 stats["sl_streak"] = 0
                 log.info(f"✅ TP: +{real_pnl:+.4f} USDT")
                 block_symbol(selected, SYMBOL_BLOCK_AFTER_TP)
+                if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                    send_telegram_message(f"✅ TP: {selected.split(':')[0]} | P&L: {real_pnl:+.4f} USDT")
 
             elif result == "sl":
                 stats["stop_loss"] += 1
@@ -546,6 +636,8 @@ def main():
                 stats["sl_streak"] = stats.get("sl_streak", 0) + 1
                 block_symbol(selected, SYMBOL_BLOCK_AFTER_SL)
                 log.warning(f"❌ SL: {real_pnl:+.4f} USDT (streak={stats['sl_streak']})")
+                if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                    send_telegram_message(f"❌ SL: {selected.split(':')[0]} | P&L: {real_pnl:+.4f} USDT (streak={stats['sl_streak']})")
 
             else:  # timeout
                 stats["timeout"] += 1
@@ -553,6 +645,8 @@ def main():
                 stats["sl_streak"] = 0
                 block_symbol(selected, SYMBOL_BLOCK_AFTER_TP)
                 log.warning(f"⏰ Таймаут: {real_pnl:+.4f} USDT")
+                if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                    send_telegram_message(f"⏰ Таймаут: {selected.split(':')[0]} | P&L: {real_pnl:+.4f} USDT")
 
             # Сохраняем сделку
             trade_record = {
@@ -596,10 +690,14 @@ def main():
             log.info("\n👋 Остановка по Ctrl+C")
             save_state(stats)
             save_blocked_symbols(stats)
+            if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                send_telegram_message("👋 Бот остановлен пользователем")
             break
 
         except Exception as e:
             log.error(f"Глобальная ошибка: {e}", exc_info=True)
+            if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                send_telegram_message(f"🚨 Глобальная ошибка: {e}")
             time.sleep(60)
 
 # ============================================================
@@ -623,6 +721,10 @@ def print_help():
     config.py   — Все настройки бота
     engine.py   — Логика (индикаторы, ML, анализ)
     bot.py      — Главный цикл
+
+Дополнительные настройки:
+    TELEGRAM_BOT_TOKEN — Токен бота для уведомлений
+    TELEGRAM_CHAT_ID   — ID чата для уведомлений
 
 {'=' * 65}
 """)
@@ -673,10 +775,12 @@ def run_check():
     print(f"  TP: {TP_PERCENT}% | SL: {SL_PERCENT}% | RR: {TP_PERCENT / SL_PERCENT:.1f}:1")
     print(f"  Мин. скор: {MIN_SCORE}")
     print(f"  Риск: {BASE_RISK_PCT}-{MAX_RISK_PCT}%")
+    print(f"  Макс. открытых позиций: {MAX_OPEN_POSITIONS}")
     print(f"  Пар: {len(SYMBOLS)}")
     print(f"  Quant: {'ВКЛ' if QUANT_ENABLED else 'ВЫКЛ'}")
     print(f"  Order Flow: {'ВКЛ' if ORDER_FLOW_ENABLED else 'ВЫКЛ'}")
     print(f"  ML: {'ВКЛ' if ML_ENABLED else 'ВЫКЛ'}")
+    print(f"  Telegram: {'ВКЛ' if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID else 'ВЫКЛ'}")
     print()
 
     # API
@@ -746,6 +850,51 @@ def run_check():
     print(f"{'=' * 65}\n")
 
 # ============================================================
+# ВИЗУАЛИЗАЦИЯ МЕТРИК
+# ============================================================
+def plot_metrics(history: List[dict]):
+    """Строит графики метрик стратегии."""
+    if not history:
+        print("Нет данных для визуализации")
+        return
+
+    try:
+        import matplotlib.pyplot as plt
+
+        # Извлекаем данные
+        dates = [datetime.strptime(t["exit_time"], "%d.%m.%Y %H:%M:%S") for t in history]
+        pnls = [t["pnl_usdt"] for t in history]
+        cumulative = np.cumsum(pnls)
+
+        # График P&L
+        plt.figure(figsize=(12, 6))
+        plt.plot(dates, cumulative, label="Cumulative P&L", color="green")
+        plt.title("Cumulative P&L Over Time")
+        plt.xlabel("Date")
+        plt.ylabel("P&L (USDT)")
+        plt.legend()
+        plt.grid()
+        plt.savefig("cumulative_pnl.png")
+        plt.close()
+
+        # Гистограмма P&L
+        plt.figure(figsize=(12, 6))
+        plt.hist(pnls, bins=20, color="blue", alpha=0.7)
+        plt.title("P&L Distribution")
+        plt.xlabel("P&L (USDT)")
+        plt.ylabel("Frequency")
+        plt.grid()
+        plt.savefig("pnl_distribution.png")
+        plt.close()
+
+        print("Графики сохранены в cumulative_pnl.png и pnl_distribution.png")
+
+    except ImportError:
+        print("Matplotlib не установлен. Установите его: pip install matplotlib")
+    except Exception as e:
+        print(f"Ошибка при построении графиков: {e}")
+
+# ============================================================
 # ТОЧКА ВХОДА
 # ============================================================
 if __name__ == "__main__":
@@ -760,6 +909,9 @@ if __name__ == "__main__":
         run_check()
     elif args[0] == "help":
         print_help()
+    elif args[0] == "plot":
+        history = load_trades_history()
+        plot_metrics(history)
     else:
         print(f"Неизвестная команда: {args[0]}")
-        print("Используй: python bot.py [backtest|check|help]")
+        print("Используй: python bot.py [backtest|check|help|plot]")
