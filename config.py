@@ -7,7 +7,7 @@ load_dotenv()
 # ============================================================
 # ВЕРСИЯ И МЕТАДАННЫЕ
 # ============================================================
-BOT_VERSION = "11.1 Ultimate Pro Fixed"
+BOT_VERSION = "12.0 Ultimate Pro Fixed"
 RELEASE_DATE = "28.05.2026"
 
 # ============================================================
@@ -22,6 +22,12 @@ if not API_SECRET or len(API_SECRET) < 10:
     raise ValueError("BYBIT_API_SECRET не задан или слишком короткий! Проверь .env файл")
 
 # ============================================================
+# ТЕЛЕГРАМ (для уведомлений)
+# ============================================================
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# ============================================================
 # ТОРГОВЫЕ ПАРЫ
 # ============================================================
 SYMBOLS = [
@@ -29,7 +35,6 @@ SYMBOLS = [
     "SOL/USDT:USDT", "ADA/USDT:USDT", "TRX/USDT:USDT", "TON/USDT:USDT",
     "AVAX/USDT:USDT", "DOT/USDT:USDT", "LTC/USDT:USDT", "BCH/USDT:USDT",
     "ATOM/USDT:USDT", "XLM/USDT:USDT", "NEAR/USDT:USDT", "DOGE/USDT:USDT",
-    "PEPE/USDT:USDT", "WIF/USDT:USDT", "BOME/USDT:USDT", "FET/USDT:USDT",
 ]
 
 # ============================================================
@@ -40,9 +45,9 @@ TIMEFRAME_TA = "5m"
 TIMEFRAME_TREND = "1h"
 TIMEFRAME_MID = "15m"
 TIMEFRAME_4H = "4h"
-SCAN_INTERVAL = 300
+SCAN_INTERVAL = 300  # Секунды между сканированиями
 
-MIN_SCORE = 65
+MIN_SCORE = 65  # Минимальный скор для входа
 
 # ============================================================
 # ТП / СЛ
@@ -54,6 +59,7 @@ MAX_SL_PERCENT = 2.0
 ATR_SL_MULT = 1.5
 ATR_TP_MULT = 3.0
 MIN_RR_RATIO = 2.0
+MAX_SLIPPAGE_PCT = 0.1  # Максимальное допустимое проскальзывание (%)
 
 # ============================================================
 # РИСК-МЕНЕДЖМЕНТ
@@ -65,7 +71,11 @@ MIN_TRADES_FOR_F = 20
 MAX_RISK_PERCENT_F = 2.5
 MAX_RISK_PER_TRADE_PCT = 2.0
 MIN_EXPECTED_PROFIT_USDT = 0.5
-MAX_PORTFOLIO_RISK = 0.05
+MAX_PORTFOLIO_RISK = 0.05  # 5% от портфеля
+MAX_OPEN_POSITIONS = 3  # Максимум открытых позиций
+MIN_BALANCE = 5.0  # Минимальный баланс для торговли (USDT)
+MAX_DRAWDOWN_PCT = 15.0  # Максимальная просадка (%)
+CORRELATION_THRESHOLD = 0.8  # Порог корреляции между парами
 
 # ============================================================
 # АНАЛИЗ ПРИБЫЛЬНОСТИ
@@ -73,14 +83,14 @@ MAX_PORTFOLIO_RISK = 0.05
 DEPOSIT_ANALYSIS_ENABLED = True
 SLIPPAGE_PCT = 0.05
 FUNDING_RATE_CHECK = True
-BYBIT_FEE = 0.00055
+BYBIT_FEE = 0.00055  # Комиссия Bybit
 
 # ============================================================
 # ЧАСТИЧНЫЙ БЕЗУБЫТОК
 # ============================================================
 PARTIAL_BE_ENABLED = True
-PARTIAL_BE_CLOSE_PCT = 50.0
-PARTIAL_BE_PROFIT = 0.2
+PARTIAL_BE_CLOSE_PCT = 50.0  # % позиции для частичного закрытия
+PARTIAL_BE_PROFIT = 0.2  # % прибыли для активации частичного БУ
 
 # ============================================================
 # ТРЕЙЛИНГ
@@ -90,8 +100,8 @@ TRAILING_ATR_MULT = 2.0
 TRAILING_OFFSET_MULT = 1.5
 MIN_TRAILING_STEP = 0.4
 MIN_TRAILING_OFFSET = 0.6
-MIN_PROFIT_FOR_TRAIL = 1.0
-RR_EXIT_TRIGGER = 0.6
+MIN_PROFIT_FOR_TRAIL = 1.0  # % прибыли для активации трейлинга
+RR_EXIT_TRIGGER = 0.6  # Триггер для выхода по RR
 
 # ============================================================
 # MA КРОССОВЕР
@@ -107,30 +117,27 @@ MA_TIMEFRAME = "5m"
 # ФИЛЬТРЫ
 # ============================================================
 SESSION_FILTER_ENABLED = False
-SESSION_BLOCK_START = 0
-SESSION_BLOCK_END = 4
+SESSION_BLOCK_START = 0  # Час начала блокировки (UTC)
+SESSION_BLOCK_END = 4    # Час конца блокировки (UTC)
 
-DAILY_LOSS_LIMIT_PCT = 3.0
-DAILY_LOSS_PAUSE_SEC = 10800
+DAILY_LOSS_LIMIT_PCT = 3.0  # % от дневного депозита
+DAILY_LOSS_PAUSE_SEC = 10800  # Пауза при превышении дневного лимита (секунды)
 
 VOLUME_SPIKE_MULT = 3.5
 VOLUME_AVG_PERIOD = 20
 
 SIGNAL_EXIT_ENABLED = True
-ENTRY_CONFIRM_BARS = 0
-ENTRY_CONFIRM_MIN_SCORE = 60
+ENTRY_CONFIRM_BARS = 1  # Количество свечей для подтверждения входа
+ENTRY_CONFIRM_MIN_SCORE = 60  # Минимальный скор для подтверждения
 
-SYMBOL_BLOCK_AFTER_TP = 90
-SYMBOL_BLOCK_AFTER_SL = 180
-SL_STREAK_LIMIT = 2
-SL_STREAK_PAUSE = 3600
-SL_STREAK_EXTRA_PAUSE = 300
+SYMBOL_BLOCK_AFTER_TP = 90  # Минуты блокировки после TP
+SYMBOL_BLOCK_AFTER_SL = 180  # Минуты блокировки после SL
+SL_STREAK_LIMIT = 2  # Количество SL подряд для активации cooldown
+SL_STREAK_PAUSE = 3600  # Пауза при SL-стрике (секунды)
+SL_STREAK_EXTRA_PAUSE = 300  # Дополнительная пауза (секунды)
 
-MIN_BALANCE = 5.0
-MAX_DRAWDOWN_PCT = 15.0
-
-TRADE_MAX_LIFETIME = 7200
-REPORT_INTERVAL = 1800
+TRADE_MAX_LIFETIME = 7200  # Максимальное время жизни сделки (секунды)
+REPORT_INTERVAL = 1800  # Интервал отчётов (секунды)
 
 # ============================================================
 # S/R УРОВНИ
@@ -167,20 +174,19 @@ CLUSTER_TOLERANCE = 0.005
 # МАШИННОЕ ОБУЧЕНИЕ
 # ============================================================
 ML_ENABLED = True
-ML_MODEL_TYPE = "RandomForest"
+ML_MODEL_TYPE = "RandomForest"  # RandomForest, GradientBoosting, XGBoost
 ML_FEATURES_WINDOW = 30
-ML_RETRAIN_INTERVAL = 100
-ML_MIN_SAMPLES = 50
+ML_RETRAIN_INTERVAL = 100  # Количество сделок между переобучением
+ML_MIN_SAMPLES = 50  # Минимальное количество образцов для обучения
 ML_FEATURES_VERSION = "v2"
 ML_LOG_DATA = True
-ML_LOG_FILE = "ml_training_data_v11.json"
-ML_MODEL_FILE = "ml_model_v11.pkl"
+ML_LOG_FILE = "ml_training_data_v12.json"
+ML_MODEL_FILE = "ml_model_v12.pkl"
 
 # ============================================================
 # ПОРТФЕЛЬ
 # ============================================================
 PORTFOLIO_OPTIMIZATION = True
-CORRELATION_THRESHOLD = 0.8
 
 # ============================================================
 # МОНТЕ-КАРЛО
@@ -192,8 +198,8 @@ MONTE_CARLO_DAYS = 30
 # ============================================================
 # ФАЙЛЫ
 # ============================================================
-STATE_FILE = "state_bot_v11.json"
-TRADES_FILE = "trades_bot_v11.json"
-INDICATOR_STATS_FILE = "indicator_stats_v11.json"
-METRICS_FILE = "strategy_metrics_v11.json"
-PORTFOLIO_STATE_FILE = "portfolio_state_v11.json"
+STATE_FILE = "state_bot_v12.json"
+TRADES_FILE = "trades_bot_v12.json"
+INDICATOR_STATS_FILE = "indicator_stats_v12.json"
+METRICS_FILE = "strategy_metrics_v12.json"
+PORTFOLIO_STATE_FILE = "portfolio_state_v12.json"
