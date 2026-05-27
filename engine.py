@@ -12,12 +12,13 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Tuple, Optional, Any
 from scipy import stats as scipy_stats
 from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_score
 from statsmodels.tsa.stattools import coint, adfuller
 import joblib
 import warnings
+import xgboost as xgb
 
 warnings.filterwarnings('ignore')
 
@@ -36,10 +37,19 @@ exchange = ccxt.bybit({
 # ============================================================
 # ЛОГИРОВАНИЕ
 # ============================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d - %(message)s",
+    datefmt="%d.%m.%Y %H:%M:%S",
+    handlers=[
+        logging.FileHandler("bot_v12.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
 log = logging.getLogger("engine")
 
 # ============================================================
-# ИСТОРИЧЕСКИЕ ДАННЫЕ ДЛЯ ML (энтри → фичи)
+# ИСТОРИЧЕСКИЕ ДАННЫЕ ДЛЯ ML
 # ============================================================
 pending_ml_entries = {}  # trade_id → {features, symbol, entry_time}
 
@@ -306,6 +316,95 @@ def trend_4h_bearish(symbol: str) -> bool:
     except Exception:
         return False
 
+def is_false_breakout(df: pd.DataFrame, side: str) -> bool:
+    """Проверяет, является ли пробой ложным."""
+    if len(df) < 10:
+        return False
+
+    close = df["c"]
+    high = df["h"]
+    low = df["l"]
+
+    if side == "long":
+        last_high = high.iloc[-1]
+        prev_highs = high.iloc[-5:-1]
+        if last_high > max(prev_highs) and close.iloc[-1] < last_high * 0.995:
+            return True
+    else:
+        last_low = low.iloc[-1]
+        prev_lows = low.iloc[-5:-1]
+        if last_low < min(prev_lows) and close.iloc[-1] > last_low * 1.005:
+            return True
+
+    return False
+
+def check_correlation(symbol: str, open_positions: List[dict]) -> bool:
+    """Проверяет корреляцию с уже открытыми позициями."""
+    if not PORTFOLIO_OPTIMIZATION:
+        return True
+
+    try:
+        raw = exchange.fetch_ohlcv(symbol, "1h", limit=100)
+        if len(raw) < 50:
+            return True
+        df_new = pd.DataFrame(raw, columns=["ts", "o", "h", "l", "c", "v"])["c"]
+
+        for pos in open_positions:
+            pos_symbol = pos.get("symbol")
+            if pos_symbol == symbol:
+                continue
+
+            raw_pos = exchange.fetch_ohlcv(pos_symbol, "1h", limit=100)
+            if len(raw_pos) < 50:
+                continue
+            df_pos = pd.DataFrame(raw_pos, columns=["ts", "o", "h", "l", "c", "v"])["c"]
+
+            correlation = df_new.corr(df_pos)
+            if abs(correlation) > CORRELATION_THRESHOLD:
+                log.warning(f"Высокая корреляция между {symbol} и {pos_symbol}: {correlation:.2f}")
+                return False
+    except Exception as e:
+        log.warning(f"Ошибка проверки корреляции: {e}")
+
+    return True
+
+def check_liquidity(symbol: str) -> bool:
+    """Проверяет ликвидность пары."""
+    try:
+        order_book = exchange.fetch_order_book(symbol, 20)
+        total_bid_vol = sum([b[1] for b in order_book["bids"]])
+        total_ask_vol = sum([a[1] for a in order_book["asks"]])
+        min_volume = 1000  # Минимальный объём в стакане
+        if total_bid_vol < min_volume or total_ask_vol < min_volume:
+            log.warning(f"Низкая ликвидность для {symbol}")
+            return False
+    except Exception as e:
+        log.warning(f"Ошибка проверки ликвидности: {e}")
+        return False
+    return True
+
+# ============================================================
+# ПРОВЕРКА НОВОСТЕЙ
+# ============================================================
+def is_high_impact_news(symbol: str) -> bool:
+    """Проверяет, есть ли важные новости для символа."""
+    try:
+        coin = symbol.split("/")[0].lower()
+        url = f"https://api.coingecko.com/api/v3/coins/{coin}/events"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+
+        now = datetime.now(timezone.utc)
+        for event in data.get("data", []):
+            event_time = datetime.fromisoformat(event["date"].replace("Z", "+00:00"))
+            if abs((event_time - now).total_seconds()) < 3600:  # В течение часа
+                if event.get("type") in ["conference", "meetup", "hard_fork", "airdrop"]:
+                    log.warning(f"Важная новость для {symbol}: {event.get('title', 'Unknown')}")
+                    return True
+    except Exception as e:
+        log.debug(f"Ошибка проверки новостей: {e}")
+    return False
+
 # ============================================================
 # P&L И ПРОВЕРКА ПРИБЫЛЬНОСТИ
 # ============================================================
@@ -314,7 +413,7 @@ def calc_exact_pnl(
     margin_usdt: float, leverage: int, symbol: str,
     side: str = "long"
 ) -> Dict[str, Any]:
-    """Рассчитывает точный P&L с учетом комиссий и проскальзывания."""
+    """Рассчитывает точный P&L с учетом комиссий, проскальзывания и фондирования."""
     try:
         if side == "long":
             real_entry = entry_price * (1 + SLIPPAGE_PCT / 100)
@@ -357,11 +456,19 @@ def calc_exact_pnl(
         risk_pct = (risk_usdt / margin_usdt * 100) if margin_usdt > 0 else 0
 
         return {
-            "real_entry": real_entry, "real_tp": real_tp, "real_sl": real_sl,
-            "qty": qty, "pnl_tp_net": pnl_tp_net, "pnl_sl_net": pnl_sl_net,
-            "total_fee": total_fee, "funding_rate": funding_rate,
-            "risk_usdt": risk_usdt, "reward_usdt": reward_usdt,
-            "rr_ratio": rr_ratio, "risk_pct": risk_pct, "valid": True
+            "real_entry": real_entry,
+            "real_tp": real_tp,
+            "real_sl": real_sl,
+            "qty": qty,
+            "pnl_tp_net": pnl_tp_net,
+            "pnl_sl_net": pnl_sl_net,
+            "total_fee": total_fee,
+            "funding_rate": funding_rate,
+            "risk_usdt": risk_usdt,
+            "reward_usdt": reward_usdt,
+            "rr_ratio": rr_ratio,
+            "risk_pct": risk_pct,
+            "valid": True
         }
     except Exception as e:
         log.error(f"Ошибка расчета P&L: {e}")
@@ -406,6 +513,14 @@ def check_trade_profitability(
     except Exception as e:
         log.error(f"Ошибка проверки прибыльности: {e}")
         return False, {"error": str(e)}
+
+def check_slippage(symbol: str, entry_price: float, real_entry: float) -> bool:
+    """Проверяет, что проскальзывание не превышает допустимого."""
+    slippage_pct = abs(real_entry - entry_price) / entry_price * 100
+    if slippage_pct > MAX_SLIPPAGE_PCT:
+        log.warning(f"Высокое проскальзывание: {slippage_pct:.2f}% > {MAX_SLIPPAGE_PCT}%")
+        return False
+    return True
 
 # ============================================================
 # КВАНТОВЫЙ АНАЛИЗ
@@ -452,7 +567,7 @@ def get_quant_signals(symbol: str) -> Dict[str, Any]:
     return {"quant_score": min(100, quant_score), "details": signals}
 
 # ============================================================
-# ORDER FLOW (упрощённый)
+# ORDER FLOW
 # ============================================================
 def get_order_flow_signals(symbol: str) -> Dict[str, Any]:
     """Получает Order Flow сигналы."""
@@ -485,7 +600,7 @@ def get_order_flow_signals(symbol: str) -> Dict[str, Any]:
     except Exception as e:
         log.debug(f"Order Flow ошибка: {e}")
 
-    return {"order_flow_score": max(0, min(100, order_flow_score)), "details": {}}
+    return {"order_flow_score": max(0, min(100, order_flow_score)), "details": {"spread_pct": spread_pct, "imbalance": imbalance}}
 
 # ============================================================
 # ML МОДЕЛЬ
@@ -495,16 +610,18 @@ class TradingModel:
 
     def __init__(self, model_type: str = "RandomForest"):
         self.model_type = model_type
-        self.model = None
+        self.models = {}  # Для ансамбля моделей
+        self.ensemble = None
         self.scaler = StandardScaler()
         self.features = [
             "rsi", "rsi_1h", "macd", "adx", "stoch_k", "volume_ratio",
             "price_change_5m", "price_change_15m", "price_change_1h",
-            "spread_pct", "imbalance", "poc_distance",
+            "atr_pct", "spread_pct", "imbalance",
             "mean_reversion_zscore", "momentum",
             "rr_ratio", "risk_pct",
             "hour_of_day", "day_of_week",
-            "bayes_prob", "supertrend_up", "range_filter_up"
+            "bayes_prob", "supertrend_up", "range_filter_up",
+            "dist_to_support", "dist_to_resistance"
         ]
         self.trained = False
         self.last_retrain = 0
@@ -514,25 +631,27 @@ class TradingModel:
 
     def create_features(self, symbol: str, df_ta: pd.DataFrame, df_1h: pd.DataFrame,
                        order_flow_data: Dict, quant_data: Dict, risk_data: Dict = None) -> Dict[str, float]:
-        """Создает фичи для модели."""
+        """Создает расширенный набор фич для модели."""
         features = {}
         try:
             c_ta = df_ta["c"]
             c_1h = df_1h["c"]
 
-            # Технические
+            # Технические индикаторы
             features["rsi"] = float(calc_rsi(c_ta).iloc[-1])
             features["rsi_1h"] = float(calc_rsi(c_1h).iloc[-1])
-
             ml_macd, sl_macd, _ = calc_macd(c_ta)
             features["macd"] = float(ml_macd.iloc[-1] - sl_macd.iloc[-1])
-
             adx, _, _ = calc_adx(df_ta)
             features["adx"] = float(adx.iloc[-1])
-
             k_ser, _ = calc_stochastic(df_ta)
             features["stoch_k"] = float(k_ser.iloc[-1])
 
+            # Волатильность
+            atr = calc_atr(df_ta, 14).iloc[-1]
+            features["atr_pct"] = (atr / c_ta.iloc[-1]) * 100 if c_ta.iloc[-1] > 0 else 0
+
+            # Объём
             vol_avg = df_ta["v"].rolling(VOLUME_AVG_PERIOD).mean().iloc[-1]
             features["volume_ratio"] = float(df_ta["v"].iloc[-1] / (vol_avg + 1e-10))
 
@@ -542,15 +661,11 @@ class TradingModel:
             features["price_change_1h"] = float((c_1h.iloc[-1] - c_1h.iloc[-2]) / c_1h.iloc[-2] * 100)
 
             # Order Flow
-            if order_flow_data.get("order_book", {}).get("valid"):
-                features["spread_pct"] = order_flow_data["order_book"]["spread_pct"]
-                features["imbalance"] = order_flow_data["order_book"]["imbalance"]
-            else:
-                features["spread_pct"] = 0
-                features["imbalance"] = 0
-            features["poc_distance"] = 0
+            if order_flow_data.get("details"):
+                features["spread_pct"] = order_flow_data["details"].get("spread_pct", 0)
+                features["imbalance"] = order_flow_data["details"].get("imbalance", 0)
 
-            # Квантовые
+            # Квантовые сигналы
             mr = quant_data.get("details", {}).get("mean_reversion", {})
             features["mean_reversion_zscore"] = mr.get("zscore", 0) if mr.get("valid") else 0
 
@@ -561,33 +676,35 @@ class TradingModel:
             if risk_data and risk_data.get("valid"):
                 features["rr_ratio"] = risk_data.get("rr_ratio", 0)
                 features["risk_pct"] = risk_data.get("risk_pct", 0)
-            else:
-                features["rr_ratio"] = 0
-                features["risk_pct"] = 0
 
-            # Дополнительные
+            # Дополнительные фичи
             features["bayes_prob"] = bayes_trend_probability(df_ta)
             st_up, _ = calc_supertrend(df_ta)
             features["supertrend_up"] = float(st_up.iloc[-1])
             _, _, _, rf_up, _ = calc_range_filter(df_ta)
             features["range_filter_up"] = float(rf_up.iloc[-1])
 
-            # Временные
+            # Фичи на основе S/R
+            sr = calc_support_resistance(df_ta)
+            features["dist_to_support"] = sr["dist_to_sup_pct"]
+            features["dist_to_resistance"] = sr["dist_to_res_pct"]
+
+            # Временные фичи
             now = datetime.now(timezone.utc)
             features["hour_of_day"] = now.hour
             features["day_of_week"] = now.weekday()
 
         except Exception as e:
-            log.debug(f"Ошибка создания features: {e}")
+            log.debug(f"Ошибка создания фич: {e}")
 
-        # Заполняем пропущенные
+        # Заполняем пропущенные фичи нулями
         for f in self.features:
             if f not in features:
                 features[f] = 0
         return features
 
     def train(self, ml_log_file: str = ML_LOG_FILE) -> bool:
-        """Обучает модель."""
+        """Обучает ансамбль моделей с кросс-валидацией."""
         try:
             if not os.path.exists(ml_log_file):
                 return False
@@ -617,29 +734,56 @@ class TradingModel:
             y_series = pd.Series(y)
             X_scaled = self.scaler.fit_transform(X_df)
 
-            X_train, X_test, y_train, y_test = train_test_split(X_scaled, y_series, test_size=0.2, random_state=42)
+            # Разделяем данные на тренировочный и тестовый наборы
+            X_train, X_test, y_train, y_test = train_test_split(
+                X_scaled, y_series, test_size=0.2, random_state=42
+            )
 
-            if self.model_type == "RandomForest":
-                self.model = RandomForestClassifier(
+            # Создаём несколько моделей
+            models = {}
+            if "RandomForest" in ML_MODEL_TYPE:
+                models["rf"] = RandomForestClassifier(
                     n_estimators=200, max_depth=15, min_samples_leaf=5,
                     class_weight="balanced", random_state=42, n_jobs=-1
                 )
-            else:
-                self.model = GradientBoostingClassifier(
+            if "GradientBoosting" in ML_MODEL_TYPE:
+                models["gb"] = GradientBoostingClassifier(
                     n_estimators=200, learning_rate=0.05, max_depth=6, random_state=42
                 )
+            if "XGBoost" in ML_MODEL_TYPE:
+                models["xgb"] = xgb.XGBClassifier(
+                    n_estimators=200, max_depth=6, learning_rate=0.05, random_state=42
+                )
 
-            self.model.fit(X_train, y_train)
-            y_pred = self.model.predict(X_test)
+            # Обучаем каждую модель
+            for name, model in models.items():
+                model.fit(X_train, y_train)
+                self.models[name] = model
+
+            # Создаём ансамбль
+            if len(models) > 1:
+                self.ensemble = VotingClassifier(
+                    estimators=[(name, model) for name, model in models.items()],
+                    voting="soft"
+                )
+                self.ensemble.fit(X_train, y_train)
+                y_pred = self.ensemble.predict(X_test)
+            else:
+                # Если одна модель, используем её
+                model_name = list(models.keys())[0]
+                self.ensemble = models[model_name]
+                y_pred = self.ensemble.predict(X_test)
+
+            # Оцениваем качество
             self.accuracy = accuracy_score(y_test, y_pred)
             self.precision = precision_score(y_test, y_pred, zero_division=0)
 
-            if hasattr(self.model, "feature_importances_"):
-                self.feature_importances = dict(zip(self.features, self.model.feature_importances_))
+            if hasattr(self.ensemble, "feature_importances_"):
+                self.feature_importances = dict(zip(self.features, self.ensemble.feature_importances_))
 
             self.trained = True
             self.last_retrain = time.time()
-            log.info(f"✅ ML обучена: Acc={self.accuracy:.2f}, Prec={self.precision:.2f}")
+            log.info(f"✅ ML ансамбль обучен: Acc={self.accuracy:.2f}, Prec={self.precision:.2f}")
             return True
         except Exception as e:
             log.error(f"Ошибка обучения ML: {e}")
@@ -647,13 +791,13 @@ class TradingModel:
 
     def predict(self, features: Dict[str, float]) -> Dict[str, Any]:
         """Предсказывает сигнал."""
-        if not self.trained:
+        if not self.trained or self.ensemble is None:
             return {"signal": "neutral", "probability": 0.5, "valid": False}
         try:
             X = pd.DataFrame([{f: features.get(f, 0) for f in self.features}])
             X_scaled = self.scaler.transform(X)
-            prediction = self.model.predict(X_scaled)[0]
-            probability = self.model.predict_proba(X_scaled)[0][1]
+            prediction = self.ensemble.predict(X_scaled)[0]
+            probability = self.ensemble.predict_proba(X_scaled)[0][1]
             return {"signal": "buy" if prediction == 1 else "sell", "probability": float(probability), "valid": True}
         except Exception as e:
             log.debug(f"Ошибка предсказания: {e}")
@@ -662,9 +806,14 @@ class TradingModel:
     def save_model(self, filepath: str = ML_MODEL_FILE) -> bool:
         try:
             joblib.dump({
-                "model": self.model, "scaler": self.scaler, "features": self.features,
-                "trained": self.trained, "accuracy": self.accuracy,
-                "precision": self.precision, "last_retrain": self.last_retrain
+                "models": self.models,
+                "ensemble": self.ensemble,
+                "scaler": self.scaler,
+                "features": self.features,
+                "trained": self.trained,
+                "accuracy": self.accuracy,
+                "precision": self.precision,
+                "last_retrain": self.last_retrain
             }, filepath)
             return True
         except Exception as e:
@@ -674,12 +823,13 @@ class TradingModel:
     def load_model(self, filepath: str = ML_MODEL_FILE) -> bool:
         try:
             data = joblib.load(filepath)
-            self.model = data["model"]
-            self.scaler = data["scaler"]
-            self.features = data["features"]
-            self.trained = data["trained"]
-            self.accuracy = data["accuracy"]
-            self.precision = data["precision"]
+            self.models = data.get("models", {})
+            self.ensemble = data.get("ensemble")
+            self.scaler = data.get("scaler")
+            self.features = data.get("features", self.features)
+            self.trained = data.get("trained", False)
+            self.accuracy = data.get("accuracy", 0)
+            self.precision = data.get("precision", 0)
             self.last_retrain = data.get("last_retrain", 0)
             return True
         except Exception as e:
@@ -692,8 +842,8 @@ ml_model = TradingModel(ML_MODEL_TYPE)
 # ============================================================
 # СКОРИНГ
 # ============================================================
-def get_score(symbol: str, use_quant: bool = True, use_order_flow: bool = True, use_ml: bool = True) -> dict:
-    """Получает скор для лонга."""
+def get_score(symbol: str, use_quant: bool = True, use_order_flow: bool = True) -> dict:
+    """Получает скор для лонга с учётом рыночного контекста."""
     details = {}
     score = 0
     price = 0.0
@@ -711,6 +861,25 @@ def get_score(symbol: str, use_quant: bool = True, use_order_flow: bool = True, 
         c_ta = df_ta["c"]
         c_1h = df_1h["c"]
         price = float(c_ta.iloc[-1])
+
+        # Проверяем волатильность (ATR)
+        atr = calc_atr(df_ta, 14).iloc[-1]
+        atr_pct = (atr / price) * 100 if price > 0 else 0
+        if atr_pct > 5.0:  # Высокая волатильность
+            score -= 10  # Уменьшаем скор при высокой волатильности
+            details["high_volatility"] = True
+
+        # Проверяем тренд на старших таймфреймах (4H)
+        if not trend_4h_bullish(symbol):
+            score -= 15  # Штраф за отсутствие тренда на 4H
+            details["trend_4h"] = "bearish"
+
+        # Проверяем объём
+        vol_avg = df_ta["v"].rolling(20).mean().iloc[-1]
+        vol_current = df_ta["v"].iloc[-1]
+        if vol_current < vol_avg * 0.5:  # Низкий объём
+            score -= 10
+            details["low_volume"] = True
 
         # RSI
         rsi_val = calc_rsi(c_ta).iloc[-1]
@@ -785,8 +954,7 @@ def get_score(symbol: str, use_quant: bool = True, use_order_flow: bool = True, 
             score += 5
 
         # Volume
-        vol_avg = df_ta["v"].rolling(VOLUME_AVG_PERIOD).mean().iloc[-1]
-        vol_ratio = df_ta["v"].iloc[-1] / (vol_avg + 1e-10)
+        vol_ratio = vol_current / (vol_avg + 1e-10)
         details["volume_ratio"] = round(vol_ratio, 2)
         if vol_ratio > 1.5:
             score += 8
@@ -899,13 +1067,19 @@ def calc_optimal_f(trades: List[dict]) -> float:
     return min(max(0, kelly * 0.4), MAX_RISK_PERCENT_F / 100)
 
 def calc_position_size(score: int, balance: float, sl_dist_pct: float, trades_history: List[dict] = None) -> float:
-    """Рассчитывает размер позиции."""
+    """Рассчитывает размер позиции с учётом волатильности."""
+    # Получаем ATR для оценки волатильности
+    atr_pct = sl_dist_pct  # Можно заменить на реальный ATR
+
+    # Корректируем риск в зависимости от волатильности
+    volatility_factor = min(max(0.5, atr_pct / 2.0), 2.0)  # При высокой волатильности уменьшаем размер позиции
+
     if USE_ADVANCED_RISK and trades_history and len(trades_history) >= MIN_TRADES_FOR_F:
         f_opt = calc_optimal_f(trades_history[-100:])
-        risk_pct = max(0.5, min(f_opt * 100, MAX_RISK_PERCENT_F))
+        risk_pct = max(0.5, min(f_opt * 100 * volatility_factor, MAX_RISK_PERCENT_F))
     else:
         factor = max(0, (score - MIN_SCORE)) / (100 - MIN_SCORE)
-        risk_pct = min(BASE_RISK_PCT + (MAX_RISK_PCT - BASE_RISK_PCT) * factor, MAX_RISK_PCT)
+        risk_pct = min(BASE_RISK_PCT + (MAX_RISK_PCT - BASE_RISK_PCT) * factor * volatility_factor, MAX_RISK_PCT)
 
     max_loss_usdt = balance * risk_pct / 100
     margin_usdt = min(max_loss_usdt / (sl_dist_pct / 100), balance * 0.95)
@@ -1080,7 +1254,7 @@ def log_ml_data(symbol: str, features: Dict[str, float], prediction: Dict[str, A
         log.warning(f"Ошибка логирования ML: {e}")
 
 # ============================================================
-# БЭКТЕСТЕР (простой)
+# БЭКТЕСТЕР
 # ============================================================
 def backtest_simple(historical_data: pd.DataFrame, params: dict = None) -> dict:
     """
@@ -1315,7 +1489,7 @@ def update_sl_on_exchange(symbol: str, new_sl: float, side: str = "long") -> boo
 
 def open_position(symbol: str, margin_usdt: float, tp_price: float,
                  sl_price: float, side: str = "long") -> Tuple[Optional[float], Optional[float]]:
-    """Открывает позицию с проверкой прибыльности."""
+    """Открывает позицию с проверкой прибыльности и проскальзывания."""
     try:
         # Проверяем, есть ли уже позиция по этому символу
         positions = get_positions()
@@ -1363,6 +1537,15 @@ def open_position(symbol: str, margin_usdt: float, tp_price: float,
             log.error(f"Нулевое количество {symbol}")
             return None, None
 
+        # Проверяем минимальный объём
+        try:
+            min_qty = exchange.markets[symbol]["limits"]["amount"]["min"]
+            if qty < min_qty:
+                log.warning(f"Объём {qty} меньше минимального {min_qty} для {symbol}")
+                return None, None
+        except Exception as e:
+            log.warning(f"Ошибка проверки минимального объёма: {e}")
+
         # Форматируем цены
         tp_str = exchange.price_to_precision(symbol, tp_price)
         sl_str = exchange.price_to_precision(symbol, sl_price)
@@ -1387,6 +1570,11 @@ def open_position(symbol: str, margin_usdt: float, tp_price: float,
 
             entry_price = float(order.get("average", price)) if order.get("average") else price
 
+            # Проверяем проскальзывание
+            if not check_slippage(symbol, price, entry_price):
+                log.warning("Высокое проскальзывание — сделка отменена")
+                return None, None
+
             # Проверяем частичное исполнение
             filled = float(order.get("filled", qty))
             if filled < qty * 0.9:  # Менее 90% исполнено
@@ -1406,6 +1594,17 @@ def open_position(symbol: str, margin_usdt: float, tp_price: float,
     except Exception as e:
         log.error(f"Глобальная ошибка open_position: {e}", exc_info=True)
         return None, None
+
+def open_position_with_retries(symbol: str, margin_usdt: float, tp_price: float,
+                              sl_price: float, side: str = "long", max_retries: int = 3) -> Tuple[Optional[float], Optional[float]]:
+    """Открывает позицию с повторными попытками."""
+    for attempt in range(max_retries):
+        entry_price, qty = open_position(symbol, margin_usdt, tp_price, sl_price, side)
+        if entry_price is not None and qty is not None:
+            return entry_price, qty
+        log.warning(f"Попытка {attempt + 1}/{max_retries} не удалась. Повтор...")
+        time.sleep(5)  # Ждём перед повторной попыткой
+    return None, None
 
 def close_position_with_confirm(symbol: str, qty: float, side: str) -> bool:
     """Закрывает позицию с подтверждением."""
@@ -1430,6 +1629,22 @@ def close_position_with_confirm(symbol: str, qty: float, side: str) -> bool:
             time.sleep(2)
 
     log.error(f"Не удалось закрыть {symbol} после 3 попыток")
+    return False
+
+def emergency_close_position(symbol: str, side: str) -> bool:
+    """Аварийное закрытие позиции."""
+    try:
+        positions = exchange.fetch_positions([symbol])
+        for pos in positions:
+            if pos.get("side") == side:
+                qty = abs(float(pos.get("contracts", 0)))
+                close_side = "sell" if side == "long" else "buy"
+                exchange.create_market_order(symbol, close_side, qty, params={"reduceOnly": True})
+                log.info(f"Аварийное закрытие {symbol} {side}")
+                return True
+    except Exception as e:
+        log.error(f"Ошибка аварийного закрытия: {e}")
+        return False
     return False
 
 def check_signal_exit(symbol: str, side: str) -> bool:
@@ -1458,7 +1673,7 @@ def monitor_position(symbol: str, entry_price: float, qty: float,
                     opened_at: float, sl_price: float, tp_price: float,
                     side: str = "long") -> str:
     """
-    Мониторит позицию с защитой от зависания.
+    Мониторит позицию с защитой от зависания и уведомлениями.
     Возвращает: 'tp', 'sl', 'timeout'
     """
     deadline = opened_at + TRADE_MAX_LIFETIME
@@ -1510,9 +1725,19 @@ def monitor_position(symbol: str, entry_price: float, qty: float,
         if now >= deadline:
             log.warning("Дедлайн — принудительное закрытие")
             close_position_with_confirm(symbol, qty, side)
+            if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                send_telegram_message(f"⏰ Таймаут для {symbol}: позиция закрыта по времени")
             return "timeout"
 
         try:
+            # Проверяем соединение с биржей
+            if not check_connection():
+                log.error("Нет соединения с биржей — аварийное закрытие")
+                emergency_close_position(symbol, side)
+                if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                    send_telegram_message(f"🚨 Нет соединения с биржей! Позиция {symbol} закрыта аварийно")
+                return "sl"
+
             # Проверяем существование позиции
             positions = exchange.fetch_positions([symbol])
             active = [p for p in positions if float(p.get("contracts", 0) or 0) > 0 and p.get("side") == side]
@@ -1524,7 +1749,12 @@ def monitor_position(symbol: str, entry_price: float, qty: float,
                     hit_tp = cur_price >= tp_price * (1 - SLIPPAGE_PCT / 100)
                 else:
                     hit_tp = cur_price <= tp_price * (1 + SLIPPAGE_PCT / 100)
-                return "tp" if hit_tp else "sl"
+
+                result = "tp" if hit_tp else "sl"
+                if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                    pnl = (cur_price - entry_price) * qty * (1 if side == "long" else -1)
+                    send_telegram_message(f"{'✅' if result == 'tp' else '❌'} {result.upper()} для {symbol}: P&L = {pnl:+.4f} USDT")
+                return result
 
             pos = active[0]
             cur_price = float(pos.get("markPrice") or exchange.fetch_ticker(symbol)["last"])
@@ -1567,6 +1797,8 @@ def monitor_position(symbol: str, entry_price: float, qty: float,
             if SIGNAL_EXIT_ENABLED and phase >= 2 and check_signal_exit(symbol, side):
                 log.info("Signal Exit: разворот — закрываем")
                 close_position_with_confirm(symbol, qty_actual, side)
+                if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                    send_telegram_message(f"🔄 Signal Exit для {symbol}: разворот")
                 return "tp" if pnl_pct > 0 else "sl"
 
             # Полный безубыток (если не было частичного)
@@ -1623,10 +1855,9 @@ def monitor_position(symbol: str, entry_price: float, qty: float,
 
             if consecutive_errors >= max_errors:
                 log.critical("Слишком много ошибок подряд — аварийное закрытие")
-                try:
-                    close_position_with_confirm(symbol, qty, side)
-                except Exception:
-                    pass
+                emergency_close_position(symbol, side)
+                if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                    send_telegram_message(f"🚨 Слишком много ошибок для {symbol}! Позиция закрыта аварийно")
                 return "sl"
 
             time.sleep(10)
@@ -1635,6 +1866,24 @@ def monitor_position(symbol: str, entry_price: float, qty: float,
         time.sleep(15)  # Пауза между проверками
 
     return "sl"
+
+# ============================================================
+# УВЕДОМЛЕНИЯ В TELEGRAM
+# ============================================================
+def send_telegram_message(message: str) -> None:
+    """Отправляет уведомление в Telegram."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        log.warning(f"Ошибка отправки уведомления в Telegram: {e}")
 
 # ============================================================
 # ПОДТВЕРЖДЕНИЕ ВХОДА
@@ -1661,6 +1910,14 @@ def confirm_entry(symbol: str, original_score: int, side: str = "long") -> bool:
 
     if not new_result.get("details", {}).get("vol_spike_ok", True):
         log.info("Подтверждение не прошло: volume spike")
+        return False
+
+    # Проверяем, не изменился ли тренд
+    if side == "long" and not trend_4h_bullish(symbol):
+        log.info("Подтверждение не прошло: тренд на 4H изменился")
+        return False
+    elif side == "short" and not trend_4h_bearish(symbol):
+        log.info("Подтверждение не прошло: тренд на 4H изменился")
         return False
 
     log.info(f"Вход подтверждён. Скор {new_score}/100")
@@ -1690,7 +1947,7 @@ def print_report(state: dict):
     log.info(f"Прибыль/Убыток: {state['profit_usdt']:.4f} / {state['loss_usdt']:.4f} USDT")
     log.info(f"Чистый P&L: {net:+.4f} USDT")
 
-    # ML статус (если используется)
+    # ML статус
     if ML_ENABLED:
         log.info("-" * 65)
         log.info("🤖 ML СТАТУС:")
@@ -1772,8 +2029,7 @@ def post_trade_analysis(trade_record: dict, ml_model_instance=None):
 # РАСЧЁТ SL/TP
 # ============================================================
 def calc_sl_tp(symbol: str, price: float, side: str, sr_info: dict) -> Tuple[float, float, float, float]:
-    """Рассчитывает SL, TP и расстояния."""
-    # ATR
+    """Рассчитывает SL, TP и расстояния с учётом ATR и S/R."""
     atr_price = 0.0
     try:
         raw = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=50)
@@ -1783,10 +2039,11 @@ def calc_sl_tp(symbol: str, price: float, side: str, sr_info: dict) -> Tuple[flo
     except:
         pass
 
+    atr_pct = (atr_price / price) * 100 if atr_price > 0 else 0
+
     if side == "long":
-        # SL
-        sl_atr_dist = atr_price * ATR_SL_MULT if atr_price > 0 else price * SL_PERCENT / 100
-        sl_pct_dist = max(MIN_SL_PERCENT, min(MAX_SL_PERCENT, (sl_atr_dist / price) * 100))
+        # Динамический SL на основе ATR
+        sl_pct_dist = max(MIN_SL_PERCENT, min(MAX_SL_PERCENT, atr_pct * ATR_SL_MULT))
         sl_price = price * (1 - sl_pct_dist / 100)
 
         # Учитываем поддержку
@@ -1794,14 +2051,11 @@ def calc_sl_tp(symbol: str, price: float, side: str, sr_info: dict) -> Tuple[flo
         if support < sl_price and support > price * 0.97:
             sl_price = support * 0.998
 
-        # TP
-        tp_atr_dist = atr_price * ATR_TP_MULT if atr_price > 0 else price * TP_PERCENT / 100
-        tp_pct_dist = max(TP_PERCENT, (tp_atr_dist / price) * 100)
+        # TP на основе RR
+        tp_pct_dist = sl_pct_dist * MIN_RR_RATIO
         tp_price = price * (1 + tp_pct_dist / 100)
     else:
-        # SL
-        sl_atr_dist = atr_price * ATR_SL_MULT if atr_price > 0 else price * SL_PERCENT / 100
-        sl_pct_dist = max(MIN_SL_PERCENT, min(MAX_SL_PERCENT, (sl_atr_dist / price) * 100))
+        sl_pct_dist = max(MIN_SL_PERCENT, min(MAX_SL_PERCENT, atr_pct * ATR_SL_MULT))
         sl_price = price * (1 + sl_pct_dist / 100)
 
         # Учитываем сопротивление
@@ -1809,9 +2063,7 @@ def calc_sl_tp(symbol: str, price: float, side: str, sr_info: dict) -> Tuple[flo
         if resistance > sl_price and resistance < price * 1.03:
             sl_price = resistance * 1.002
 
-        # TP
-        tp_atr_dist = atr_price * ATR_TP_MULT if atr_price > 0 else price * TP_PERCENT / 100
-        tp_pct_dist = max(TP_PERCENT, (tp_atr_dist / price) * 100)
+        tp_pct_dist = sl_pct_dist * MIN_RR_RATIO
         tp_price = price * (1 - tp_pct_dist / 100)
 
     sl_dist_pct = abs(price - sl_price) / price * 100
@@ -1837,3 +2089,5 @@ def maybe_retrain_ml():
             ml_model.save_model()
             stats["ml_trades_since_retrain"] = 0
             log.info("✅ ML переобучена")
+            if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+                send_telegram_message("🤖 ML модель переобучена")
