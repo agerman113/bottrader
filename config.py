@@ -31,10 +31,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # ТОРГОВЫЕ ПАРЫ
 # ============================================================
 SYMBOLS = [
-    "BTC/USDT:USDT", "ETH/USDT:USDT", "BNB/USDT:USDT", "XRP/USDT:USDT",
-    "SOL/USDT:USDT", "ADA/USDT:USDT", "TRX/USDT:USDT", "TON/USDT:USDT",
-    "AVAX/USDT:USDT", "DOT/USDT:USDT", "LTC/USDT:USDT", "BCH/USDT:USDT",
-    "ATOM/USDT:USDT", "XLM/USDT:USDT", "NEAR/USDT:USDT", "DOGE/USDT:USDT",
+    "PEPE/USDT", "WIF/USDT", "BOME/USDT", "FET/USDT",
+    "BONK/USDT", "FLOKI/USDT", "DOGE/USDT", "SHIB/USDT",
+    "ONG/USDT", "1000SATS/USDT", "BABYDOGE/USDT", "MONGCOIN/USDT",
 ]
 
 # ============================================================
