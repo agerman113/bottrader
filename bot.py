@@ -356,7 +356,7 @@ def print_status():
 # ГЛАВНЫЙ ЦИКЛ (Оптимизирован для частых сделок)
 # ============================================================
 def main():
-    global stats, ml_model, current_status, last_action_time
+    global stats, ml_model
 
     log.info("=" * 65)
     log.info(f"🤖 БОТ ДЛЯ МЕМ-КОИНОВ {BOT_VERSION}")
@@ -369,9 +369,8 @@ def main():
             send_telegram_message("🚨 Ошибки предстартовой проверки! Бот остановлен.")
         return
 
-    # Инициализация ML (отключена для мем-коинов)
-    if ML_ENABLED:
-        init_ml()
+    # Инициализация ML (УДАЛИТЬ ЭТУ СТРОКУ, так как ML отключён для мем-коинов)
+    # init_ml()  <-- Удалите или закомментируйте эту строку
 
     # Загрузка состояния
     stats = load_state()
