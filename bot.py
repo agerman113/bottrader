@@ -215,7 +215,7 @@ def block_symbol(symbol: str, minutes: int):
 def check_connection() -> bool:
     """Проверяет соединение с биржей."""
     try:
-        exchange.fetch_status()
+        exchange.fetch_ticker("BTC/USDT")  # ← Исправлено: используем fetch_ticker
         return True
     except Exception as e:
         log.error(f"Нет соединения с биржей: {e}")
