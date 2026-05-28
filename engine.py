@@ -1,4 +1,4 @@
-# engine.py — Индикаторы, скоринг, анализ, ML, риск-менеджмент
+# engine.py — Индикаторы, скоринг, анализ, риск-менеджмент для мем-коинов
 import os
 import sys
 import time
@@ -42,7 +42,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d - %(message)s",
     datefmt="%d.%m.%Y %H:%M:%S",
     handlers=[
-        logging.FileHandler("bot_v12.log", encoding="utf-8"),
+        logging.FileHandler("engine_meme.log", encoding="utf-8"),
         logging.StreamHandler()
     ]
 )
@@ -275,27 +275,6 @@ def is_trading_time_allowed() -> bool:
         log.info(f"Session Filter: час {hour} UTC заблокирован")
     return not blocked
 
-def get_bybit_ai(symbol: str) -> dict:
-    result = {"signal": "neutral", "long_ratio": 0.5, "short_ratio": 0.5, "available": False}
-    try:
-        coin = symbol.split("/")[0]
-        url = f"https://api.bybit.com/v5/market/account-ratio?category=linear&symbol={coin}USDT&period=1h&limit=1"
-        resp = requests.get(url, timeout=5)
-        data = resp.json()
-        if data.get("retCode") == 0:
-            items = data.get("result", {}).get("list", [])
-            if items:
-                buy_r = float(items[0].get("buyRatio", 0.5))
-                sell_r = float(items[0].get("sellRatio", 0.5))
-                result.update({"long_ratio": buy_r, "short_ratio": sell_r, "available": True})
-                if buy_r > 0.6:
-                    result["signal"] = "bullish"
-                elif buy_r < 0.4:
-                    result["signal"] = "bearish"
-    except Exception as e:
-        log.debug(f"Bybit ratio недоступен: {e}")
-    return result
-
 def trend_4h_bullish(symbol: str) -> bool:
     try:
         raw = exchange.fetch_ohlcv(symbol, TIMEFRAME_4H, limit=60)
@@ -369,14 +348,14 @@ def check_correlation(symbol: str, open_positions: List[dict]) -> bool:
     return True
 
 def check_liquidity(symbol: str) -> bool:
-    """Проверяет ликвидность пары."""
+    """Проверяет ликвидность для мем-коинов (менее строгая проверка)."""
     try:
-        order_book = exchange.fetch_order_book(symbol, 20)
+        order_book = exchange.fetch_order_book(symbol, 10)
         total_bid_vol = sum([b[1] for b in order_book["bids"]])
         total_ask_vol = sum([a[1] for a in order_book["asks"]])
-        min_volume = 1000  # Минимальный объём в стакане
+        min_volume = 100  # Уменьшен порог для мем-коинов
         if total_bid_vol < min_volume or total_ask_vol < min_volume:
-            log.warning(f"Низкая ликвидность для {symbol}")
+            log.warning(f"Низкая ликвидность для {symbol} (bid: {total_bid_vol}, ask: {total_ask_vol})")
             return False
     except Exception as e:
         log.warning(f"Ошибка проверки ликвидности: {e}")
@@ -523,48 +502,11 @@ def check_slippage(symbol: str, entry_price: float, real_entry: float) -> bool:
     return True
 
 # ============================================================
-# КВАНТОВЫЙ АНАЛИЗ
+# КВАНТОВЫЙ АНАЛИЗ (Отключён для мем-коинов)
 # ============================================================
 def get_quant_signals(symbol: str) -> Dict[str, Any]:
-    """Получает квантовые сигналы."""
-    if not QUANT_ENABLED:
-        return {"quant_score": 0, "details": {}}
-
-    signals = {"mean_reversion": {}, "momentum": {}, "cointegration": {}}
-    quant_score = 0
-
-    # Mean Reversion
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=50)
-        if len(ohlcv) >= 40:
-            df = pd.DataFrame(ohlcv, columns=["ts", "o", "h", "l", "c", "v"])
-            close = df["c"]
-            sma = close.rolling(20).mean()
-            std = close.rolling(20).std()
-            zscore = float((close.iloc[-1] - sma.iloc[-1]) / std.iloc[-1]) if std.iloc[-1] > 0 else 0
-
-            if abs(zscore) > MEAN_REVERSION_THRESHOLD:
-                quant_score += 20
-            elif abs(zscore) > MEAN_REVERSION_THRESHOLD * 0.7:
-                quant_score += 10
-            signals["mean_reversion"] = {"zscore": zscore, "valid": True}
-    except Exception as e:
-        log.debug(f"Mean Reversion ошибка: {e}")
-
-    # Momentum
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=40)
-        if len(ohlcv) >= 30:
-            df = pd.DataFrame(ohlcv, columns=["ts", "o", "h", "l", "c", "v"])
-            close = df["c"]
-            momentum = (close.iloc[-1] - close.iloc[-MOMENTUM_WINDOW]) / close.iloc[-MOMENTUM_WINDOW] * 100
-            if abs(momentum) > 3:
-                quant_score += 15
-            signals["momentum"] = {"momentum": momentum, "valid": True}
-    except Exception as e:
-        log.debug(f"Momentum ошибка: {e}")
-
-    return {"quant_score": min(100, quant_score), "details": signals}
+    """Получает квантовые сигналы (заглушка для мем-коинов)."""
+    return {"quant_score": 0, "details": {}}
 
 # ============================================================
 # ORDER FLOW
@@ -603,256 +545,48 @@ def get_order_flow_signals(symbol: str) -> Dict[str, Any]:
     return {"order_flow_score": max(0, min(100, order_flow_score)), "details": {"spread_pct": spread_pct, "imbalance": imbalance}}
 
 # ============================================================
-# ML МОДЕЛЬ
+# ML МОДЕЛЬ (Отключена для мем-коинов)
 # ============================================================
 class TradingModel:
-    """ML модель для предсказания."""
-
+    """ML модель для предсказания (заглушка для мем-коинов)."""
     def __init__(self, model_type: str = "RandomForest"):
         self.model_type = model_type
-        self.models = {}  # Для ансамбля моделей
-        self.ensemble = None
-        self.scaler = StandardScaler()
-        self.features = [
-            "rsi", "rsi_1h", "macd", "adx", "stoch_k", "volume_ratio",
-            "price_change_5m", "price_change_15m", "price_change_1h",
-            "atr_pct", "spread_pct", "imbalance",
-            "mean_reversion_zscore", "momentum",
-            "rr_ratio", "risk_pct",
-            "hour_of_day", "day_of_week",
-            "bayes_prob", "supertrend_up", "range_filter_up",
-            "dist_to_support", "dist_to_resistance"
-        ]
         self.trained = False
-        self.last_retrain = 0
         self.accuracy = 0
         self.precision = 0
-        self.feature_importances = {}
 
-    def create_features(self, symbol: str, df_ta: pd.DataFrame, df_1h: pd.DataFrame,
-                       order_flow_data: Dict, quant_data: Dict, risk_data: Dict = None) -> Dict[str, float]:
-        """Создает расширенный набор фич для модели."""
-        features = {}
-        try:
-            c_ta = df_ta["c"]
-            c_1h = df_1h["c"]
+    def create_features(self, *args, **kwargs) -> Dict[str, float]:
+        return {}
 
-            # Технические индикаторы
-            features["rsi"] = float(calc_rsi(c_ta).iloc[-1])
-            features["rsi_1h"] = float(calc_rsi(c_1h).iloc[-1])
-            ml_macd, sl_macd, _ = calc_macd(c_ta)
-            features["macd"] = float(ml_macd.iloc[-1] - sl_macd.iloc[-1])
-            adx, _, _ = calc_adx(df_ta)
-            features["adx"] = float(adx.iloc[-1])
-            k_ser, _ = calc_stochastic(df_ta)
-            features["stoch_k"] = float(k_ser.iloc[-1])
+    def train(self, *args, **kwargs) -> bool:
+        return False
 
-            # Волатильность
-            atr = calc_atr(df_ta, 14).iloc[-1]
-            features["atr_pct"] = (atr / c_ta.iloc[-1]) * 100 if c_ta.iloc[-1] > 0 else 0
+    def predict(self, *args, **kwargs) -> Dict[str, Any]:
+        return {"signal": "neutral", "probability": 0.5, "valid": False}
 
-            # Объём
-            vol_avg = df_ta["v"].rolling(VOLUME_AVG_PERIOD).mean().iloc[-1]
-            features["volume_ratio"] = float(df_ta["v"].iloc[-1] / (vol_avg + 1e-10))
+    def save_model(self, *args, **kwargs) -> bool:
+        return False
 
-            # Изменения цены
-            features["price_change_5m"] = float((c_ta.iloc[-1] - c_ta.iloc[-2]) / c_ta.iloc[-2] * 100)
-            features["price_change_15m"] = float((c_ta.iloc[-1] - c_ta.iloc[-3]) / c_ta.iloc[-3] * 100)
-            features["price_change_1h"] = float((c_1h.iloc[-1] - c_1h.iloc[-2]) / c_1h.iloc[-2] * 100)
+    def load_model(self, *args, **kwargs) -> bool:
+        return False
 
-            # Order Flow
-            if order_flow_data.get("details"):
-                features["spread_pct"] = order_flow_data["details"].get("spread_pct", 0)
-                features["imbalance"] = order_flow_data["details"].get("imbalance", 0)
-
-            # Квантовые сигналы
-            mr = quant_data.get("details", {}).get("mean_reversion", {})
-            features["mean_reversion_zscore"] = mr.get("zscore", 0) if mr.get("valid") else 0
-
-            mom = quant_data.get("details", {}).get("momentum", {})
-            features["momentum"] = mom.get("momentum", 0) if mom.get("valid") else 0
-
-            # Риск
-            if risk_data and risk_data.get("valid"):
-                features["rr_ratio"] = risk_data.get("rr_ratio", 0)
-                features["risk_pct"] = risk_data.get("risk_pct", 0)
-
-            # Дополнительные фичи
-            features["bayes_prob"] = bayes_trend_probability(df_ta)
-            st_up, _ = calc_supertrend(df_ta)
-            features["supertrend_up"] = float(st_up.iloc[-1])
-            _, _, _, rf_up, _ = calc_range_filter(df_ta)
-            features["range_filter_up"] = float(rf_up.iloc[-1])
-
-            # Фичи на основе S/R
-            sr = calc_support_resistance(df_ta)
-            features["dist_to_support"] = sr["dist_to_sup_pct"]
-            features["dist_to_resistance"] = sr["dist_to_res_pct"]
-
-            # Временные фичи
-            now = datetime.now(timezone.utc)
-            features["hour_of_day"] = now.hour
-            features["day_of_week"] = now.weekday()
-
-        except Exception as e:
-            log.debug(f"Ошибка создания фич: {e}")
-
-        # Заполняем пропущенные фичи нулями
-        for f in self.features:
-            if f not in features:
-                features[f] = 0
-        return features
-
-    def train(self, ml_log_file: str = ML_LOG_FILE) -> bool:
-        """Обучает ансамбль моделей с кросс-валидацией."""
-        try:
-            if not os.path.exists(ml_log_file):
-                return False
-
-            data = []
-            with open(ml_log_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        entry = json.loads(line)
-                        if entry.get("trade_result") and entry.get("pnl_usdt") is not None:
-                            data.append(entry)
-                    except:
-                        continue
-
-            if len(data) < ML_MIN_SAMPLES:
-                return False
-
-            X = []
-            y = []
-            for entry in data:
-                features = entry.get("features", {})
-                full_features = {f: features.get(f, 0) for f in self.features}
-                X.append([full_features[f] for f in self.features])
-                y.append(1 if entry["trade_result"] == "tp" else 0)
-
-            X_df = pd.DataFrame(X, columns=self.features)
-            y_series = pd.Series(y)
-            X_scaled = self.scaler.fit_transform(X_df)
-
-            # Разделяем данные на тренировочный и тестовый наборы
-            X_train, X_test, y_train, y_test = train_test_split(
-                X_scaled, y_series, test_size=0.2, random_state=42
-            )
-
-            # Создаём несколько моделей
-            models = {}
-            if "RandomForest" in ML_MODEL_TYPE:
-                models["rf"] = RandomForestClassifier(
-                    n_estimators=200, max_depth=15, min_samples_leaf=5,
-                    class_weight="balanced", random_state=42, n_jobs=-1
-                )
-            if "GradientBoosting" in ML_MODEL_TYPE:
-                models["gb"] = GradientBoostingClassifier(
-                    n_estimators=200, learning_rate=0.05, max_depth=6, random_state=42
-                )
-            if "XGBoost" in ML_MODEL_TYPE:
-                models["xgb"] = xgb.XGBClassifier(
-                    n_estimators=200, max_depth=6, learning_rate=0.05, random_state=42
-                )
-
-            # Обучаем каждую модель
-            for name, model in models.items():
-                model.fit(X_train, y_train)
-                self.models[name] = model
-
-            # Создаём ансамбль
-            if len(models) > 1:
-                self.ensemble = VotingClassifier(
-                    estimators=[(name, model) for name, model in models.items()],
-                    voting="soft"
-                )
-                self.ensemble.fit(X_train, y_train)
-                y_pred = self.ensemble.predict(X_test)
-            else:
-                # Если одна модель, используем её
-                model_name = list(models.keys())[0]
-                self.ensemble = models[model_name]
-                y_pred = self.ensemble.predict(X_test)
-
-            # Оцениваем качество
-            self.accuracy = accuracy_score(y_test, y_pred)
-            self.precision = precision_score(y_test, y_pred, zero_division=0)
-
-            if hasattr(self.ensemble, "feature_importances_"):
-                self.feature_importances = dict(zip(self.features, self.ensemble.feature_importances_))
-
-            self.trained = True
-            self.last_retrain = time.time()
-            log.info(f"✅ ML ансамбль обучен: Acc={self.accuracy:.2f}, Prec={self.precision:.2f}")
-            return True
-        except Exception as e:
-            log.error(f"Ошибка обучения ML: {e}")
-            return False
-
-    def predict(self, features: Dict[str, float]) -> Dict[str, Any]:
-        """Предсказывает сигнал."""
-        if not self.trained or self.ensemble is None:
-            return {"signal": "neutral", "probability": 0.5, "valid": False}
-        try:
-            X = pd.DataFrame([{f: features.get(f, 0) for f in self.features}])
-            X_scaled = self.scaler.transform(X)
-            prediction = self.ensemble.predict(X_scaled)[0]
-            probability = self.ensemble.predict_proba(X_scaled)[0][1]
-            return {"signal": "buy" if prediction == 1 else "sell", "probability": float(probability), "valid": True}
-        except Exception as e:
-            log.debug(f"Ошибка предсказания: {e}")
-            return {"signal": "neutral", "probability": 0.5, "valid": False}
-
-    def save_model(self, filepath: str = ML_MODEL_FILE) -> bool:
-        try:
-            joblib.dump({
-                "models": self.models,
-                "ensemble": self.ensemble,
-                "scaler": self.scaler,
-                "features": self.features,
-                "trained": self.trained,
-                "accuracy": self.accuracy,
-                "precision": self.precision,
-                "last_retrain": self.last_retrain
-            }, filepath)
-            return True
-        except Exception as e:
-            log.error(f"Ошибка сохранения: {e}")
-            return False
-
-    def load_model(self, filepath: str = ML_MODEL_FILE) -> bool:
-        try:
-            data = joblib.load(filepath)
-            self.models = data.get("models", {})
-            self.ensemble = data.get("ensemble")
-            self.scaler = data.get("scaler")
-            self.features = data.get("features", self.features)
-            self.trained = data.get("trained", False)
-            self.accuracy = data.get("accuracy", 0)
-            self.precision = data.get("precision", 0)
-            self.last_retrain = data.get("last_retrain", 0)
-            return True
-        except Exception as e:
-            log.error(f"Ошибка загрузки: {e}")
-            return False
-
-# Инициализация ML модели
-ml_model = TradingModel(ML_MODEL_TYPE)
+ml_model = TradingModel()
 
 # ============================================================
-# СКОРИНГ
+# СКОРИНГ (Оптимизирован для мем-коинов)
 # ============================================================
-def get_score(symbol: str, use_quant: bool = True, use_order_flow: bool = True) -> dict:
-    """Получает скор для лонга с учётом рыночного контекста."""
+def get_meme_coin_score(symbol: str) -> dict:
+    """Анализирует мем-коин с учётом его специфики (волатильность, объём, тренд)."""
     details = {}
     score = 0
     price = 0.0
     sr = {}
 
     try:
-        raw_ta = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=300)
-        raw_1h = exchange.fetch_ohlcv(symbol, TIMEFRAME_TREND, limit=300)
-        if len(raw_ta) < 100 or len(raw_1h) < 100:
+        # Получаем данные для анализа
+        raw_ta = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=200)
+        raw_1h = exchange.fetch_ohlcv(symbol, TIMEFRAME_TREND, limit=200)
+        if len(raw_ta) < 50 or len(raw_1h) < 50:
             return {"score": 0, "details": {}, "price": 0, "sr": {}}
 
         cols = ["ts", "o", "h", "l", "c", "v"]
@@ -865,104 +599,69 @@ def get_score(symbol: str, use_quant: bool = True, use_order_flow: bool = True) 
         # Проверяем волатильность (ATR)
         atr = calc_atr(df_ta, 14).iloc[-1]
         atr_pct = (atr / price) * 100 if price > 0 else 0
-        if atr_pct > 5.0:  # Высокая волатильность
-            score -= 10  # Уменьшаем скор при высокой волатильности
-            details["high_volatility"] = True
+        details["atr_pct"] = round(atr_pct, 2)
 
-        # Проверяем тренд на старших таймфреймах (4H)
-        if not trend_4h_bullish(symbol):
-            score -= 15  # Штраф за отсутствие тренда на 4H
+        # Для мем-коинов высокая волатильность — это хорошо
+        if atr_pct > 10.0:
+            score += 20
+        elif atr_pct > 5.0:
+            score += 10
+
+        # Проверяем тренд на 1H и 4H
+        if trend_4h_bullish(symbol):
+            score += 15
+            details["trend_4h"] = "bullish"
+        else:
+            score -= 5
             details["trend_4h"] = "bearish"
 
-        # Проверяем объём
-        vol_avg = df_ta["v"].rolling(20).mean().iloc[-1]
-        vol_current = df_ta["v"].iloc[-1]
-        if vol_current < vol_avg * 0.5:  # Низкий объём
-            score -= 10
-            details["low_volume"] = True
-
-        # RSI
+        # RSI (для мем-коинов можно допускать перекупленность)
         rsi_val = calc_rsi(c_ta).iloc[-1]
         details["rsi"] = round(rsi_val, 1)
-        if 25 <= rsi_val <= 40:
-            score += 20
-        elif 40 < rsi_val <= 50:
-            score += 12
-        elif rsi_val < 25:
+        if rsi_val < 30:
+            score += 15
+        elif rsi_val < 40:
             score += 10
-        elif 50 < rsi_val <= 60:
-            score += 5
+        elif rsi_val > 70:
+            score += 5  # Для мем-коинов перекупленность не всегда плохо
 
-        rsi_1h = calc_rsi(c_1h).iloc[-1]
-        details["rsi_1h"] = round(rsi_1h, 1)
-        if rsi_1h < 50:
-            score += 10
-        elif rsi_1h < 60:
-            score += 5
-
-        # MACD
-        ml_macd, sl_macd, _ = calc_macd(c_ta)
+        # MACD (быстрый для мем-коинов)
+        ml_macd, sl_macd, _ = calc_macd(c_ta, fast=8, slow=21, signal=9)
         macd_bull = ml_macd.iloc[-1] > sl_macd.iloc[-1]
         macd_cross = macd_bull and ml_macd.iloc[-2] <= sl_macd.iloc[-2]
         details["macd"] = "bullish" if macd_bull else "bearish"
         if macd_cross:
-            score += 18
+            score += 20
         elif macd_bull:
-            score += 8
+            score += 10
 
-        # Range Filter
-        _, _, _, rf_up, rf_down = calc_range_filter(df_ta)
-        details["range_filter"] = "up" if rf_up.iloc[-1] else ("down" if rf_down.iloc[-1] else "flat")
-        if rf_up.iloc[-1]:
+        # Объём (для мем-коинов важен рост объёма)
+        vol_avg = df_ta["v"].rolling(10).mean().iloc[-1]
+        vol_current = df_ta["v"].iloc[-1]
+        vol_ratio = vol_current / (vol_avg + 1e-10)
+        details["volume_ratio"] = round(vol_ratio, 2)
+        if vol_ratio > 2.0:
             score += 15
+        elif vol_ratio > 1.5:
+            score += 10
 
-        # Supertrend
-        st_up, _ = calc_supertrend(df_ta)
+        # Supertrend (быстрый для мем-коинов)
+        st_up, _ = calc_supertrend(df_ta, period=10, mult=2.0)
         details["supertrend"] = "up" if st_up.iloc[-1] else "down"
         if st_up.iloc[-1]:
             score += 12
 
-        # Hull
-        hu_up, _ = calc_hull(c_ta)
-        details["hull"] = "up" if hu_up.iloc[-1] else "down"
-        if hu_up.iloc[-1]:
-            score += 8
-
-        # EMA тренд 1h
-        ema50_1h = _ema(c_1h, 50).iloc[-1]
-        ema200_1h = _ema(c_1h, 200).iloc[-1]
-        details["trend_1h"] = "bullish" if ema50_1h > ema200_1h else "bearish"
-        if ema50_1h > ema200_1h:
+        # EMA кроссовер (быстрый для мем-коинов)
+        ema9 = _ema(c_ta, 9).iloc[-1]
+        ema21 = _ema(c_ta, 21).iloc[-1]
+        if ema9 > ema21:
             score += 10
+            details["ema_cross"] = "bullish"
+        else:
+            details["ema_cross"] = "bearish"
 
-        # ADX
-        adx, pdi, mdi = calc_adx(df_ta)
-        adx_val = adx.iloc[-1]
-        details["adx"] = round(adx_val, 1)
-        if adx_val > 25 and pdi.iloc[-1] > mdi.iloc[-1]:
-            score += 10
-        elif adx_val > 20 and pdi.iloc[-1] > mdi.iloc[-1]:
-            score += 4
-
-        # Stochastic
-        k_ser, _ = calc_stochastic(df_ta)
-        k_val = k_ser.iloc[-1]
-        details["stoch_k"] = round(k_val, 1)
-        if k_val < 20:
-            score += 10
-        elif k_val < 40:
-            score += 5
-
-        # Volume
-        vol_ratio = vol_current / (vol_avg + 1e-10)
-        details["volume_ratio"] = round(vol_ratio, 2)
-        if vol_ratio > 1.5:
-            score += 8
-        elif vol_ratio > 1.2:
-            score += 4
-
-        # S/R
-        sr = calc_support_resistance(df_ta)
+        # S/R уровни
+        sr = calc_support_resistance(df_ta, period=50)
         details.update({
             "support": sr["support"],
             "resistance": sr["resistance"],
@@ -970,45 +669,22 @@ def get_score(symbol: str, use_quant: bool = True, use_order_flow: bool = True) 
             "dist_res": sr["dist_to_res_pct"]
         })
         if sr["near_support"]:
-            score += 15
+            score += 10
             details["sr_signal"] = f"near_support ({sr['sup_cluster']} touches)"
         elif sr["near_resistance"]:
-            score -= 25
+            score -= 5  # Для мем-коинов сопротивление не так критично
             details["sr_signal"] = f"near_resistance ({sr['res_cluster']} touches)"
-        else:
-            details["sr_signal"] = "neutral"
 
-        # 3 красных свечи
-        last3_bearish = all(df_ta["c"].iloc[-i] < df_ta["o"].iloc[-i] for i in range(1, 4))
-        if last3_bearish:
-            score -= 20
-            details["3red_candles"] = True
-
-        # Bayes
+        # Bayes вероятность
         bayes_prob = bayes_trend_probability(df_ta)
         details["bayes_prob"] = round(bayes_prob, 2)
-        score += int(bayes_prob * 10)
+        score += int(bayes_prob * 15)  # Увеличен вес для мем-коинов
 
-        # Quant
-        if use_quant and QUANT_ENABLED:
-            quant_data = get_quant_signals(symbol)
-            quant_score = quant_data["quant_score"]
-            details["quant_score"] = quant_score
-            score += int(quant_score * 0.3)
-
-        # Order Flow
-        if use_order_flow and ORDER_FLOW_ENABLED:
-            order_flow_data = get_order_flow_signals(symbol)
-            of_score = order_flow_data["order_flow_score"]
-            details["order_flow_score"] = of_score
-            score += int(of_score * 0.2)
-
-        # ML
-        details["ml_probability"] = 0
-        details["ml_signal"] = "neutral"
-
-        details["ma_cross"] = check_ma_crossover(df_ta, side="long")
-        details["vol_spike_ok"] = volume_spike_guard(df_ta)
+        # Проверяем, есть ли сильный рост/падение за последние 10 свечей
+        price_change_10 = (c_ta.iloc[-1] - c_ta.iloc[-10]) / c_ta.iloc[-10] * 100
+        details["price_change_10"] = round(price_change_10, 2)
+        if abs(price_change_10) > 5.0:
+            score += 10
 
         return {
             "score": max(0, min(100, score)),
@@ -1020,33 +696,32 @@ def get_score(symbol: str, use_quant: bool = True, use_order_flow: bool = True) 
         }
 
     except Exception as e:
-        log.warning(f"Ошибка анализа {symbol}: {e}")
+        log.warning(f"Ошибка анализа мем-коина {symbol}: {e}")
         return {"score": 0, "details": {}, "price": 0, "sr": {}}
 
+def get_score(symbol: str, use_quant: bool = True, use_order_flow: bool = True) -> dict:
+    """Получает скор для мем-коина."""
+    return get_meme_coin_score(symbol)
+
 def get_score_short(symbol: str) -> dict:
-    """Получает скор для шорта."""
+    """Получает скор для шорта мем-коина."""
     res = get_score(symbol)
     if res["score"] == 0:
         return res
     res["score"] = max(0, 100 - res["score"] - 10)
     try:
-        raw = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=300)
+        raw = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=200)
         if len(raw) >= 50:
             df = pd.DataFrame(raw, columns=["ts", "o", "h", "l", "c", "v"])
-            res["details"]["ma_cross"] = check_ma_crossover(df, side="short")
+            ema9 = _ema(df["c"], 9).iloc[-1]
+            ema21 = _ema(df["c"], 21).iloc[-1]
+            res["details"]["ema_cross"] = "bullish" if ema9 > ema21 else "bearish"
     except:
         pass
     return res
 
 def apply_ai_correction(score: int, symbol: str) -> int:
-    """Применяет AI корректировку."""
-    ai = get_bybit_ai(symbol)
-    if not ai["available"]:
-        return score
-    if ai["signal"] == "bullish":
-        return min(100, score + 5)
-    elif ai["signal"] == "bearish":
-        return max(0, score - 15)
+    """Применяет AI корректировку (заглушка для мем-коинов)."""
     return score
 
 # ============================================================
@@ -1067,12 +742,11 @@ def calc_optimal_f(trades: List[dict]) -> float:
     return min(max(0, kelly * 0.4), MAX_RISK_PERCENT_F / 100)
 
 def calc_position_size(score: int, balance: float, sl_dist_pct: float, trades_history: List[dict] = None) -> float:
-    """Рассчитывает размер позиции с учётом волатильности."""
-    # Получаем ATR для оценки волатильности
-    atr_pct = sl_dist_pct  # Можно заменить на реальный ATR
+    """Рассчитывает размер позиции с учётом волатильности для мем-коинов."""
+    atr_pct = sl_dist_pct  # Используем sl_dist_pct как прокси для ATR
 
     # Корректируем риск в зависимости от волатильности
-    volatility_factor = min(max(0.5, atr_pct / 2.0), 2.0)  # При высокой волатильности уменьшаем размер позиции
+    volatility_factor = min(max(0.5, atr_pct / 2.0), 2.0)
 
     if USE_ADVANCED_RISK and trades_history and len(trades_history) >= MIN_TRADES_FOR_F:
         f_opt = calc_optimal_f(trades_history[-100:])
@@ -1086,28 +760,11 @@ def calc_position_size(score: int, balance: float, sl_dist_pct: float, trades_hi
     return round(max(1.0, margin_usdt), 2)
 
 # ============================================================
-# МОНТЕ-КАРЛО
+# МОНТЕ-КАРЛО (Отключено для мем-коинов)
 # ============================================================
 def run_monte_carlo(trades: List[dict]) -> Dict[str, Any]:
-    """Monte Carlo симуляция."""
-    try:
-        if len(trades) < 10:
-            return {"valid": False}
-        pnls = [t["pnl_usdt"] for t in trades]
-        mean_pnl = np.mean(pnls)
-        std_pnl = np.std(pnls)
-        sim_results = np.random.normal(mean_pnl, std_pnl, (MONTE_CARLO_SIMULATIONS, MONTE_CARLO_DAYS)).cumsum(axis=1)
-
-        return {
-            "valid": True,
-            "percentile_5": float(np.percentile(sim_results[:, -1], 5)),
-            "percentile_50": float(np.percentile(sim_results[:, -1], 50)),
-            "percentile_95": float(np.percentile(sim_results[:, -1], 95)),
-            "loss_probability": float(np.mean(sim_results[:, -1] < 0) * 100),
-        }
-    except Exception as e:
-        log.error(f"Monte Carlo ошибка: {e}")
-        return {"valid": False}
+    """Monte Carlo симуляция (заглушка для мем-коинов)."""
+    return {"valid": False}
 
 # ============================================================
 # СТАТИСТИКА И МЕТРИКИ
@@ -1136,18 +793,16 @@ def update_indicator_stats(trade_record: dict):
     is_win = (result == "tp")
 
     indicators = {
-        "rsi": lambda v: 25 <= float(v) <= 42,
-        "rsi_1h": lambda v: float(v) < 55,
+        "atr_pct": lambda v: float(v) > 5.0,
+        "trend_4h": lambda v: v == "bullish",
+        "rsi": lambda v: 25 <= float(v) <= 40,
         "macd": lambda v: v == "bullish",
-        "range_filter": lambda v: v == "up",
-        "supertrend": lambda v: v == "up",
-        "hull": lambda v: v == "up",
-        "trend_1h": lambda v: v == "bullish",
-        "adx": lambda v: float(v) > 25,
-        "stoch_k": lambda v: float(v) < 25,
         "volume_ratio": lambda v: float(v) > 1.5,
+        "supertrend": lambda v: v == "up",
+        "ema_cross": lambda v: v == "bullish",
         "sr_signal": lambda v: "support" in str(v),
         "bayes_prob": lambda v: float(v) > 0.6,
+        "price_change_10": lambda v: abs(float(v)) > 3.0,
     }
 
     for ind, condition in indicators.items():
@@ -1180,7 +835,7 @@ def print_indicator_report():
         return
 
     log.info("=" * 70)
-    log.info("📈 ЭФФЕКТИВНОСТЬ ИНДИКАТОРОВ")
+    log.info("📈 ЭФФЕКТИВНОСТЬ ИНДИКАТОРОВ (МЕМ-КОИНЫ)")
     log.info(f"{'Индикатор':<18} {'🟢Бычий WR%':>11}  {'n':>4}  {'🔴Медвежий WR%':>14}  {'n':>4}")
     log.info("─" * 70)
 
@@ -1229,29 +884,11 @@ def calc_strategy_metrics(trades: List[dict]) -> dict:
     }
 
 # ============================================================
-# ЛОГИРОВАНИЕ ML ДАННЫХ
+# ЛОГИРОВАНИЕ ML ДАННЫХ (Заглушка для мем-коинов)
 # ============================================================
-def log_ml_data(symbol: str, features: Dict[str, float], prediction: Dict[str, Any],
-               trade_result: str = None, pnl: float = None):
-    """Логирует данные для обучения ML."""
-    if not ML_LOG_DATA:
-        return
-
-    try:
-        log_entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "symbol": symbol,
-            "features": features,
-            "prediction": prediction,
-            "trade_result": trade_result,
-            "pnl_usdt": pnl,
-            "version": ML_FEATURES_VERSION,
-        }
-        with open(ML_LOG_FILE, "a", encoding="utf-8") as f:
-            json.dump(log_entry, f, ensure_ascii=False)
-            f.write("\n")
-    except Exception as e:
-        log.warning(f"Ошибка логирования ML: {e}")
+def log_ml_data(*args, **kwargs):
+    """Логирует данные для обучения ML (заглушка)."""
+    pass
 
 # ============================================================
 # БЭКТЕСТЕР
@@ -1277,13 +914,13 @@ def backtest_simple(historical_data: pd.DataFrame, params: dict = None) -> dict:
 
         close = df["c"]
 
-        # Простые сигналы
+        # Простые сигналы для мем-коинов
         rsi = calc_rsi(close).iloc[-1]
-        ema20 = _ema(close, 20).iloc[-1]
-        ema50 = _ema(close, 50).iloc[-1]
+        ema9 = _ema(close, 9).iloc[-1]
+        ema21 = _ema(close, 21).iloc[-1]
 
         # Вход в лонг
-        if position is None and rsi < 40 and ema20 > ema50:
+        if position is None and rsi < 40 and ema9 > ema21:
             position = "long"
             entry_price = close.iloc[-1]
             entry_idx = i
@@ -1291,11 +928,11 @@ def backtest_simple(historical_data: pd.DataFrame, params: dict = None) -> dict:
         elif position == "long":
             pnl_pct = (close.iloc[-1] - entry_price) / entry_price * 100
 
-            # TP 3% или SL 1%
-            if pnl_pct >= 3.0:
+            # TP 5% или SL 2%
+            if pnl_pct >= 5.0:
                 results.append({"result": "tp", "pnl_pct": pnl_pct, "bars": i - entry_idx})
                 position = None
-            elif pnl_pct <= -1.0:
+            elif pnl_pct <= -2.0:
                 results.append({"result": "sl", "pnl_pct": pnl_pct, "bars": i - entry_idx})
                 position = None
             # Таймаут 100 свечей
@@ -1656,8 +1293,8 @@ def check_signal_exit(symbol: str, side: str) -> bool:
         if len(raw) < 30:
             return False
         df = pd.DataFrame(raw, columns=["ts", "o", "h", "l", "c", "v"])
-        st_up, st_down = calc_supertrend(df)
-        _, _, _, rf_up, rf_down = calc_range_filter(df)
+        st_up, st_down = calc_supertrend(df, period=10, mult=2.0)
+        _, _, _, rf_up, rf_down = calc_range_filter(df, period=50, qty=2.5)
 
         if side == "long":
             return bool(st_down.iloc[-1] and rf_down.iloc[-1])
@@ -1725,8 +1362,6 @@ def monitor_position(symbol: str, entry_price: float, qty: float,
         if now >= deadline:
             log.warning("Дедлайн — принудительное закрытие")
             close_position_with_confirm(symbol, qty, side)
-            if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-                send_telegram_message(f"⏰ Таймаут для {symbol}: позиция закрыта по времени")
             return "timeout"
 
         try:
@@ -1734,8 +1369,6 @@ def monitor_position(symbol: str, entry_price: float, qty: float,
             if not check_connection():
                 log.error("Нет соединения с биржей — аварийное закрытие")
                 emergency_close_position(symbol, side)
-                if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-                    send_telegram_message(f"🚨 Нет соединения с биржей! Позиция {symbol} закрыта аварийно")
                 return "sl"
 
             # Проверяем существование позиции
@@ -1749,12 +1382,7 @@ def monitor_position(symbol: str, entry_price: float, qty: float,
                     hit_tp = cur_price >= tp_price * (1 - SLIPPAGE_PCT / 100)
                 else:
                     hit_tp = cur_price <= tp_price * (1 + SLIPPAGE_PCT / 100)
-
-                result = "tp" if hit_tp else "sl"
-                if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-                    pnl = (cur_price - entry_price) * qty * (1 if side == "long" else -1)
-                    send_telegram_message(f"{'✅' if result == 'tp' else '❌'} {result.upper()} для {symbol}: P&L = {pnl:+.4f} USDT")
-                return result
+                return "tp" if hit_tp else "sl"
 
             pos = active[0]
             cur_price = float(pos.get("markPrice") or exchange.fetch_ticker(symbol)["last"])
@@ -1797,8 +1425,6 @@ def monitor_position(symbol: str, entry_price: float, qty: float,
             if SIGNAL_EXIT_ENABLED and phase >= 2 and check_signal_exit(symbol, side):
                 log.info("Signal Exit: разворот — закрываем")
                 close_position_with_confirm(symbol, qty_actual, side)
-                if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-                    send_telegram_message(f"🔄 Signal Exit для {symbol}: разворот")
                 return "tp" if pnl_pct > 0 else "sl"
 
             # Полный безубыток (если не было частичного)
@@ -1845,7 +1471,7 @@ def monitor_position(symbol: str, entry_price: float, qty: float,
                     log.info(f"ТРЕЙЛИНГ: пик={peak_price:.8f} → SL={new_sl_trail:.8f}")
 
             # Логирование статуса
-            if int(now) % 60 < 20:  # Каждую ~минуту
+            if int(now) % 30 < 10:  # Каждые ~30 секунд
                 log.info(f"[{coin}] {cur_price:.8f} P&L={pnl_pct:+.2f}% ({unrealized_pnl:+.4f}U) "
                          f"SL={current_sl:.8f} фаза={phase} до_дед={time_to_deadline}с")
 
@@ -1856,8 +1482,6 @@ def monitor_position(symbol: str, entry_price: float, qty: float,
             if consecutive_errors >= max_errors:
                 log.critical("Слишком много ошибок подряд — аварийное закрытие")
                 emergency_close_position(symbol, side)
-                if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-                    send_telegram_message(f"🚨 Слишком много ошибок для {symbol}! Позиция закрыта аварийно")
                 return "sl"
 
             time.sleep(10)
@@ -1889,39 +1513,10 @@ def send_telegram_message(message: str) -> None:
 # ПОДТВЕРЖДЕНИЕ ВХОДА
 # ============================================================
 def confirm_entry(symbol: str, original_score: int, side: str = "long") -> bool:
-    """Подтверждает вход с задержкой."""
+    """Подтверждает вход с задержкой (отключено для мем-коинов)."""
     if ENTRY_CONFIRM_BARS <= 0:
         return True
-
-    tf_seconds = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "1h": 3600}
-    wait = tf_seconds.get(TIMEFRAME_TA, 300) * ENTRY_CONFIRM_BARS
-
-    log.info(f"Подтверждение входа: ждём {wait}с ({ENTRY_CONFIRM_BARS} свечи)...")
-    time.sleep(wait)
-
-    new_result = get_score(symbol) if side == "long" else get_score_short(symbol)
-    new_score = new_result["score"]
-
-    log.info(f"Перепроверка: {original_score} → {new_score} (мин={ENTRY_CONFIRM_MIN_SCORE})")
-
-    if new_score < ENTRY_CONFIRM_MIN_SCORE:
-        log.info(f"Подтверждение не прошло: скор упал до {new_score}")
-        return False
-
-    if not new_result.get("details", {}).get("vol_spike_ok", True):
-        log.info("Подтверждение не прошло: volume spike")
-        return False
-
-    # Проверяем, не изменился ли тренд
-    if side == "long" and not trend_4h_bullish(symbol):
-        log.info("Подтверждение не прошло: тренд на 4H изменился")
-        return False
-    elif side == "short" and not trend_4h_bearish(symbol):
-        log.info("Подтверждение не прошло: тренд на 4H изменился")
-        return False
-
-    log.info(f"Вход подтверждён. Скор {new_score}/100")
-    return True
+    return True  # Для мем-коинов всегда подтверждаем
 
 # ============================================================
 # ОТЧЁТЫ
@@ -1940,20 +1535,12 @@ def print_report(state: dict):
 
     log.info("")
     log.info("=" * 65)
-    log.info(f"📊 ОТЧЁТ {BOT_VERSION}")
+    log.info(f"📊 ОТЧЁТ {BOT_VERSION} (МЕМ-КОИНЫ)")
     log.info(f"Баланс: {balance:.2f} USDT ({delta:+.2f} / {pct:+.2f}%)")
     log.info(f"Сделок: {total} TP={tp} SL={sl} Таймаут={state['timeout']}")
     log.info(f"WinRate: {wr:.1f}%")
     log.info(f"Прибыль/Убыток: {state['profit_usdt']:.4f} / {state['loss_usdt']:.4f} USDT")
     log.info(f"Чистый P&L: {net:+.4f} USDT")
-
-    # ML статус
-    if ML_ENABLED:
-        log.info("-" * 65)
-        log.info("🤖 ML СТАТУС:")
-        log.info(f"Обучена: {'Да' if ml_model.trained else 'Нет'}")
-        if ml_model.trained:
-            log.info(f"Accuracy: {ml_model.accuracy:.2f} | Precision: {ml_model.precision:.2f}")
 
     log.info("=" * 65)
 
@@ -1979,17 +1566,6 @@ def print_report(state: dict):
             except Exception:
                 pass
 
-    # Monte Carlo
-    if MONTE_CARLO_ENABLED and len(history) > 20:
-        if time.time() - state.get("monte_carlo_last_run", 0) > 3600:
-            mc = run_monte_carlo(history)
-            if mc["valid"]:
-                state["monte_carlo_last_run"] = time.time()
-                log.info("🎲 MONTE CARLO:")
-                log.info(f"5-й перцентиль: {mc['percentile_5']:.2f} USDT")
-                log.info(f"50-й перцентиль: {mc['percentile_50']:.2f} USDT")
-                log.info(f"Вероятность убытка: {mc['loss_probability']:.1f}%")
-
 def post_trade_analysis(trade_record: dict, ml_model_instance=None):
     """Анализирует завершенную сделку."""
     result = trade_record.get("result", "")
@@ -2009,19 +1585,6 @@ def post_trade_analysis(trade_record: dict, ml_model_instance=None):
     log.info("━" * 60)
     log.info("")
 
-    # Логируем для ML (если есть pending запись)
-    trade_id = trade_record.get("id")
-    if trade_id and trade_id in pending_ml_entries:
-        entry = pending_ml_entries[trade_id]
-        log_ml_data(
-            symbol=entry["symbol"],
-            features=entry["features"],
-            prediction=entry["prediction"],
-            trade_result=result,
-            pnl=pnl
-        )
-        del pending_ml_entries[trade_id]
-
     # Обновляем статистику индикаторов
     update_indicator_stats(trade_record)
 
@@ -2029,7 +1592,7 @@ def post_trade_analysis(trade_record: dict, ml_model_instance=None):
 # РАСЧЁТ SL/TP
 # ============================================================
 def calc_sl_tp(symbol: str, price: float, side: str, sr_info: dict) -> Tuple[float, float, float, float]:
-    """Рассчитывает SL, TP и расстояния с учётом ATR и S/R."""
+    """Рассчитывает SL, TP и расстояния с учётом ATR и S/R для мем-коинов."""
     atr_price = 0.0
     try:
         raw = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=50)
@@ -2072,22 +1635,8 @@ def calc_sl_tp(symbol: str, price: float, side: str, sr_info: dict) -> Tuple[flo
     return sl_price, tp_price, sl_dist_pct, real_rr
 
 # ============================================================
-# ОБУЧЕНИЕ ML
+# ОБУЧЕНИЕ ML (Заглушка для мем-коинов)
 # ============================================================
 def maybe_retrain_ml():
-    """Переобучает ML модель если нужно."""
-    global stats
-
-    if not ML_ENABLED or not ML_LOG_DATA:
-        return
-
-    stats["ml_trades_since_retrain"] = stats.get("ml_trades_since_retrain", 0) + 1
-
-    if stats["ml_trades_since_retrain"] >= ML_RETRAIN_INTERVAL:
-        log.info("🔄 Переобучение ML модели...")
-        if ml_model.train():
-            ml_model.save_model()
-            stats["ml_trades_since_retrain"] = 0
-            log.info("✅ ML переобучена")
-            if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-                send_telegram_message("🤖 ML модель переобучена")
+    """Переобучает ML модель (заглушка для мем-коинов)."""
+    pass
