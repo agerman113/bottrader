@@ -20,7 +20,7 @@ def main():
 
     # 1. Получаем текущую цену BTCUSDC
     try:
-        ticker = session.get_tickers(category="spot", symbol="BTCUSDC")
+        ticker = session.get_tickers(category="spot", symbol="BTCUSDT")
         price = float(ticker['result']['list'][0]['lastPrice'])
         logger.info(f"📈 Current BTCUSDC price: {price} USDC")
     except Exception as e:
@@ -34,7 +34,7 @@ def main():
 
     # 3. Проверяем баланс USDC (опционально)
     try:
-        wallet = session.get_wallet_balance(accountType="UNIFIED", coin="USDC")
+        wallet = session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
         balance = float(wallet['result']['list'][0]['coin'][0]['walletBalance'])
         logger.info(f"💰 USDC balance: {balance}")
         if balance < target_usdc:
@@ -46,7 +46,7 @@ def main():
     try:
         order = session.place_order(
             category="spot",
-            symbol="BTCUSDC",
+            symbol="BTCUSDT",
             side="Buy",
             orderType="Market",
             qty=str(qty),
