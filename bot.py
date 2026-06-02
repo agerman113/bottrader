@@ -276,7 +276,7 @@ class BybitWrapper:
         except Exception as e:
             log.warning(f"set_leverage: {e}")
 
-    def create_market_order(self, symbol: str, side: str, qty: float, params=None):
+     def create_market_order(self, symbol: str, side: str, qty: float, params=None):
         params = params or {}
         sym = symbol.replace("/", "").replace(":USDT", "")
         order_side = "Buy" if side == "buy" else "Sell"
@@ -292,12 +292,29 @@ class BybitWrapper:
         if params.get("stopLoss"):
             kwargs["stopLoss"] = str(params["stopLoss"])
         r = self.session.place_order(**kwargs)
-        return {"average": 0, "id": r["result"]["orderId"]}
+        order_id = r["result"]["orderId"]
+        # Получаем реальную цену исполнения
+        import time as _time
+        _time.sleep(1)
+        try:
+            hist = self.session.get_order_history(
+                category="linear", symbol=sym, orderId=order_id
+            )
+            avg_price = float(hist["result"]["list"][0].get("avgPrice", 0) or 0)
+        except Exception:
+            avg_price = 0
+        return {"average": avg_price, "id": order_id}
 
     def price_to_precision(self, symbol: str, price: float):
         return str(round(price, 2))
 
     def amount_to_precision(self, symbol: str, amount: float):
+        sym = symbol.replace("/", "").replace(":USDT", "")
+        # Минимальные лоты для известных монет
+        whole_qty = {"SOLUSDT", "ADAUSDT", "XRPUSDT", "DOGEUSDT", "HBARUSDT",
+                     "XLMUSDT", "TRXUSDT", "VETUSDT", "NOTUSDT"}
+        if sym in whole_qty:
+            return max(1, round(amount))
         return round(amount, 3)
 
     def private_post_v5_position_trading_stop(self, params: dict):
