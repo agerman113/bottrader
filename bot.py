@@ -224,8 +224,13 @@ class BybitWrapper:
 
     def fetch_balance(self, params=None):
         r = self.session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
-        usdt = r["result"]["list"][0]["coin"][0]
-        return {"USDT": {"free": float(usdt["availableToWithdraw"]), "total": float(usdt["walletBalance"])}}
+        coins = r["result"]["list"][0]["coin"]
+        if not coins:
+            return {"USDT": {"free": 0.0, "total": 0.0}}
+        usdt = coins[0]
+        free = float(usdt.get("availableToWithdraw") or usdt.get("availableToBorrow") or 0)
+        total = float(usdt.get("walletBalance") or 0)
+        return {"USDT": {"free": free, "total": total}}
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 200):
         sym = symbol.replace("/", "").replace(":USDT", "")
