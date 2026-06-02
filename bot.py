@@ -30,7 +30,6 @@ import time
 import json
 import logging
 import requests
-import ccxt
 import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
