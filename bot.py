@@ -213,29 +213,127 @@ log = logging.getLogger(__name__)
 # ██████████████████   БИРЖА   █████████████████████████████
 # ============================================================
 
-# Выбор биржи в зависимости от режима (Testnet/Mainnet)
+from pybit.unified_trading import HTTP
+
+class BybitWrapper:
+    def __init__(self, testnet: bool, api_key: str, api_secret: str):
+        self.session = HTTP(
+            testnet=testnet,
+            api_key=api_key,
+            api_secret=api_secret,
+        )
+
+    def fetch_balance(self, params=None):
+        r = self.session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+        usdt = r["result"]["list"][0]["coin"][0]
+        return {"USDT": {"free": float(usdt["availableToWithdraw"]), "total": float(usdt["walletBalance"])}}
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 200):
+        sym = symbol.replace("/", "").replace(":USDT", "")
+        tf_map = {"1m": "1", "3m": "3", "5m": "5", "15m": "15", "1h": "60", "4h": "240"}
+        interval = tf_map.get(timeframe, "5")
+        r = self.session.get_kline(category="linear", symbol=sym, interval=interval, limit=limit)
+        rows = list(reversed(r["result"]["list"]))
+        return [[int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in rows]
+
+    def fetch_ticker(self, symbol: str):
+        sym = symbol.replace("/", "").replace(":USDT", "")
+        r = self.session.get_tickers(category="linear", symbol=sym)
+        last = float(r["result"]["list"][0]["lastPrice"])
+        return {"last": last}
+
+    def fetch_order_book(self, symbol: str, limit: int = 20):
+        sym = symbol.replace("/", "").replace(":USDT", "")
+        r = self.session.get_orderbook(category="linear", symbol=sym, limit=limit)
+        bids = [[float(x[0]), float(x[1])] for x in r["result"]["b"]]
+        asks = [[float(x[0]), float(x[1])] for x in r["result"]["a"]]
+        return {"bids": bids, "asks": asks}
+
+    def fetch_positions(self, symbols=None):
+        r = self.session.get_positions(category="linear", settleCoin="USDT")
+        positions = []
+        for p in r["result"]["list"]:
+            size = float(p.get("size", 0))
+            if size == 0:
+                continue
+            positions.append({
+                "symbol": p["symbol"],
+                "side": "long" if p["side"] == "Buy" else "short",
+                "contracts": size,
+                "unrealizedPnl": float(p.get("unrealisedPnl", 0)),
+                "entryPrice": float(p.get("avgPrice", 0)),
+            })
+        return positions
+
+    def set_leverage(self, leverage: int, symbol: str, params=None):
+        sym = symbol.replace("/", "").replace(":USDT", "")
+        try:
+            self.session.set_leverage(
+                category="linear", symbol=sym,
+                buyLeverage=str(leverage), sellLeverage=str(leverage)
+            )
+        except Exception as e:
+            log.warning(f"set_leverage: {e}")
+
+    def create_market_order(self, symbol: str, side: str, qty: float, params=None):
+        params = params or {}
+        sym = symbol.replace("/", "").replace(":USDT", "")
+        order_side = "Buy" if side == "buy" else "Sell"
+        kwargs = dict(
+            category="linear", symbol=sym,
+            side=order_side, orderType="Market",
+            qty=str(qty), timeInForce="GTC",
+        )
+        if params.get("reduceOnly"):
+            kwargs["reduceOnly"] = True
+        if params.get("takeProfit"):
+            kwargs["takeProfit"] = str(params["takeProfit"])
+        if params.get("stopLoss"):
+            kwargs["stopLoss"] = str(params["stopLoss"])
+        r = self.session.place_order(**kwargs)
+        return {"average": 0, "id": r["result"]["orderId"]}
+
+    def price_to_precision(self, symbol: str, price: float):
+        return str(round(price, 2))
+
+    def amount_to_precision(self, symbol: str, amount: float):
+        return round(amount, 3)
+
+    def private_post_v5_position_trading_stop(self, params: dict):
+        self.session.set_trading_stop(
+            category="linear",
+            symbol=params["symbol"],
+            stopLoss=params.get("stopLoss", ""),
+            slTriggerBy=params.get("slTriggerBy", "MarkPrice"),
+            positionIdx=0,
+        )
+
+    def private_post_v5_position_set_leverage(self, params: dict):
+        try:
+            self.session.set_leverage(
+                category="linear",
+                symbol=params["symbol"],
+                buyLeverage=params.get("buyLeverage", "3"),
+                sellLeverage=params.get("sellLeverage", "3"),
+            )
+        except Exception as e:
+            log.warning(f"private_post_v5_position_set_leverage: {e}")
+
+
 if TESTNET_MODE:
-    exchange = ccxt.bybit({
-        "apiKey": os.getenv("BYBIT_TESTNET_API_KEY"),
-        "secret": os.getenv("BYBIT_TESTNET_API_SECRET"),
-        "enableRateLimit": True,
-        "options": {"defaultType": "linear"},
-        "urls": {
-            "api": {
-                "public":  "https://api-testnet.bybit.com",
-                "private": "https://api-testnet.bybit.com",
-            }
-        },
-    })
-    log.info("✅ Режим TESTNET активирован")
+    exchange = BybitWrapper(
+        testnet=True,
+        api_key=os.getenv("BYBIT_TESTNET_API_KEY"),
+        api_secret=os.getenv("BYBIT_TESTNET_API_SECRET"),
+    )
+    log.info("✅ Режим TESTNET активирован (pybit)")
 else:
-    exchange = ccxt.bybit({
-        "apiKey": os.getenv("BYBIT_API_KEY"),
-        "secret": os.getenv("BYBIT_API_SECRET"),
-        "enableRateLimit": True,
-        "options": {"defaultType": "linear"},
-    })
-    log.info("✅ Режим MAINNET активирован")
+    exchange = BybitWrapper(
+        testnet=False,
+        api_key=os.getenv("BYBIT_API_KEY"),
+        api_secret=os.getenv("BYBIT_API_SECRET"),
+    )
+    log.info("✅ Режим MAINNET активирован (pybit)")
 
 # ============================================================
 # ███████████████████████████████████████████████
