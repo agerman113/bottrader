@@ -228,9 +228,18 @@ class BybitWrapper:
         coins = r["result"]["list"][0]["coin"]
         if not coins:
             return {"USDT": {"free": 0.0, "total": 0.0}}
-        usdt = coins[0]
-        free = float(usdt.get("availableToWithdraw") or usdt.get("availableToBorrow") or 0)
-        total = float(usdt.get("walletBalance") or 0)
+        usdt = next((c for c in coins if c.get("coin") == "USDT"), coins[0])
+        free = 0.0
+        for field in ["availableToWithdraw", "availableToBorrow", "equity", "walletBalance"]:
+            val = usdt.get(field, "")
+            if val and val != "":
+                try:
+                    free = float(val)
+                    if free > 0:
+                        break
+                except:
+                    continue
+        total = float(usdt.get("walletBalance") or usdt.get("equity") or 0)
         return {"USDT": {"free": free, "total": total}}
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 200):
