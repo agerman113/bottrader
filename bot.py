@@ -46,7 +46,6 @@ from statsmodels.regression.linear_model import OLS
 import warnings
 warnings.filterwarnings('ignore')
 
-load_dotenv()
 
 # ============================================================
 # ██████████████████████████████████████████████████████
