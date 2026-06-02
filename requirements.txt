@@ -9,3 +9,4 @@ requests>=2.26.0
 xgboost>=1.6.0
 matplotlib>=3.5.0
 statsmodels>=0.13.0
+pybit
