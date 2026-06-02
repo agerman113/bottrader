@@ -1158,7 +1158,7 @@ def get_bybit_advanced_signals(symbol: str) -> Dict[str, Any]:
             if signals["funding_rate"]["signal"] == "bullish":
                 advanced_score += 5
             elif signals["funding_rate"]["signal"] == "bearish":
-advanced_score -= 5
+                advanced_score -= 5
     if signals["liquidations"]["valid"]:
         if signals["liquidations"]["signal"] == "bullish":
             advanced_score += 10
