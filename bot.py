@@ -310,12 +310,27 @@ class BybitWrapper:
 
     def amount_to_precision(self, symbol: str, amount: float):
         sym = symbol.replace("/", "").replace(":USDT", "")
-        # Минимальные лоты для известных монет
+        # Монеты с минимальным лотом 1.0
         whole_qty = {"SOLUSDT", "ADAUSDT", "XRPUSDT", "DOGEUSDT", "HBARUSDT",
-                     "XLMUSDT", "TRXUSDT", "VETUSDT", "NOTUSDT"}
+                     "XLMUSDT", "TRXUSDT", "VETUSDT", "NOTUSDT", "SUIUSDT",
+                     "APTUSDT", "NEARUSDT", "ATOMUSDT", "DOTUSDT", "LINKUSDT",
+                     "AVAXUSDT", "INJUSDT", "GRTUSDT", "ARBUSDT", "OPUSDT",
+                     "TIAUSDT", "JTOUSDT", "EIGENUSDT", "CATIUSDT", "BOMEUSDT",
+                     "WIFUSDT", "PEPEUSDT", "VIRTUALUSDT", "RENDERUSDT", "FETUSDT",
+                     "WLDUSDT", "ARKMMUSDT", "IOUSDT", "ONDOUSDT"}
+        # Монеты с минимальным лотом 0.1
+        tenth_qty = {"ETHUSDT", "BNBUSDT", "TONUSDT", "AAVEUSDT", "UNIUSDT"}
+        # Монеты с минимальным лотом 0.01
+        hundredth_qty = {"BTCUSDT", "TAOUSDT"}
+
         if sym in whole_qty:
             return max(1, round(amount))
-        return round(amount, 3)
+        elif sym in tenth_qty:
+            return max(0.1, round(amount, 1))
+        elif sym in hundredth_qty:
+            return max(0.01, round(amount, 2))
+        else:
+            return round(amount, 3)
 
     def private_post_v5_position_trading_stop(self, params: dict):
         self.session.set_trading_stop(
