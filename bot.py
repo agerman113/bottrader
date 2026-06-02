@@ -219,7 +219,13 @@ if TESTNET_MODE:
         "apiKey": os.getenv("BYBIT_TESTNET_API_KEY"),
         "secret": os.getenv("BYBIT_TESTNET_API_SECRET"),
         "enableRateLimit": True,
-        "options": {"defaultType": "linear", "test": True},
+        "options": {"defaultType": "linear"},
+        "urls": {
+            "api": {
+                "public":  "https://api-testnet.bybit.com",
+                "private": "https://api-testnet.bybit.com",
+            }
+        },
     })
     log.info("✅ Режим TESTNET активирован")
 else:
