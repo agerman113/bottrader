@@ -18,19 +18,32 @@ def main():
     session = HTTP(testnet=True, api_key=BYBIT_TESTNET_API_KEY, api_secret=BYBIT_TESTNET_API_SECRET)
     logger.info("✅ Connected to Bybit Testnet")
 
-    # 1. Получаем баланс USDT
+    # 1. Получаем минимальную сумму ордера (minOrderAmt) для BTCUSDT
+    try:
+        instrument = session.get_instruments_info(category="spot", symbol="BTCUSDT")
+        lot_size_filter = instrument['result']['list'][0]['lotSizeFilter']
+        min_order_amt = float(lot_size_filter['minOrderAmt'])
+        logger.info(f"📏 Minimal order amount for BTCUSDT: {min_order_amt} USDT")
+    except Exception as e:
+        logger.error(f"❌ Failed to get instrument info: {e}")
+        sys.exit(1)
+
+    # 2. Рассчитываем сумму сделки: минимум + 20%
+    target_usdt = round(min_order_amt * 1.2, 2)
+    logger.info(f"🎯 Order amount: {target_usdt} USDT")
+
+    # 3. Проверяем баланс
     try:
         wallet = session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
         balance = float(wallet['result']['list'][0]['coin'][0]['walletBalance'])
         logger.info(f"💰 USDT balance: {balance}")
-        
-        if balance < 15:
-            logger.error(f"❌ Insufficient USDT balance ({balance}). Please request test USDT from faucet: https://testnet.bybit.com/faucet")
+        if balance < target_usdt:
+            logger.error(f"❌ Insufficient balance ({balance} < {target_usdt})")
             sys.exit(1)
     except Exception as e:
-        logger.warning(f"⚠️ Could not check USDT balance: {e}")
+        logger.warning(f"⚠️ Could not check balance: {e}")
 
-    # 2. Получаем текущую цену BTCUSDT
+    # 4. Получаем текущую цену
     try:
         ticker = session.get_tickers(category="spot", symbol="BTCUSDT")
         price = float(ticker['result']['list'][0]['lastPrice'])
@@ -39,12 +52,11 @@ def main():
         logger.error(f"❌ Failed to get price: {e}")
         sys.exit(1)
 
-    # 3. Рассчитываем количество для покупки на 15 USDT
-    target_usdt = 15.0
-    qty = round(target_usdt / price, 6)  # BTC количество
-    logger.info(f"🔢 Buying {qty} BTC for ~{target_usdt} USDT")
+    # 5. Рассчитываем количество (округление до 6 знаков)
+    qty = round(target_usdt / price, 6)
+    logger.info(f"🔢 Buying {qty} BTC (~{target_usdt} USDT)")
 
-    # 4. Размещаем рыночный ордер
+    # 6. Размещаем ордер
     try:
         order = session.place_order(
             category="spot",
@@ -54,7 +66,7 @@ def main():
             qty=str(qty),
             timeInForce="GTC"
         )
-        logger.info(f"✅ Market order placed! Response: {order}")
+        logger.info(f"✅ Market order placed! {order}")
     except Exception as e:
         logger.error(f"❌ Order failed: {e}")
 
