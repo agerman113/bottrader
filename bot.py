@@ -223,7 +223,8 @@ class BybitWrapper:
         )
 
     def fetch_balance(self, params=None):
-        r = self.session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+        r = self.session.get_wallet_balance(accountType="UNIFIED")
+        log.info(f"[DEBUG BALANCE] {r['result']['list'][0]}")
         coins = r["result"]["list"][0]["coin"]
         if not coins:
             return {"USDT": {"free": 0.0, "total": 0.0}}
