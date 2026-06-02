@@ -18,29 +18,31 @@ def main():
     session = HTTP(testnet=True, api_key=BYBIT_TESTNET_API_KEY, api_secret=BYBIT_TESTNET_API_SECRET)
     logger.info("✅ Connected to Bybit Testnet")
 
-    # 1. Получаем текущую цену BTCUSDC
+    # 1. Получаем баланс USDT
+    try:
+        wallet = session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+        balance = float(wallet['result']['list'][0]['coin'][0]['walletBalance'])
+        logger.info(f"💰 USDT balance: {balance}")
+        
+        if balance < 15:
+            logger.error(f"❌ Insufficient USDT balance ({balance}). Please request test USDT from faucet: https://testnet.bybit.com/faucet")
+            sys.exit(1)
+    except Exception as e:
+        logger.warning(f"⚠️ Could not check USDT balance: {e}")
+
+    # 2. Получаем текущую цену BTCUSDT
     try:
         ticker = session.get_tickers(category="spot", symbol="BTCUSDT")
         price = float(ticker['result']['list'][0]['lastPrice'])
-        logger.info(f"📈 Current BTCUSDC price: {price} USDC")
+        logger.info(f"📈 Current BTCUSDT price: {price} USDT")
     except Exception as e:
         logger.error(f"❌ Failed to get price: {e}")
         sys.exit(1)
 
-    # 2. Рассчитываем количество для покупки на 15 USDC (чуть выше минимальных 10)
-    target_usdc = 15.0
-    qty = round(target_usdc / price, 6)  # округляем до 6 знаков
-    logger.info(f"🔢 Buying {qty} BTC for ~{target_usdc} USDC")
-
-    # 3. Проверяем баланс USDC (опционально)
-    try:
-        wallet = session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
-        balance = float(wallet['result']['list'][0]['coin'][0]['walletBalance'])
-        logger.info(f"💰 USDC balance: {balance}")
-        if balance < target_usdc:
-            logger.warning(f"⚠️ Low balance: {balance} USDC (need ~{target_usdc})")
-    except Exception as e:
-        logger.warning(f"⚠️ Could not check balance: {e}")
+    # 3. Рассчитываем количество для покупки на 15 USDT
+    target_usdt = 15.0
+    qty = round(target_usdt / price, 6)  # BTC количество
+    logger.info(f"🔢 Buying {qty} BTC for ~{target_usdt} USDT")
 
     # 4. Размещаем рыночный ордер
     try:
