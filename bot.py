@@ -276,7 +276,7 @@ class BybitWrapper:
         except Exception as e:
             log.warning(f"set_leverage: {e}")
 
-     def create_market_order(self, symbol: str, side: str, qty: float, params=None):
+    def create_market_order(self, symbol: str, side: str, qty: float, params=None):
         params = params or {}
         sym = symbol.replace("/", "").replace(":USDT", "")
         order_side = "Buy" if side == "buy" else "Sell"
