@@ -1895,7 +1895,6 @@ def этап_1_проверка_окружения() -> Tuple[bool, List[str]]:
     elif len(api_key) < 10: errors.append("BYBIT_API_KEY слишком короткий")
     if not api_secret: errors.append("BYBIT_API_SECRET не задан")
     elif len(api_secret) < 10: errors.append("BYBIT_API_SECRET слишком короткий")
-    if not os.path.exists(".env"): warnings.append(".env файл не найден")
     return len(errors) == 0, errors + warnings
 
 def этап_2_проверка_подключения() -> Tuple[bool, List[str]]:
