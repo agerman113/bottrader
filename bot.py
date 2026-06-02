@@ -224,22 +224,9 @@ class BybitWrapper:
 
     def fetch_balance(self, params=None):
         r = self.session.get_wallet_balance(accountType="UNIFIED")
-        log.info(f"[DEBUG BALANCE] {r['result']['list'][0]}")
-        coins = r["result"]["list"][0]["coin"]
-        if not coins:
-            return {"USDT": {"free": 0.0, "total": 0.0}}
-        usdt = next((c for c in coins if c.get("coin") == "USDT"), coins[0])
-        free = 0.0
-        for field in ["availableToWithdraw", "availableToBorrow", "equity", "walletBalance"]:
-            val = usdt.get(field, "")
-            if val and val != "":
-                try:
-                    free = float(val)
-                    if free > 0:
-                        break
-                except:
-                    continue
-        total = float(usdt.get("walletBalance") or usdt.get("equity") or 0)
+        account = r["result"]["list"][0]
+        total = float(account.get("totalWalletBalance") or 0)
+        free = float(account.get("totalAvailableBalance") or 0)
         return {"USDT": {"free": free, "total": total}}
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 200):
@@ -608,7 +595,10 @@ def bayes_trend_probability(df: pd.DataFrame) -> float:
         rsi = calc_rsi(close).iloc[-1]
         adx, _, _ = calc_adx(df)
         adx_val = adx.iloc[-1]
+        if any(np.isnan(v) for v in [ema20, ema50, rsi, adx_val]): return 0.5
+        if ema50 == 0: return 0.5
         z = ((ema20/ema50 - 1)*100 + (rsi - 50)/25 + (adx_val - 25)/10)
+        if np.isnan(z) or np.isinf(z): return 0.5
         return float(np.clip(1.0 / (1.0 + np.exp(-z)), 0.0, 1.0))
     except Exception: return 0.5
 
