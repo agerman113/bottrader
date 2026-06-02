@@ -2010,9 +2010,7 @@ def этап_2_проверка_подключения() -> Tuple[bool, List[str
         else:
             if usdt < MIN_BALANCE: errors.append(f"Баланс {usdt:.2f} < {MIN_BALANCE} USDT")
             else: log.info(f"Подключение OK | Баланс: {usdt:.4f} USDT")
-    except ccxt.AuthenticationError as e: errors.append(f"Ошибка аутентификации: {e}")
-    except ccxt.NetworkError as e: errors.append(f"Сетевая ошибка: {e}")
-    except Exception as e: errors.append(f"Неизвестная ошибка: {e}")
+    except Exception as e: errors.append(f"Ошибка подключения: {e}")
     return len(errors) == 0, errors
 
 def этап_3_проверка_конфигурации() -> Tuple[bool, List[str]]:
