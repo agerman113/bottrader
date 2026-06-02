@@ -1595,21 +1595,47 @@ def обновить_статистику_индикаторов(запись_с
     details = запись_сделки.get("details", {})
     результат = запись_сделки.get("результат", "")
     is_win = (результат == "tp")
+
+    # Определяем условия для индикаторов как отдельные функции
+    def check_rsi(v): return 25 <= float(v) <= 42
+    def check_rsi_1h(v): return float(v) < 55
+    def check_macd(v): return v == "бычий"
+    def check_range_filter(v): return v == "вверх"
+    def check_supertrend(v): return v == "вверх"
+    def check_hull(v): return v == "вверх"
+    def check_trend_1h(v): return v == "бычий"
+    def check_adx(v): return float(v) > 25
+    def check_stoch_k(v): return float(v) < 25
+    def check_volume_ratio(v): return float(v) > 1.5
+    def check_sr_signal(v): return "поддержки" in str(v)
+    def check_bayes_prob(v): return float(v) > 0.6
+    def check_quant_score(v): return float(v) > 50
+    def check_order_flow_score(v): return float(v) > 50
+
     индикаторы = {
-        "rsi": lambda v: 25 <= float(v) <= 42, "rsi_1h": lambda v: float(v) < 55,
-        "macd": lambda v: v == "бычий", "range_filter": lambda v: v == "вверх",
-        "supertrend": lambda v: v == "вверх", "hull": lambda v: v == "вверх",
-        "тренд_1h": lambda v: v == "бычий", "adx": lambda v: float(v) > 25,
-        "stoch_k": lambda v: float(v) < 25, "объём_ratio": lambda v: float(v) > 1.5,
-        "sr_signal": lambda v: "поддержки" in str(v), "bayes_prob": lambda v: float(v) > 0.6,
-        "quant_score": lambda v: float
-"order_flow_score": lambda v: float(v) > 50,
+        "rsi": check_rsi,
+        "rsi_1h": check_rsi_1h,
+        "macd": check_macd,
+        "range_filter": check_range_filter,
+        "supertrend": check_supertrend,
+        "hull": check_hull,
+        "тренд_1h": check_trend_1h,
+        "adx": check_adx,
+        "stoch_k": check_stoch_k,
+        "объём_ratio": check_volume_ratio,
+        "sr_signal": check_sr_signal,
+        "bayes_prob": check_bayes_prob,
+        "quant_score": check_quant_score,
+        "order_flow_score": check_order_flow_score,
     }
+
     for инд, условие in индикаторы.items():
         значение = details.get(инд)
         if значение is None: continue
-        try: is_bullish = условие(значение)
-        except: continue
+        try:
+            is_bullish = условие(значение)
+        except:
+            continue
         if инд not in stats_data:
             stats_data[инд] = {"bullish": {"total": 0, "wins": 0}, "bearish": {"total": 0, "wins": 0}}
         if is_bullish:
