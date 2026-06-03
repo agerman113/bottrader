@@ -343,26 +343,31 @@ class BybitWrapper:
     def price_to_precision(self, symbol: str, price: float):
         return str(round(price, 2))
 
-    def amount_to_precision(self, symbol: str, amount: float):
+    def amount_to_precision(self, symbol: str, amount: float) -> float:
+        """
+        Возвращает количество, округлённое до допустимого шага лота.
+        НЕ принуждает к минимальному лоту 1!
+        """
         sym = symbol.replace("/", "").replace(":USDT", "")
-        whole_qty = {"SOLUSDT", "ADAUSDT", "XRPUSDT", "DOGEUSDT", "HBARUSDT",
-                     "XLMUSDT", "TRXUSDT", "VETUSDT", "NOTUSDT", "SUIUSDT",
-                     "APTUSDT", "NEARUSDT", "ATOMUSDT", "DOTUSDT", "LINKUSDT",
-                     "AVAXUSDT", "INJUSDT", "GRTUSDT", "ARBUSDT", "OPUSDT",
-                     "TIAUSDT", "JTOUSDT", "EIGENUSDT", "CATIUSDT", "BOMEUSDT",
-                     "WIFUSDT", "PEPEUSDT", "VIRTUALUSDT", "RENDERUSDT", "FETUSDT",
-                     "WLDUSDT", "ARKMMUSDT", "IOUSDT", "ONDOUSDT"}
-        tenth_qty = {"ETHUSDT", "BNBUSDT", "TONUSDT", "AAVEUSDT", "UNIUSDT"}
-        hundredth_qty = {"BTCUSDT", "TAOUSDT"}
+        min_qty = 0.001
 
-        if sym in whole_qty:
-            return max(1, round(amount))
-        elif sym in tenth_qty:
-            return max(0.1, round(amount, 1))
-        elif sym in hundredth_qty:
-            return max(0.01, round(amount, 2))
+        try:
+            ticker = self.fetch_ticker(symbol)
+            price = ticker["last"]
+        except:
+            price = 100
+
+        if price > 5000:
+            step = 0.001       # BTC, TAO
+        elif price > 500:
+            step = 0.01        # ETH, BNB, SOL...
+        elif price > 10:
+            step = 0.1
         else:
-            return round(amount, 3)
+            step = 1.0         # дешёвые монеты
+
+        qty = max(min_qty, round(amount / step) * step)
+        return qty
 
     def private_post_v5_position_trading_stop(self, params: dict):
         self.session.set_trading_stop(
@@ -1829,7 +1834,7 @@ def рассчитать_mqs(symbol: str, details: dict, side: str) -> Tuple[flo
     coin_score = dynamic_coin_flip(symbol, details, side)
 
     # 7. Bayesian Probability (10%)
-    bayesian_score = bayesian_score(details, side)
+    bayesian_val = bayesian_score(details, side)
 
     # Вычисляем MQS как взвешенную сумму
     mqs = (
@@ -1839,7 +1844,7 @@ def рассчитать_mqs(symbol: str, details: dict, side: str) -> Tuple[flo
         markov_score * MQS_WEIGHTS["markov_chain"] +
         hurst_score * MQS_WEIGHTS["hurst_exponent"] +
         coin_score * MQS_WEIGHTS["coin_flip"] +
-        bayesian_score * MQS_WEIGHTS["bayesian"]
+        bayesian_val * MQS_WEIGHTS["bayesian"]
     )
 
     # Нормализуем MQS от 0 до 100
@@ -2914,6 +2919,13 @@ def main():
                 det = res.get("details", {})
                 log.debug(f"{sym.split(':')[0]:12s} скор={ai_score:3.0f}/100 MQS={res['mqs']:.1f} rsi={det.get('rsi', '?')} rf={det.get('range_filter', '?')} st={det.get('supertrend', '?')}")
 
+            # --- Формируем список кандидатов ---
+            кандидаты = sorted(
+                [(s, d) for s, d in scores.items() if d.get("score_final", 0) >= MIN_SCORE],
+                key=lambda x: x[1]["score_final"],
+                reverse=True
+            )[:5]
+
             # --- Ищем лонг-кандидаты ---
             выбрана, фин_скор, цена, sr_info, side = None, 0, 0.0, {}, "long"
             for лучшая, данные in кандидаты:
@@ -3000,7 +3012,7 @@ def main():
             real_rr = abs(tp_цена - цена) / abs(цена - sl_цена)
             log.info(f"📐 ATR={atr_пт/цена*100:.2f}% SL={sl_dist_pct:.2f}% RR={real_rr:.1f}:1")
 
-            if real_rr < 2.0:
+            if real_rr < 1.999:
                 log.warning(f"⛔ RR={real_rr:.1f}:1 < 2:1 — пропуск {выбрана.split(':')[0]}")
                 time.sleep(SCAN_INTERVAL)
                 continue
