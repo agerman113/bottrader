@@ -22,7 +22,7 @@ LEVERAGE = 3
 TIMEFRAME_TA = "5m"
 TIMEFRAME_TREND = "1h"
 TIMEFRAME_4H = "4h"
-SCAN_INTERVAL = 120          # чаще сканируем для ускорения
+SCAN_INTERVAL = 60          # чаще сканируем для ускорения
 
 SYMBOLS = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "BNB/USDT:USDT", "XRP/USDT:USDT",
