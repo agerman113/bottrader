@@ -1,9 +1,3 @@
-## ✅ Полный исправленный файл **`bot_v22_ultimate.py`**
-
-<details open>
-<summary>🔎 Показать/скрыть весь код</summary>
-
-```python
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
