@@ -191,7 +191,7 @@ LIQUIDATIONS_ENABLED = True
 LIQUIDATION_THRESHOLD_USD = 1_000_000
 INSURANCE_FUND_ENABLED = True
 MARK_PRICE_CHECK_ENABLED = True
-MARK_PRICE_DIFF_THRESHOLD = 0.1
+MARK_PRICE_DIFF_THRESHOLD = 0.5 if TESTNET_MODE else 0.1
 TAKER_VOLUME_ENABLED = True
 TAKER_BUY_SELL_RATIO_THRESHOLD = 1.5
 
@@ -316,26 +316,33 @@ class BybitWrapper:
     def price_to_precision(self, symbol: str, price: float):
         return str(round(price, 2))
 
-    def amount_to_precision(self, symbol: str, amount: float):
+    def amount_to_precision(self, symbol: str, amount: float) -> float:
+        """
+        Возвращает количество, округлённое до допустимого шага лота.
+        НЕ принуждает к минимальному лоту 1!
+        """
         sym = symbol.replace("/", "").replace(":USDT", "")
-        whole_qty = {"SOLUSDT", "ADAUSDT", "XRPUSDT", "DOGEUSDT", "HBARUSDT",
-                     "XLMUSDT", "TRXUSDT", "VETUSDT", "NOTUSDT", "SUIUSDT",
-                     "APTUSDT", "NEARUSDT", "ATOMUSDT", "DOTUSDT", "LINKUSDT",
-                     "AVAXUSDT", "INJUSDT", "GRTUSDT", "ARBUSDT", "OPUSDT",
-                     "TIAUSDT", "JTOUSDT", "EIGENUSDT", "CATIUSDT", "BOMEUSDT",
-                     "WIFUSDT", "PEPEUSDT", "VIRTUALUSDT", "RENDERUSDT", "FETUSDT",
-                     "WLDUSDT", "ARKMMUSDT", "IOUSDT", "ONDOUSDT"}
-        tenth_qty = {"ETHUSDT", "BNBUSDT", "TONUSDT", "AAVEUSDT", "UNIUSDT"}
-        hundredth_qty = {"BTCUSDT", "TAOUSDT"}
+        # Минимальный объём ордера Bybit (можно оставить 0.001 для линеек)
+        min_qty = 0.001
 
-        if sym in whole_qty:
-            return max(1, round(amount))
-        elif sym in tenth_qty:
-            return max(0.1, round(amount, 1))
-        elif sym in hundredth_qty:
-            return max(0.01, round(amount, 2))
+        # Определяем шаг лота по цене (грубая оценка)
+        try:
+            ticker = self.fetch_ticker(symbol)
+            price = ticker["last"]
+        except:
+            price = 100  # на всякий случай
+
+        if price > 5000:
+            step = 0.001       # BTC, TAO
+        elif price > 500:
+            step = 0.01        # ETH, BNB, SOL...
+        elif price > 10:
+            step = 0.1
         else:
-            return round(amount, 3)
+            step = 1.0         # дешёвые монеты
+
+        qty = max(min_qty, round(amount / step) * step)
+        return qty
 
     def private_post_v5_position_trading_stop(self, params: dict):
         self.session.set_trading_stop(
@@ -2489,7 +2496,7 @@ def main():
             real_rr = abs(tp_цена - цена) / abs(цена - sl_цена)
             log.info(f"📐 ATR={atr_пт/цена*100:.2f}% SL={sl_dist_pct:.2f}% RR={real_rr:.1f}:1")
 
-            if real_rr < 2.0:
+            if real_rr < 1.999:
                 log.warning(f"⛔ RR={real_rr:.1f}:1 < 2:1 — пропуск {выбрана.split(':')[0]}")
                 time.sleep(SCAN_INTERVAL)
                 continue
@@ -2520,6 +2527,21 @@ def main():
 
             баланс_до = полный_баланс_usdt()
             время_входа = time.time()
+            # Проверяем, хватит ли свободного баланса на позицию такого размера
+            предв_qty = margin * LEVERAGE / цена
+            предв_qty = float(exchange.amount_to_precision(выбрана, предв_qty))
+            предв_маржа = (предв_qty * цена) / LEVERAGE
+            if предв_маржа > свободный * 0.95:
+                log.warning(f"⚠️ Маржа {предв_маржа:.2f}U > доступно {свободный:.2f}U — уменьшаем до допустимого")
+                margin = свободный * 0.9
+                qty_пересч = margin * LEVERAGE / цена
+                qty_пересч = float(exchange.amount_to_precision(выбрана, qty_пересч))
+                if qty_пересч <= 0:
+                    log.error("Недостаточно средств даже на минимальный лот — пропускаем")
+                    continue
+                margin = (qty_пересч * цена) / LEVERAGE
+                log.info(f"Скорректировано: qty={qty_пересч}, маржа≈{margin:.2f}U")
+
             вход_цена, кол_во = открыть_позицию(выбрана, margin, tp_цена, sl_цена, side)
 
             if вход_цена is None or кол_во is None:
