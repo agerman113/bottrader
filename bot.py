@@ -35,7 +35,7 @@ SYMBOLS = [
 MIN_SCORE = 45
 
 # --- Риск‑менеджмент ---
-BASE_RISK_PCT = 0.8
+BASE_RISK_PCT = 0.8          # процент риска на сделку (можно увеличить до 1.0)
 MAX_RISK_PCT = 1.2
 MAX_MARGIN_PCT = 25.0
 MIN_BALANCE = 5.0
@@ -194,11 +194,11 @@ class BybitWrapper:
             ticker = self.fetch_ticker(symbol)
             price = ticker["last"]
             if price > 5000:
-                min_qty = max(min_qty, 0.001)
+                min_qty = max(min_qty, 0.001)   # BTC, TAO
             elif price > 500:
-                min_qty = max(min_qty, 0.01)
+                min_qty = max(min_qty, 0.1)     # ETH, SOL, BNB и т.д.
             elif price > 50:
-                min_qty = max(min_qty, 0.1)
+                min_qty = max(min_qty, 0.1)     # для монет > 50$ тоже минимум 0.1
         except:
             pass
 
@@ -761,16 +761,19 @@ def main():
             margin = баланс_usdt() * BASE_RISK_PCT / 100
             margin = min(margin, свободный * 0.9)
 
-            # Проверим, что можем купить минимальный лот
+            # === Автоматическое повышение маржи до минимально допустимой ===
             ticker = exchange.fetch_ticker(выбрана)
-            if ticker["last"] == 0:
-                continue
-            min_qty = exchange.amount_to_precision(выбрана, 0)
-            min_margin = (min_qty * ticker["last"]) / LEVERAGE
+            if ticker["last"] == 0: continue
+            min_qty = exchange.amount_to_precision(выбрана, 0)       # минимальный лот
+            min_margin = (min_qty * ticker["last"]) / LEVERAGE       # необходимая маржа
             if margin < min_margin:
-                log.warning(f"⚠️ Маржа {margin:.2f}U < минимальная {min_margin:.2f}U для {выбрана.split(':')[0]} – пропускаем")
-                time.sleep(SCAN_INTERVAL)
-                continue
+                log.warning(f"⚠️ Маржа {margin:.2f}U < минимальная {min_margin:.2f}U → повышаем до минимальной")
+                margin = min_margin
+                # Проверяем, что повышенная маржа не превышает свободный баланс
+                if margin > свободный * 0.95:
+                    log.error(f"Недостаточно средств для мин. лота ({min_qty} {выбрана.split(':')[0]})")
+                    time.sleep(SCAN_INTERVAL)
+                    continue
 
             log.info(f"✅ ВХОД {side.upper()}: скор={скор} SL={sl_цена:.8f} TP={tp_цена:.8f} маржа={margin:.2f}U")
 
