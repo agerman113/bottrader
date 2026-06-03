@@ -4,6 +4,11 @@
 """
 Mini Speed Trader – финальная версия для быстрого теста гипотез.
 Классический теханализ, трейлинг, безубыток.
+
+Новое:
+- Сила сигнала (WEAK / NORMAL / STRONG / ULTRA) → динамический размер позиции
+- Частичное закрытие позиции на уровнях прибыли
+- Винрейт и статистика по диапазонам скора
 """
 
 import os, sys, time, json, logging, requests, pandas as pd, numpy as np, math
@@ -35,13 +40,26 @@ SYMBOLS = [
 MIN_SCORE = 45
 
 # --- Риск‑менеджмент ---
-BASE_RISK_PCT = 0.8
-MAX_RISK_PCT = 1.2
+BASE_RISK_PCT = 0.8          # базовый % от баланса на сделку (NORMAL сигнал)
 MAX_MARGIN_PCT = 25.0
 MIN_BALANCE = 5.0
 MAX_DRAWDOWN_PCT = 15.0
 DAILY_LOSS_LIMIT_PCT = 3.0
 DAILY_LOSS_PAUSE_SEC = 10800
+
+# --- Сила сигнала → множитель размера позиции ---
+# Скор 45–59  → WEAK   → 0.5× от BASE_RISK_PCT
+# Скор 60–74  → NORMAL → 1.0×
+# Скор 75–84  → STRONG → 1.5×
+# Скор 85–100 → ULTRA  → 2.0×
+SIGNAL_STRENGTH_TIERS = [
+    (85, "ULTRA",  2.0),
+    (75, "STRONG", 1.5),
+    (60, "NORMAL", 1.0),
+    (45, "WEAK",   0.5),
+]
+# Минимальное количество сделок в диапазоне скора прежде чем применять адаптивный множитель
+ADAPTIVE_MIN_TRADES = 10
 
 # --- TP / SL ---
 TP_PERCENT = 3.0
@@ -53,9 +71,18 @@ ATR_TP_MULT = 3.0
 
 # --- Трейлинг / Безубыток ---
 PARTIAL_BE_ENABLED = True
-PARTIAL_BE_PROFIT = 0.5
-MIN_PROFIT_FOR_TRAIL = 1.0
+PARTIAL_BE_PROFIT = 1.0      # % прибыли для переноса SL в безубыток (было 0.5, слишком рано)
+MIN_PROFIT_FOR_TRAIL = 1.5
 TRAILING_OFFSET_PCT = 0.6
+
+# --- Частичное закрытие позиции ---
+# Список (порог_прибыли_%, доля_закрытия) — выполняются последовательно
+# Пример: при +2% закрыть 30%, при +4% ещё 30% от остатка
+PARTIAL_CLOSE_ENABLED = True
+PARTIAL_CLOSE_LEVELS = [
+    (2.0, 0.30),   # при +2.0% → закрыть 30% позиции
+    (4.0, 0.30),   # при +4.0% → закрыть ещё 30% от остатка
+]
 
 # --- Фильтры ---
 VOLUME_SPIKE_MULT = 3.5
@@ -88,6 +115,95 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(), logging.FileHandler("mini_speed.log", encoding="utf-8")],
 )
 log = logging.getLogger(__name__)
+
+
+# ============================================================
+# СИЛА СИГНАЛА
+# ============================================================
+def определить_силу_сигнала(score: int) -> tuple:
+    """
+    Возвращает (название, множитель_маржи) по скору.
+    Если накоплена статистика — адаптирует множитель на основе реального винрейта.
+    """
+    # Базовый тир
+    tier_name, tier_mult = "WEAK", 0.5
+    for threshold, name, mult in SIGNAL_STRENGTH_TIERS:
+        if score >= threshold:
+            tier_name, tier_mult = name, mult
+            break
+
+    # Адаптивная корректировка на основе накопленной статистики
+    winrate_data = stats.get("винрейт_по_скору", {})
+    tier_stats = winrate_data.get(tier_name, {"сделок": 0, "побед": 0})
+    n = tier_stats.get("сделок", 0)
+
+    if n >= ADAPTIVE_MIN_TRADES:
+        winrate = tier_stats.get("побед", 0) / n
+        # Если реальный винрейт < 40% — уменьшаем позицию вдвое
+        if winrate < 0.40:
+            tier_mult *= 0.5
+            log.debug(f"[{tier_name}] WR={winrate:.0%} < 40% → множитель снижен до {tier_mult:.2f}×")
+        # Если реальный винрейт > 65% — увеличиваем на 25%
+        elif winrate > 0.65:
+            tier_mult = min(tier_mult * 1.25, 3.0)
+            log.debug(f"[{tier_name}] WR={winrate:.0%} > 65% → множитель повышен до {tier_mult:.2f}×")
+
+    return tier_name, tier_mult
+
+
+def обновить_винрейт(tier_name: str, победа: bool):
+    """Обновляет статистику побед/поражений по тиру сигнала."""
+    if "винрейт_по_скору" not in stats:
+        stats["винрейт_по_скору"] = {}
+    wr = stats["винрейт_по_скору"]
+    if tier_name not in wr:
+        wr[tier_name] = {"сделок": 0, "побед": 0}
+    wr[tier_name]["сделок"] += 1
+    if победа:
+        wr[tier_name]["побед"] += 1
+
+
+def распечатать_винрейт():
+    """Выводит сводную таблицу винрейта по тирам."""
+    wr = stats.get("винрейт_по_скору", {})
+    if not wr:
+        log.info("📊 Статистика винрейта: данных пока нет")
+        return
+    log.info("=" * 55)
+    log.info("📊 ВИНРЕЙТ ПО СИЛЕ СИГНАЛА:")
+    log.info(f"  {'Тир':<8} {'Сделок':>7} {'Побед':>7} {'WR':>7} {'Статус':>12}")
+    log.info("-" * 55)
+    total_trades = total_wins = 0
+    for tier_name, _, _ in reversed(SIGNAL_STRENGTH_TIERS):
+        d = wr.get(tier_name, {"сделок": 0, "побед": 0})
+        n, w = d["сделок"], d["побед"]
+        total_trades += n
+        total_wins += w
+        if n == 0:
+            log.info(f"  {tier_name:<8} {'—':>7} {'—':>7} {'—':>7} {'нет данных':>12}")
+            continue
+        wr_pct = w / n * 100
+        status = "✅ хорошо" if wr_pct >= 55 else ("⚠️ слабо" if wr_pct >= 40 else "❌ плохо")
+        log.info(f"  {tier_name:<8} {n:>7} {w:>7} {wr_pct:>6.1f}% {status:>12}")
+    if total_trades > 0:
+        log.info("-" * 55)
+        log.info(f"  {'ИТОГО':<8} {total_trades:>7} {total_wins:>7} {total_wins/total_trades*100:>6.1f}%")
+    log.info("=" * 55)
+
+    # Ожидаемое мат. значение по тиру
+    log.info("📈 ОЖИДАЕМОЕ ЗНАЧЕНИЕ (при RR=2:1):")
+    for tier_name, _, base_mult in reversed(SIGNAL_STRENGTH_TIERS):
+        d = wr.get(tier_name, {"сделок": 0, "побед": 0})
+        n = d["сделок"]
+        if n < ADAPTIVE_MIN_TRADES:
+            log.info(f"  {tier_name:<8} недостаточно данных ({n}/{ADAPTIVE_MIN_TRADES})")
+            continue
+        wr_val = d["побед"] / n
+        # EV = WR * TP_pct - (1-WR) * SL_pct, нормализованное к 1R
+        ev = wr_val * 2 - (1 - wr_val) * 1
+        log.info(f"  {tier_name:<8} WR={wr_val:.0%}  EV={ev:+.2f}R  {'прибыльно ✅' if ev > 0 else 'убыточно ❌'}")
+    log.info("=" * 55)
+
 
 # ============================================================
 # API‑ОБЁРТКА
@@ -189,29 +305,18 @@ class BybitWrapper:
     def price_to_precision(self, symbol, price):
         return str(round(price, 2))
 
-    def get_min_qty(self, symbol: str) -> float:
-        """Возвращает минимальный размер ордера для символа из кэша INSTRUMENTS."""
-        sym = symbol.replace("/", "").replace(":USDT", "")
-        info = INSTRUMENTS.get(sym, {"minOrderQty": 0.001, "qtyStep": 0.001})
-        return info["minOrderQty"]
-
     def amount_to_precision(self, symbol: str, amount: float) -> float:
         """
-        Округляет amount до шага лота и проверяет минимальный размер.
-        Возвращает скорректированное количество или 0 если невозможно.
-        НЕ делает запросов к бирже — использует только INSTRUMENTS.
+        Округляет amount до шага лота. Возвращает 0.0 если ниже минимума.
+        Не делает запросов к бирже — только INSTRUMENTS.
         """
         sym = symbol.replace("/", "").replace(":USDT", "")
         info = INSTRUMENTS.get(sym, {"minOrderQty": 0.001, "qtyStep": 0.001})
         step = info["qtyStep"]
         min_qty = info["minOrderQty"]
-
-        # Округляем вниз до ближайшего шага
         qty = math.floor(amount / step) * step
         qty = round(qty, 10)
-
         if qty < min_qty:
-            # Возвращаем 0 — вызывающий код должен обработать это
             return 0.0
         return qty
 
@@ -358,7 +463,7 @@ def calc_support_resistance(df, period=SR_PERIOD):
 
 
 # ============================================================
-# СКОРИНГ (ТОЛЬКО КЛАССИКА)
+# СКОРИНГ
 # ============================================================
 def получить_скор(symbol):
     try:
@@ -423,7 +528,7 @@ def получить_скор(symbol):
         last3_bear = all(df_ta["c"].iloc[-i] < df_ta["o"].iloc[-i] for i in range(1, 4))
         if last3_bear: score -= 20
 
-        # Bybit AI ratio (простая версия)
+        # Bybit AI ratio
         try:
             coin = symbol.split("/")[0]
             url = f"https://api.bybit.com/v5/market/account-ratio?category=linear&symbol={coin}USDT&period=1h&limit=1"
@@ -455,26 +560,12 @@ def получить_скор(symbol):
 # ИСПОЛНЕНИЕ ОРДЕРОВ
 # ============================================================
 def установить_плечо(symbol, leverage):
-    """Устанавливает плечо. Ошибка 110043 (уже установлено) — не фатальна."""
-    try:
-        result = exchange.set_leverage(symbol, leverage)
-        return True  # set_leverage уже логирует WARNING при ошибке, это нормально
-    except Exception:
-        return False
+    exchange.set_leverage(symbol, leverage)
+    return True
 
 
 def открыть_позицию(symbol, margin_usdt, tp_price, sl_price, side="long"):
-    """
-    Открывает позицию.
-    Возвращает (entry_price, qty) или (None, None) при ошибке.
-
-    Исправления:
-    - Плечо устанавливается с игнорированием ошибки 110043 (уже установлено).
-    - qty вычисляется через amount_to_precision без лишних запросов к бирже.
-    - Если qty == 0 (ниже минимального лота) — сразу возвращаем None с понятным логом.
-    """
     try:
-        # Плечо — ошибка «already set» не мешает открытию
         установить_плечо(symbol, LEVERAGE)
 
         ticker = exchange.fetch_ticker(symbol)
@@ -491,9 +582,8 @@ def открыть_позицию(symbol, margin_usdt, tp_price, sl_price, side=
             sym_clean = symbol.replace("/", "").replace(":USDT", "")
             min_qty = INSTRUMENTS.get(sym_clean, {}).get("minOrderQty", "?")
             log.error(
-                f"Рассчитанный qty={qty_raw:.6f} ниже минимального лота ({min_qty}) "
-                f"для {symbol}. Маржа {margin_usdt:.2f}U × {LEVERAGE}x / цена {price:.4f} "
-                f"= {qty_raw:.6f} — увеличьте маржу или выберите другой инструмент."
+                f"qty={qty_raw:.6f} ниже мин. лота ({min_qty}) для {symbol}. "
+                f"Маржа {margin_usdt:.2f}U × {LEVERAGE}x / {price:.4f} = {qty_raw:.6f}"
             )
             return None, None
 
@@ -538,6 +628,27 @@ def закрыть_позицию(symbol, qty, side):
     return False
 
 
+def частично_закрыть(symbol, qty_to_close, side):
+    """
+    Закрывает часть позиции. Возвращает фактически закрытое кол-во или 0.
+    qty_to_close округляется до шага лота; если ниже минимума — пропускаем.
+    """
+    sym_clean = symbol.replace("/", "").replace(":USDT", "")
+    min_qty = INSTRUMENTS.get(sym_clean, {}).get("minOrderQty", 0.001)
+    qty_rounded = exchange.amount_to_precision(symbol, qty_to_close)
+    if qty_rounded < min_qty:
+        log.warning(f"Частичное закрытие: {qty_to_close:.6f} < мин. лот {min_qty} — пропуск")
+        return 0.0
+    close_side = "sell" if side == "long" else "buy"
+    try:
+        exchange.create_market_order(symbol, close_side, qty_rounded, reduce_only=True)
+        log.info(f"💰 Частичное закрытие: {qty_rounded} {sym_clean} ({side})")
+        return qty_rounded
+    except Exception as e:
+        log.warning(f"Ошибка частичного закрытия: {e}")
+        return 0.0
+
+
 def проверить_signal_exit(symbol, side):
     if not SIGNAL_EXIT_ENABLED: return False
     try:
@@ -556,6 +667,14 @@ def проверить_signal_exit(symbol, side):
 # МОНИТОРИНГ ПОЗИЦИИ
 # ============================================================
 def мониторить_позицию(symbol, entry_price, qty, открыта_в, sl_цена, tp_цена, side="long"):
+    """
+    Следит за позицией. Реализует:
+    1. Безубыток при PARTIAL_BE_PROFIT% прибыли
+    2. Трейлинг-стоп после MIN_PROFIT_FOR_TRAIL%
+    3. Частичное закрытие на уровнях PARTIAL_CLOSE_LEVELS
+    4. Signal Exit при смене Supertrend
+    5. Принудительное закрытие по дедлайну
+    """
     deadline = открыта_в + TRADE_MAX_LIFETIME
     coin = symbol.split("/")[0]
     fee_buffer = 0.001
@@ -570,13 +689,18 @@ def мониторить_позицию(symbol, entry_price, qty, открыта
     trailing_активен = False
     trailing_offset_pct = TRAILING_OFFSET_PCT / 100.0
 
-    log.info(f"Мониторинг {coin} {side} вход={entry_price:.8f} SL={sl_цена:.8f} TP={tp_цена:.8f}")
+    # Состояние частичного закрытия
+    # partial_levels_done[i] = True если уровень i уже исполнен
+    partial_levels_done = [False] * len(PARTIAL_CLOSE_LEVELS)
+    текущий_qty = qty   # qty уменьшается по мере частичных закрытий
+
+    log.info(f"Мониторинг {coin} {side} | вход={entry_price:.6f} | SL={sl_цена:.6f} | TP={tp_цена:.6f} | qty={qty}")
 
     while True:
         now = time.time()
         if now >= deadline:
             log.warning("Дедлайн – закрываем")
-            закрыть_позицию(symbol, qty, side)
+            закрыть_позицию(symbol, текущий_qty, side)
             return "timeout"
         time.sleep(15)
 
@@ -585,6 +709,7 @@ def мониторить_позицию(symbol, entry_price, qty, открыта
             sym_clean = symbol.replace("/", "").replace(":USDT", "")
             active = [p for p in positions if p["symbol"] == sym_clean and p["side"] == side]
             if not active:
+                # Позиция закрыта биржей (TP или SL)
                 cur_price = exchange.fetch_ticker(symbol)["last"]
                 hit_tp = (
                     (cur_price >= entry_price * (1 + TP_PERCENT/100*0.7)) if side == "long"
@@ -594,53 +719,88 @@ def мониторить_позицию(symbol, entry_price, qty, открыта
 
             pos = active[0]
             cur_price = exchange.fetch_ticker(symbol)["last"]
-            if cur_price == 0: continue
+            if cur_price == 0:
+                continue
             pnl_pct = (
                 (cur_price - entry_price) / entry_price * 100 if side == "long"
                 else (entry_price - cur_price) / entry_price * 100
             )
-            qty_actual = abs(float(pos.get("contracts", 0) or 0))
+            текущий_qty = abs(float(pos.get("contracts", 0) or 0))
 
-            # Безубыток
+            # --------------------------------------------------
+            # 1. Частичное закрытие
+            # --------------------------------------------------
+            if PARTIAL_CLOSE_ENABLED:
+                for i, (threshold_pct, close_fraction) in enumerate(PARTIAL_CLOSE_LEVELS):
+                    if partial_levels_done[i]:
+                        continue
+                    if pnl_pct >= threshold_pct:
+                        qty_to_close = текущий_qty * close_fraction
+                        closed = частично_закрыть(symbol, qty_to_close, side)
+                        if closed > 0:
+                            partial_levels_done[i] = True
+                            текущий_qty = max(0, текущий_qty - closed)
+                            log.info(
+                                f"💰 Частичное закрытие уровень {i+1}: "
+                                f"+{threshold_pct}% → закрыто {closed:.4f}, "
+                                f"остаток {текущий_qty:.4f}"
+                            )
+                        break  # только один уровень за итерацию
+
+            # --------------------------------------------------
+            # 2. Безубыток
+            # --------------------------------------------------
             if PARTIAL_BE_ENABLED and not be_done and pnl_pct >= PARTIAL_BE_PROFIT:
                 mark = exchange.fetch_ticker(symbol).get("mark_price", cur_price)
-                if (side == "long" and breakeven_price < mark * 0.9995) or \
-                   (side == "short" and breakeven_price > mark * 1.0005):
+                ok_long = side == "long" and breakeven_price < mark * 0.9995
+                ok_short = side == "short" and breakeven_price > mark * 1.0005
+                if ok_long or ok_short:
                     if exchange.update_stop_loss(symbol, breakeven_price):
                         текущий_sl = breakeven_price
                         be_done = True
-                        trailing_активен = True
-                        log.info(f"🎯 SL → БЕЗУБЫТОК: {breakeven_price:.8f}")
+                        log.info(f"🎯 SL → БЕЗУБЫТОК: {breakeven_price:.6f}")
 
-            # Трейлинг
-            if not trailing_активен and be_done:
-                if pnl_pct >= MIN_PROFIT_FOR_TRAIL:
-                    trailing_активен = True
-                    log.info(f"🚀 ТРЕЙЛИНГ АКТИВИРОВАН @ {cur_price:.8f}")
+            # --------------------------------------------------
+            # 3. Трейлинг
+            # --------------------------------------------------
+            if not trailing_активен and pnl_pct >= MIN_PROFIT_FOR_TRAIL:
+                trailing_активен = True
+                log.info(f"🚀 ТРЕЙЛИНГ АКТИВИРОВАН @ {cur_price:.6f}")
 
-            if trailing_активен and be_done:
+            if trailing_активен:
                 if side == "long":
-                    if cur_price > пиковая_цена: пиковая_цена = cur_price
+                    if cur_price > пиковая_цена:
+                        пиковая_цена = cur_price
                     new_sl = пиковая_цена * (1 - trailing_offset_pct)
                     if new_sl > текущий_sl:
                         if exchange.update_stop_loss(symbol, new_sl):
                             текущий_sl = new_sl
-                            log.info(f"📈 Трейлинг SL → {new_sl:.8f}")
+                            log.info(f"📈 Трейлинг SL → {new_sl:.6f}")
                 else:
-                    if cur_price < пиковая_цена: пиковая_цена = cur_price
+                    if cur_price < пиковая_цена:
+                        пиковая_цена = cur_price
                     new_sl = пиковая_цена * (1 + trailing_offset_pct)
                     if new_sl < текущий_sl:
                         if exchange.update_stop_loss(symbol, new_sl):
                             текущий_sl = new_sl
-                            log.info(f"📉 Трейлинг SL → {new_sl:.8f}")
+                            log.info(f"📉 Трейлинг SL → {new_sl:.6f}")
 
-            # Signal Exit
+            # --------------------------------------------------
+            # 4. Signal Exit
+            # --------------------------------------------------
             if SIGNAL_EXIT_ENABLED and be_done and проверить_signal_exit(symbol, side):
                 log.info("Signal Exit: разворот – закрываем")
-                закрыть_позицию(symbol, qty_actual, side)
+                закрыть_позицию(symbol, текущий_qty, side)
                 return "tp" if pnl_pct > 0 else "sl"
 
-            log.info(f"[{coin}] {cur_price:.4f} P&L={pnl_pct:+.2f}% SL={текущий_sl:.4f} BE={be_done} Trail={trailing_активен}")
+            # --------------------------------------------------
+            # 5. Статус-лог
+            # --------------------------------------------------
+            partial_info = f" ч.закр={sum(partial_levels_done)}/{len(PARTIAL_CLOSE_LEVELS)}" if PARTIAL_CLOSE_ENABLED else ""
+            log.info(
+                f"[{coin}] {cur_price:.4f} | P&L={pnl_pct:+.2f}% | "
+                f"SL={текущий_sl:.4f} | BE={be_done} | Trail={trailing_активен}{partial_info}"
+            )
 
         except Exception as e:
             log.warning(f"Ошибка мониторинга: {e}")
@@ -680,7 +840,8 @@ def загрузить_состояние():
         with open(STATE_FILE, "r") as f:
             saved = json.load(f)
         for k in stats:
-            if k in saved: stats[k] = saved[k]
+            if k in saved:
+                stats[k] = saved[k]
     except: pass
 
 def сохранить_состояние():
@@ -695,6 +856,13 @@ stats = {
     "прибыль_usdt": 0.0, "убыток_usdt": 0.0, "депозит_старт": 0.0,
     "баланс_начало_дня": 0.0, "дата_дня": "", "старт_время": "",
     "последний_отчёт": 0.0, "sl_streak": 0,
+    # Новое: статистика по тирам сигнала
+    "винрейт_по_скору": {
+        "ULTRA":  {"сделок": 0, "побед": 0},
+        "STRONG": {"сделок": 0, "побед": 0},
+        "NORMAL": {"сделок": 0, "побед": 0},
+        "WEAK":   {"сделок": 0, "побед": 0},
+    },
 }
 
 
@@ -706,9 +874,12 @@ def main():
     загрузить_состояние()
     stats["запусков"] += 1
     баланс = полный_баланс_usdt()
-    if stats["депозит_старт"] <= 0: stats["депозит_старт"] = баланс
-    if not stats["старт_время"]: stats["старт_время"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    if stats["депозит_старт"] <= 0:
+        stats["депозит_старт"] = баланс
+    if not stats["старт_время"]:
+        stats["старт_время"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
     log.info(f"Mini Speed Trader | Баланс: {баланс:.2f} USDT | Мин. скор: {MIN_SCORE}")
+    распечатать_винрейт()
 
     заблокированные = {}
     while True:
@@ -725,7 +896,9 @@ def main():
                 time.sleep(60)
                 continue
 
+            # --------------------------------------------------
             # Сканирование
+            # --------------------------------------------------
             scores = {}
             for sym in SYMBOLS:
                 if sym in заблокированные and time.time() < заблокированные[sym]:
@@ -740,7 +913,7 @@ def main():
                 if diff >= MARK_PRICE_DIFF_THRESHOLD:
                     continue
 
-                # Требуем бычий 4h тренд
+                # Бычий 4h тренд
                 raw_4h = exchange.fetch_ohlcv(sym, TIMEFRAME_4H, limit=60)
                 if len(raw_4h) >= 55:
                     df_4h = pd.DataFrame(raw_4h, columns=["ts","o","h","l","c","v"])
@@ -753,17 +926,16 @@ def main():
                 scores[sym] = res
                 log.debug(f"{sym}: скор={res['score']}")
 
-            # Выбор кандидата
+            # --------------------------------------------------
+            # Выбор кандидата (лонг)
+            # --------------------------------------------------
             кандидаты = sorted(
                 [(s, d) for s, d in scores.items() if d["score"] >= MIN_SCORE],
                 key=lambda x: x[1]["score"], reverse=True
             )[:3]
-            if not кандидаты:
-                log.info("Нет кандидатов – ждём")
-                time.sleep(SCAN_INTERVAL)
-                continue
 
             выбрана, скор, цена, sr_info, side = None, 0, 0.0, {}, "long"
+
             for лучшая, данные in кандидаты:
                 sr = данные["sr"]
                 if sr.get("near_resistance") and sr.get("dist_to_res_pct", 99) < 0.3:
@@ -772,8 +944,8 @@ def main():
                 log.info(f"► Выбрана {лучшая.split(':')[0]} (лонг) скор={скор} цена={цена:.8f}")
                 break
 
+            # Шорт если лонг не найден
             if выбрана is None:
-                # Попробуем шорт
                 for sym in SYMBOLS:
                     raw_4h = exchange.fetch_ohlcv(sym, TIMEFRAME_4H, limit=60)
                     if len(raw_4h) < 55:
@@ -794,7 +966,17 @@ def main():
                     time.sleep(SCAN_INTERVAL)
                     continue
 
+            # --------------------------------------------------
+            # Определяем силу сигнала → множитель маржи
+            # --------------------------------------------------
+            tier_name, tier_mult = определить_силу_сигнала(скор)
+            log.info(
+                f"⚡ Сила сигнала: {tier_name} (скор={скор}, множитель={tier_mult:.2f}×)"
+            )
+
+            # --------------------------------------------------
             # Расчёт TP/SL
+            # --------------------------------------------------
             atr_pt = 0.0
             raw_atr = exchange.fetch_ohlcv(выбрана, TIMEFRAME_TA, limit=50)
             if len(raw_atr) >= 20:
@@ -802,19 +984,19 @@ def main():
                 atr_pt = float(calc_atr(df_atr, 14).iloc[-1])
 
             sl_dist = max(MIN_SL_PERCENT, min(MAX_SL_PERCENT, (atr_pt*ATR_SL_MULT/цена)*100)) if atr_pt > 0 else SL_PERCENT
-            tp_dist = max(TP_PERCENT, sl_dist*2)
+            tp_dist = max(TP_PERCENT, sl_dist * 2)
 
             if side == "long":
                 sl_цена = цена * (1 - sl_dist/100)
                 tp_цена = цена * (1 + tp_dist/100)
                 support = sr_info.get("support", sl_цена)
-                if support < sl_цена and support > цена*0.97:
+                if support < sl_цена and support > цена * 0.97:
                     sl_цена = support * 0.998
             else:
                 sl_цена = цена * (1 + sl_dist/100)
                 tp_цена = цена * (1 - tp_dist/100)
                 resistance = sr_info.get("resistance", sl_цена)
-                if resistance > sl_цена and resistance < цена*1.03:
+                if resistance > sl_цена and resistance < цена * 1.03:
                     sl_цена = resistance * 1.002
 
             real_rr = abs(tp_цена - цена) / abs(цена - sl_цена)
@@ -823,11 +1005,12 @@ def main():
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            # -------------------------------------------------------
-            # Расчёт маржи с проверкой минимального лота
-            # -------------------------------------------------------
-            margin = свободный * BASE_RISK_PCT / 100
-            margin = min(margin, свободный * 0.9)
+            # --------------------------------------------------
+            # Расчёт маржи с учётом силы сигнала
+            # --------------------------------------------------
+            base_margin = свободный * BASE_RISK_PCT / 100
+            margin = base_margin * tier_mult
+            margin = min(margin, свободный * 0.9)   # не более 90% свободного баланса
 
             ticker = exchange.fetch_ticker(выбрана)
             if ticker["last"] == 0:
@@ -836,28 +1019,30 @@ def main():
 
             sym_clean = выбрана.replace("/", "").replace(":USDT", "")
             min_qty = INSTRUMENTS.get(sym_clean, {}).get("minOrderQty", 0.001)
-            # Минимальная маржа = min_qty * price / leverage
             min_margin_needed = (min_qty * current_price) / LEVERAGE
 
             if margin < min_margin_needed:
                 log.warning(
-                    f"⚠️ Расчётная маржа {margin:.4f}U < необходимой {min_margin_needed:.4f}U "
-                    f"для мин. лота {min_qty} {sym_clean} @ {current_price:.4f} "
-                    f"с плечом x{LEVERAGE} → повышаем до минимальной"
+                    f"⚠️ Маржа {margin:.4f}U < мин. {min_margin_needed:.4f}U "
+                    f"для {sym_clean} → повышаем до минимальной"
                 )
                 margin = min_margin_needed
 
-            # Финальная проверка: хватает ли свободного баланса
             if margin > свободный * 0.95:
                 log.error(
-                    f"❌ Недостаточно средств для мин. лота {min_qty} {sym_clean}: "
-                    f"нужно {margin:.4f}U, доступно {свободный:.4f}U — пропуск"
+                    f"❌ Недостаточно средств: нужно {margin:.4f}U, доступно {свободный:.4f}U — пропуск"
                 )
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            log.info(f"✅ ВХОД {side.upper()}: скор={скор} SL={sl_цена:.8f} TP={tp_цена:.8f} маржа={margin:.2f}U")
+            log.info(
+                f"✅ ВХОД {side.upper()}: скор={скор} [{tier_name} ×{tier_mult}] "
+                f"SL={sl_цена:.6f} TP={tp_цена:.6f} маржа={margin:.2f}U"
+            )
 
+            # --------------------------------------------------
+            # Открываем позицию
+            # --------------------------------------------------
             время_входа = time.time()
             entry_price, qty = открыть_позицию(выбрана, margin, tp_цена, sl_цена, side)
             if entry_price is None:
@@ -865,40 +1050,54 @@ def main():
                 continue
 
             stats["сделок_всего"] += 1
-            результат = мониторить_позицию(выбрана, entry_price, qty, время_входа, sl_цена, tp_цена, side)
+            результат = мониторить_позицию(
+                выбрана, entry_price, qty, время_входа, sl_цена, tp_цена, side
+            )
 
             баланс_после = полный_баланс_usdt()
             pnl = баланс_после - баланс
             duration = (time.time() - время_входа) / 60
+            победа = результат == "tp"
+
+            # --------------------------------------------------
+            # Обновляем статистику по тиру
+            # --------------------------------------------------
+            обновить_винрейт(tier_name, победа)
 
             if результат == "tp":
                 stats["тейкпрофит"] += 1
                 stats["прибыль_usdt"] += max(0, pnl)
                 stats["sl_streak"] = 0
                 заблокированные[выбрана] = time.time() + SYMBOL_BLOCK_AFTER_TP * 60
-                log.info(f"✅ TP: прибыль ≈{pnl:+.4f} USDT")
+                log.info(f"✅ TP [{tier_name}]: прибыль ≈{pnl:+.4f} USDT")
             elif результат == "sl":
                 stats["стоплосс"] += 1
                 stats["убыток_usdt"] += abs(min(0, pnl))
                 stats["sl_streak"] += 1
                 заблокированные[выбрана] = time.time() + SYMBOL_BLOCK_AFTER_SL * 60
-                log.warning(f"❌ SL: убыток ≈{pnl:+.4f} USDT streak={stats['sl_streak']}")
+                log.warning(f"❌ SL [{tier_name}]: убыток ≈{pnl:+.4f} USDT streak={stats['sl_streak']}")
             else:
                 stats["таймаут"] += 1
                 stats["убыток_usdt"] += abs(min(0, pnl))
                 stats["sl_streak"] = 0
                 заблокированные[выбрана] = time.time() + SYMBOL_BLOCK_AFTER_TP * 60
-                log.warning(f"⏰ Таймаут: P&L ≈{pnl:+.4f} USDT")
+                log.warning(f"⏰ Таймаут [{tier_name}]: P&L ≈{pnl:+.4f} USDT")
 
             запись = {
                 "время": datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
-                "symbol": выбрана, "side": side, "score": скор,
+                "symbol": выбрана, "side": side,
+                "score": скор, "tier": tier_name, "margin_mult": tier_mult,
                 "entry": entry_price, "sl": sl_цена, "tp": tp_цена,
                 "pnl": round(pnl, 4), "duration_min": round(duration, 1),
                 "результат": результат,
             }
             сохранить_сделку(запись)
             сохранить_состояние()
+
+            # Печатаем винрейт каждые 5 сделок
+            if stats["сделок_всего"] % 5 == 0:
+                распечатать_винрейт()
+
             log.info("Сделка завершена – пауза 60 сек")
             time.sleep(60)
 
