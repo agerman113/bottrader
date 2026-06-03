@@ -3690,8 +3690,16 @@ def main():
                 if not тренд_4h_бычий(sym):
                     continue
 
-                # Полный скоринг
-                res = получить_скор(sym)
+                                # Выбор режима скоринга
+                if EXPRESS_MODE:
+                    res = получить_скор_экспресс(sym)
+                    # Корректировка AI‑соотношением
+                    ai_score = применить_ai_корректировку(res["score"], sym)
+                    res["score_final"] = ai_score
+                else:
+                    res = получить_скор(sym)
+                    ai_score = применить_ai_корректировку(res["score"], sym)
+                    res["score_final"] = ai_score
                 ai_score = применить_ai_корректировку(res["score"], sym)
                 res["score_final"] = ai_score
                 scores[sym] = res
@@ -3705,12 +3713,23 @@ def main():
                 )
 
             # ---------------------- Формирование кандидатов ----------------------
+             # Используем экспресс‑пороги, если включён экспресс‑режим
+            min_score_threshold = EXPRESS_MIN_SCORE if EXPRESS_MODE else MIN_SCORE
+            mqs_threshold = EXPRESS_MQS_MIN if EXPRESS_MODE else MQS_MIN_SCORE
+
             кандидаты = sorted(
                 [(s, d) for s, d in scores.items()
-                 if d.get("score_final", 0) >= MIN_SCORE],
+                 if d.get("score_final", 0) >= min_score_threshold],
                 key=lambda x: x[1]["score_final"],
                 reverse=True
             )[:5]
+
+            # ... (код выбора лонга/шорта)
+
+            if mqs < mqs_threshold:
+                log.info(f"⛔ MQS={mqs:.1f} < {mqs_threshold} – пропуск {выбран.split(':')[0]}")
+                time.sleep(SCAN_INTERVAL)
+                continue
 
             # ---------------------- Выбор лонга ----------------------
             выбран, фин_скор, цена, sr_info, side = None, 0, 0.0, {}, "long"
