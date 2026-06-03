@@ -1613,7 +1613,6 @@ def analyze_volume_profile(symbol: str,
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=bars)
         if len(
-```python
 # ------------------------------------------------------------
 # 📊 Анализ Volume Profile
 # ------------------------------------------------------------
