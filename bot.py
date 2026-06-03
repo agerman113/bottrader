@@ -107,16 +107,16 @@ TIMEFRAME_MID = "15m"
 TIMEFRAME_4H = "4h"
 SCAN_INTERVAL = 300
 MIN_SCORE = 65      # классический порог
-MQS_MIN_SCORE = 70  # порог входа MQS
+MQS_MIN_SCORE = 25  # порог входа MQS
 
 # --- MQS (Матрично‑Квантовый Скоринг) ---
 MQS_WEIGHTS = {
-    "classic_ta": 0.25,
-    "decision_matrix": 0.25,
-    "nash_equilibrium": 0.15,
-    "markov_chain": 0.15,
-    "hurst_exponent": 0.10,
-    "coin_flip": 0.10,   # будет заменено на weighted_signal_score
+    "classic_ta": 0.50,   # было 0.25
+    "decision_matrix": 0.15,
+    "nash_equilibrium": 0.10,
+    "markov_chain": 0.05,
+    "hurst_exponent": 0.05,
+    "coin_flip": 0.05,
     "bayesian": 0.10,
 }
 MQS_EMOJIS = {
@@ -1381,7 +1381,7 @@ def рассчитать_mqs(symbol: str, details: dict,
     # 8️⃣ Учёт конфликтов индикаторов
     if CONFLICT_RESOLUTION_ENABLED:
         conflict = resolve_indicator_conflicts(details)
-        mqs -= conflict["penalty"]
+        mqs -= conflict["penalty"] / 100.0   # ← штраф теперь в масштабе [-0.3 … 0]
         if conflict["has_conflicts"]:
             for msg in conflict["resolution_log"]:
                 log.debug(f"[CONFLICT] {msg}")
