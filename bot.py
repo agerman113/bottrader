@@ -3690,16 +3690,13 @@ def main():
                 if not тренд_4h_бычий(sym):
                     continue
 
-                                # Выбор режима скоринга
+                # Выбор режима скоринга
                 if EXPRESS_MODE:
                     res = получить_скор_экспресс(sym)
-                    # Корректировка AI‑соотношением
-                    ai_score = применить_ai_корректировку(res["score"], sym)
-                    res["score_final"] = ai_score
                 else:
                     res = получить_скор(sym)
-                    ai_score = применить_ai_корректировку(res["score"], sym)
-                    res["score_final"] = ai_score
+
+                # Корректировка AI‑соотношением
                 ai_score = применить_ai_корректировку(res["score"], sym)
                 res["score_final"] = ai_score
                 scores[sym] = res
@@ -3713,9 +3710,8 @@ def main():
                 )
 
             # ---------------------- Формирование кандидатов ----------------------
-             # Используем экспресс‑пороги, если включён экспресс‑режим
+            # Используем экспресс‑пороги, если включён экспресс‑режим
             min_score_threshold = EXPRESS_MIN_SCORE if EXPRESS_MODE else MIN_SCORE
-            mqs_threshold = EXPRESS_MQS_MIN if EXPRESS_MODE else MQS_MIN_SCORE
 
             кандидаты = sorted(
                 [(s, d) for s, d in scores.items()
@@ -3723,13 +3719,6 @@ def main():
                 key=lambda x: x[1]["score_final"],
                 reverse=True
             )[:5]
-
-            # ... (код выбора лонга/шорта)
-
-            if mqs < mqs_threshold:
-                log.info(f"⛔ MQS={mqs:.1f} < {mqs_threshold} – пропуск {выбран.split(':')[0]}")
-                time.sleep(SCAN_INTERVAL)
-                continue
 
             # ---------------------- Выбор лонга ----------------------
             выбран, фин_скор, цена, sr_info, side = None, 0, 0.0, {}, "long"
@@ -3767,7 +3756,7 @@ def main():
                         continue
                     if тренд_4h_медвежий(sym):
                         short_res = получить_скор_шорта(sym)
-                        if short_res["score"] >= MIN_SCORE:
+                        if short_res["score"] >= min_score_threshold:
                             det_sh = short_res.get("details", {})
                             if MA_CROSSOVER_ENABLED and not det_sh.get("ma_cross", True):
                                 continue
@@ -3789,8 +3778,9 @@ def main():
             mqs_descr = scores[выбран]["mqs_description"]
             log.info(f"[MQS] {mqs_emoji} {mqs:.1f}/100 → {mqs_descr} | Классический скор: {фин_скор}")
 
-            if mqs < MQS_MIN_SCORE:
-                log.info(f"⛔ MQS={mqs:.1f} < {MQS_MIN_SCORE} – пропуск {выбран.split(':')[0]}")
+            mqs_threshold = EXPRESS_MQS_MIN if EXPRESS_MODE else MQS_MIN_SCORE
+            if mqs < mqs_threshold:
+                log.info(f"⛔ MQS={mqs:.1f} < {mqs_threshold} – пропуск {выбран.split(':')[0]}")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
