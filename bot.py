@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-Mini Speed Trader – оптимизированная версия для быстрого теста гипотез.
-Только классический теханализ, экспресс‑режим, трейлинг.
+Mini Speed Trader – финальная версия для быстрого теста гипотез.
+Классический теханализ, трейлинг, безубыток.
 """
 
 import os, sys, time, json, logging, requests, pandas as pd, numpy as np, math
@@ -22,7 +22,7 @@ LEVERAGE = 3
 TIMEFRAME_TA = "5m"
 TIMEFRAME_TREND = "1h"
 TIMEFRAME_4H = "4h"
-SCAN_INTERVAL = 60          # чаще сканируем для ускорения
+SCAN_INTERVAL = 120
 
 SYMBOLS = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "BNB/USDT:USDT", "XRP/USDT:USDT",
@@ -32,8 +32,7 @@ SYMBOLS = [
 ]
 
 # --- Пороги ---
-MIN_SCORE = 45               # классический скор для входа
-MQS_MIN_SCORE = 25           # не используется, оставлен для совместимости
+MIN_SCORE = 45
 
 # --- Риск‑менеджмент ---
 BASE_RISK_PCT = 0.8
@@ -54,14 +53,14 @@ ATR_TP_MULT = 3.0
 
 # --- Трейлинг / Безубыток ---
 PARTIAL_BE_ENABLED = True
-PARTIAL_BE_PROFIT = 0.5        # процент прибыли для перевода SL в безубыток
-MIN_PROFIT_FOR_TRAIL = 1.0    # процент прибыли для активации трейлинга
-TRAILING_OFFSET_PCT = 0.6     # отступ трейлинга от пика (%)
+PARTIAL_BE_PROFIT = 0.5
+MIN_PROFIT_FOR_TRAIL = 1.0
+TRAILING_OFFSET_PCT = 0.6
 
 # --- Фильтры ---
 VOLUME_SPIKE_MULT = 3.5
 VOLUME_AVG_PERIOD = 20
-ENTRY_CONFIRM_BARS = 0        # отключаем подтверждение для скорости
+ENTRY_CONFIRM_BARS = 0
 SIGNAL_EXIT_ENABLED = True
 SYMBOL_BLOCK_AFTER_TP = 90
 SYMBOL_BLOCK_AFTER_SL = 180
@@ -106,20 +105,34 @@ class BybitWrapper:
         sym = symbol.replace("/", "").replace(":USDT", "")
         tf_map = {"1m":"1","3m":"3","5m":"5","15m":"15","1h":"60","4h":"240"}
         interval = tf_map.get(timeframe, "5")
-        r = self.session.get_kline(category="linear", symbol=sym, interval=interval, limit=limit)
-        rows = list(reversed(r["result"]["list"]))
-        return [[int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in rows]
+        for attempt in range(3):
+            try:
+                r = self.session.get_kline(category="linear", symbol=sym, interval=interval, limit=limit)
+                rows = list(reversed(r["result"]["list"]))
+                return [[int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in rows]
+            except Exception as e:
+                log.warning(f"Ошибка kline (попытка {attempt+1}/3) для {symbol}: {e}")
+                time.sleep(2)
+        log.error(f"Не удалось получить kline для {symbol} после 3 попыток")
+        return []
 
     def fetch_ticker(self, symbol: str):
         sym = symbol.replace("/", "").replace(":USDT", "")
-        r = self.session.get_tickers(category="linear", symbol=sym)
-        tickers = r.get("result", {}).get("list", [])
-        if not tickers:
-            log.warning(f"Пустой список тикеров для {symbol}")
-            return {"last": 0.0, "mark_price": 0.0}
-        last = float(tickers[0].get("lastPrice", 0))
-        mark_price = float(tickers[0].get("markPrice", last))
-        return {"last": last, "mark_price": mark_price}
+        for attempt in range(3):
+            try:
+                r = self.session.get_tickers(category="linear", symbol=sym)
+                tickers = r.get("result", {}).get("list", [])
+                if not tickers:
+                    log.warning(f"Пустой список тикеров для {symbol}")
+                    return {"last": 0.0, "mark_price": 0.0}
+                last = float(tickers[0].get("lastPrice", 0))
+                mark_price = float(tickers[0].get("markPrice", last))
+                return {"last": last, "mark_price": mark_price}
+            except Exception as e:
+                log.warning(f"Ошибка тикера (попытка {attempt+1}/3) для {symbol}: {e}")
+                time.sleep(2)
+        log.error(f"Не удалось получить тикер для {symbol} после 3 попыток")
+        return {"last": 0.0, "mark_price": 0.0}
 
     def fetch_positions(self):
         r = self.session.get_positions(category="linear", settleCoin="USDT")
@@ -181,9 +194,9 @@ class BybitWrapper:
             ticker = self.fetch_ticker(symbol)
             price = ticker["last"]
             if price > 5000:
-                min_qty = max(min_qty, 0.001)   # BTC, TAO
+                min_qty = max(min_qty, 0.001)
             elif price > 500:
-                min_qty = max(min_qty, 0.01)    # ETH, SOL, BNB и т.д.
+                min_qty = max(min_qty, 0.01)
             elif price > 50:
                 min_qty = max(min_qty, 0.1)
         except:
