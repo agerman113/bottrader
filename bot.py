@@ -2859,6 +2859,264 @@ def торговать_разрешено_по_времени() -> bool:
         log.info(f"Session Filter: час {hour} UTC заблокирован")
     return not blocked
 
+# ------------------------------------------------------------
+# 📊 Статистика индикаторов
+# ------------------------------------------------------------
+def загрузить_статистику_индикаторов() -> dict:
+    if not os.path.exists(INDICATOR_STATS_FILE):
+        return {}
+    try:
+        with open(INDICATOR_STATS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def сохранить_статистику_индикаторов(stats_data: dict):
+    try:
+        with open(INDICATOR_STATS_FILE, "w", encoding="utf-8") as f:
+            json.dump(stats_data, f, ensure_ascii=False, indent=2, default=str)
+    except Exception as e:
+        log.warning(f"Не удалось сохранить статистику индикаторов: {e}")
+
+def обновить_статистику_индикаторов(запись_сделки: dict):
+    stats_data = загрузить_статистику_индикаторов()
+    details = запись_сделки.get("details", {})
+    результат = запись_сделки.get("результат", "")
+    is_win = (результат == "tp")
+
+    def check_rsi(v): return 25 <= float(v) <= 42
+    def check_rsi_1h(v): return float(v) < 55
+    def check_macd(v): return v == "бычий"
+    def check_range_filter(v): return v == "вверх"
+    def check_supertrend(v): return v == "вверх"
+    def check_hull(v): return v == "вверх"
+    def check_trend_1h(v): return v == "бычий"
+    def check_adx(v): return float(v) > 25
+    def check_stoch_k(v): return float(v) < 25
+    def check_volume_ratio(v): return float(v) > 1.5
+    def check_sr_signal(v): return "поддержки" in str(v)
+    def check_bayes_prob(v): return float(v) > 0.6
+    def check_quant_score(v): return float(v) > 50
+    def check_order_flow_score(v): return float(v) > 50
+
+    индикаторы = {
+        "rsi": check_rsi,
+        "rsi_1h": check_rsi_1h,
+        "macd": check_macd,
+        "range_filter": check_range_filter,
+        "supertrend": check_supertrend,
+        "hull": check_hull,
+        "тренд_1h": check_trend_1h,
+        "adx": check_adx,
+        "stoch_k": check_stoch_k,
+        "объём_ratio": check_volume_ratio,
+        "sr_signal": check_sr_signal,
+        "bayes_prob": check_bayes_prob,
+        "quant_score": check_quant_score,
+        "order_flow_score": check_order_flow_score,
+    }
+
+    for инд, условие in индикаторы.items():
+        значение = details.get(инд)
+        if значение is None:
+            continue
+        try:
+            is_bullish = условие(значение)
+        except:
+            continue
+        if инд not in stats_data:
+            stats_data[инд] = {"bullish": {"total": 0, "wins": 0}, "bearish": {"total": 0, "wins": 0}}
+        if is_bullish:
+            stats_data[инд]["bullish"]["total"] += 1
+            if is_win:
+                stats_data[инд]["bullish"]["wins"] += 1
+        else:
+            stats_data[инд]["bearish"]["total"] += 1
+            if is_win:
+                stats_data[инд]["bearish"]["wins"] += 1
+    сохранить_статистику_индикаторов(stats_data)
+
+def отчёт_по_индикаторам():
+    stats_data = загрузить_статистику_индикаторов()
+    if not stats_data:
+        log.info("Статистика индикаторов пуста")
+        return
+    log.info("")
+    log.info("=" * 70)
+    log.info("📈 ЭФФЕКТИВНОСТЬ ИНДИКАТОРОВ (накопленная)")
+    log.info(f"{'Индикатор':<18} {'🟢Бычий WR%':>11}  {'n':>4}  {'🔴Медвежий WR%':>14}  {'n':>4}  {'Разница':>8}")
+    log.info(" " + "─" * 70)
+    for инд, данные in stats_data.items():
+        b_total, b_wins = данные["bullish"]["total"], данные["bullish"]["wins"]
+        be_total, be_wins = данные["bearish"]["total"], данные["bearish"]["wins"]
+        b_wr = (b_wins / b_total * 100) if b_total > 0 else 0
+        be_wr = (be_wins / be_total * 100) if be_total > 0 else 0
+        diff = b_wr - be_wr
+        знак = "▲" if diff > 5 else ("▼" if diff < -5 else "≈")
+        log.info(f"{инд:<18}  {b_wr:>9.1f}%  {b_total:>4}  {be_wr:>12.1f}%  {be_total:>4}  {знак}{diff:>+7.1f}%")
+    log.info("=" * 70)
+    log.info("")
+    try:
+        with open("indicators_analysis.json", "w", encoding="utf-8") as f:
+            json.dump(stats_data, f, ensure_ascii=False, indent=2, default=str)
+    except Exception as e:
+        log.warning(f"Не удалось сохранить отчёт по индикаторам: {e}")
+
+# ------------------------------------------------------------
+# 📉 Метрики стратегии
+# ------------------------------------------------------------
+def рассчитать_метрики(сделки: List[dict]) -> dict:
+    if len(сделки) < 5:
+        return {}
+    pnls = [t['pnl_usdt'] for t in сделки]
+    cumulative = np.cumsum(pnls)
+    running_max = np.maximum.accumulate(cumulative)
+    drawdowns = cumulative - running_max
+    max_dd = abs(min(drawdowns))
+    max_dd_pct = (max_dd / max(1, cumulative[-1] + max_dd)) * 100 if cumulative[-1] != 0 else 0
+    sharpe = np.mean(pnls) / np.std(pnls) * np.sqrt(252) if len(pnls) > 1 and np.std(pnls) != 0 else 0
+    neg_returns = [p for p in pnls if p < 0]
+    sortino = np.mean(pnls) / np.std(neg_returns) * np.sqrt(252) if neg_returns and np.std(neg_returns) != 0 else 0
+    total_return = cumulative[-1]
+    years = len(сделки) / 252
+    annual_return = total_return / years if years > 0 else total_return
+    calmar = annual_return / (max_dd if max_dd > 0 else 1)
+    recovery = cumulative[-1] / (max_dd if max_dd > 0 else 1)
+    return {
+        "sharpe_ratio": round(sharpe, 2),
+        "sortino_ratio": round(sortino, 2),
+        "calmar_ratio": round(calmar, 2),
+        "max_drawdown_usdt": round(max_dd, 2),
+        "max_drawdown_pct": round(max_dd_pct, 1),
+        "recovery_factor": round(recovery, 2),
+        "total_trades": len(сделки),
+        "winrate": round(sum(1 for p in pnls if p > 0) / len(pnls) * 100, 1),
+        "avg_win": round(np.mean([p for p in pnls if p > 0]) if any(p > 0 for p in pnls) else 0, 2),
+        "avg_loss": round(abs(np.mean([p for p in pnls if p < 0])) if any(p < 0 for p in pnls) else 0, 2),
+    }
+
+def быстрый_walk_forward(история: List[dict], window: int = 50, step: int = 10) -> dict:
+    if len(история) < window * 2:
+        return {"стабильность": False, "рекомендация": "Недостаточно данных"}
+    positive_windows = 0
+    total_windows = 0
+    for i in range(0, len(история) - window, step):
+        out_sample = история[i+window:i+window+step]
+        if len(out_sample) < 5:
+            continue
+        pnl_out = sum(t['pnl_usdt'] for t in out_sample)
+        if pnl_out > 0:
+            positive_windows += 1
+        total_windows += 1
+    if total_windows == 0:
+        return {"стабильность": False, "рекомендация": "Недостаточно данных"}
+    stability = positive_windows / total_windows > 0.6
+    return {
+        "стабильность": stability,
+        "положительные_окна": positive_windows,
+        "всего_окон": total_windows,
+        "рекомендация": "Стратегия робастна" if stability else "Стратегия нестабильна – нужна оптимизация"
+    }
+
+def сохранить_метрики(метрики: dict):
+    try:
+        with open(METRICS_FILE, "w", encoding="utf-8") as f:
+            json.dump(метрики, f, ensure_ascii=False, indent=2, default=str)
+        log.info(f"Метрики сохранены в {METRICS_FILE}")
+    except Exception as e:
+        log.warning(f"Не удалось сохранить метрики: {e}")
+
+def run_monte_carlo_simulation(trades: List[dict], simulations: int = MONTE_CARLO_SIMULATIONS,
+                               days: int = MONTE_CARLO_DAYS) -> Dict[str, Any]:
+    try:
+        if len(trades) < 10:
+            return {"valid": False, "message": "Недостаточно данных"}
+        pnls = [t["pnl_usdt"] for t in trades]
+        mean_pnl = np.mean(pnls)
+        std_pnl = np.std(pnls)
+        simulated_equity = []
+        for _ in range(simulations):
+            simulated_pnls = np.random.normal(mean_pnl, std_pnl, days)
+            simulated_equity.append(np.cumsum(simulated_pnls))
+        simulated_equity = np.array(simulated_equity)
+        max_drawdowns = []
+        for equity in simulated_equity:
+            running_max = np.maximum.accumulate(equity)
+            drawdown = equity - running_max
+            max_drawdowns.append(np.min(drawdown))
+        return {
+            "valid": True,
+            "simulations": simulations,
+            "days": days,
+            "percentile_5": float(np.percentile(simulated_equity[:, -1], 5)),
+            "percentile_50": float(np.percentile(simulated_equity[:, -1], 50)),
+            "percentile_95": float(np.percentile(simulated_equity[:, -1], 95)),
+            "loss_probability": float(np.mean(simulated_equity[:, -1] < 0) * 100),
+            "avg_max_drawdown": float(np.mean(max_drawdowns)),
+            "worst_max_drawdown": float(np.min(max_drawdowns)),
+            "mean_pnl": float(mean_pnl),
+            "std_pnl": float(std_pnl),
+        }
+    except Exception as e:
+        log.error(f"Ошибка Monte Carlo: {e}")
+        return {"valid": False, "message": str(e)}
+
+def calculate_correlation_matrix(symbols: List[str], window: int = 100) -> pd.DataFrame:
+    try:
+        prices = {}
+        for symbol in symbols:
+            try:
+                ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=window)
+                if len(ohlcv) >= window:
+                    df = pd.DataFrame(ohlcv, columns=["ts", "o", "h", "l", "c", "v"])
+                    prices[symbol] = df["c"].pct_change().dropna()
+            except:
+                continue
+        if len(prices) < 2:
+            return pd.DataFrame()
+        df = pd.concat(prices, axis=1).dropna()
+        return df.corr()
+    except Exception as e:
+        log.debug(f"Ошибка расчета корреляции: {e}")
+        return pd.DataFrame()
+
+def optimize_portfolio_allocation(symbols: List[str], total_risk: float = MAX_PORTFOLIO_RISK) -> Dict[str, float]:
+    try:
+        corr_matrix = calculate_correlation_matrix(symbols)
+        if corr_matrix.empty:
+            return {s: 1.0 / len(symbols) for s in symbols}
+
+        volatilities = {}
+        for symbol in symbols:
+            try:
+                ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=100)
+                if len(ohlcv) >= 50:
+                    df = pd.DataFrame(ohlcv, columns=["ts", "o", "h", "l", "c", "v"])
+                    volatilities[symbol] = float(df["c"].pct_change().dropna().std())
+            except:
+                volatilities[symbol] = 0.01
+
+        total_vol = sum(volatilities.values())
+        if total_vol > 0:
+            allocations = {s: (1 / (volatilities[s] + 1e-10)) / sum(1 / (v + 1e-10) for v in volatilities.values()) for s in symbols}
+        else:
+            allocations = {s: 1.0 / len(symbols) for s in symbols}
+
+        for i, symbol1 in enumerate(symbols):
+            for symbol2 in symbols[i+1:]:
+                if symbol1 in corr_matrix.index and symbol2 in corr_matrix.columns:
+                    corr = abs(corr_matrix.loc[symbol1, symbol2])
+                    if corr > CORRELATION_THRESHOLD:
+                        allocations[symbol1] *= (1 - (corr - CORRELATION_THRESHOLD) * 0.5)
+                        allocations[symbol2] *= (1 - (corr - CORRELATION_THRESHOLD) * 0.5)
+
+        total = sum(allocations.values())
+        if total > 0:
+            allocations = {s: v / total * total_risk for s, v in allocations.items()}
+        return allocations
+    except Exception as e:
+        log.debug(f"Ошибка оптимизации портфеля: {e}")
+        return {s: total_risk / len(symbols) for s in symbols}
 
 # ------------------------------------------------------------
 # 📊 Предстартовая проверка (5 этапов)
