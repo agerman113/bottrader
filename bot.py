@@ -3093,6 +3093,192 @@ def получить_скор_экспресс(symbol: str) -> dict:
 # ============================================================
 ml_model = TradingModel(ML_MODEL_TYPE)   # <-- добавить эту строку
 
+# ============================================================
+# ML МОДУЛЬ (Marcos Lopez de Prado)
+# ============================================================
+class TradingModel:
+    """Класс для машинного обучения в трейдинге."""
+
+    def __init__(self, model_type: str = "RandomForest"):
+        self.model_type = model_type
+        self.model = None
+        self.scaler = StandardScaler()
+        self.features = [
+            "rsi", "rsi_1h", "macd", "adx", "stoch_k", "volume_ratio",
+            "price_change_5m", "price_change_15m", "price_change_1h",
+            "spread_pct", "imbalance", "poc_distance",
+            "mean_reversion_zscore", "momentum", "cointegration_zscore"
+        ]
+        self.trained = False
+        self.last_retrain = 0
+        self.accuracy = 0
+        self.precision = 0
+
+    def create_features(self, symbol: str, df_ta: pd.DataFrame, df_1h: pd.DataFrame,
+                       order_flow_data: Dict, quant_data: Dict) -> Dict[str, float]:
+        """Создает features для модели."""
+        try:
+            features = {}
+            c_ta = df_ta["c"]
+            c_1h = df_1h["c"]
+
+            features["rsi"] = float(calc_rsi(c_ta).iloc[-1])
+            features["rsi_1h"] = float(calc_rsi(c_1h).iloc[-1])
+            ml, sl_macd, _ = calc_macd(c_ta)
+            features["macd"] = float(ml.iloc[-1] - sl_macd.iloc[-1])
+            adx, _, _ = calc_adx(df_ta)
+            features["adx"] = float(adx.iloc[-1])
+            k_ser, _ = calc_stochastic(df_ta)
+            features["stoch_k"] = float(k_ser.iloc[-1])
+            vol_avg = df_ta["v"].rolling(VOLUME_AVG_PERIOD).mean().iloc[-1]
+            features["volume_ratio"] = float(df_ta["v"].iloc[-1] / (vol_avg + 1e-10))
+            features["price_change_5m"] = float((c_ta.iloc[-1] - c_ta.iloc[-2]) / c_ta.iloc[-2] * 100)
+            features["price_change_15m"] = float((c_ta.iloc[-1] - c_ta.iloc[-3]) / c_ta.iloc[-3] * 100)
+            features["price_change_1h"] = float((c_1h.iloc[-1] - c_1h.iloc[-2]) / c_1h.iloc[-2] * 100)
+
+            if order_flow_data.get("order_book", {}).get("valid"):
+                features["spread_pct"] = order_flow_data["order_book"]["spread_pct"]
+                features["imbalance"] = order_flow_data["order_book"]["imbalance"]
+            else:
+                features["spread_pct"] = 0
+                features["imbalance"] = 0
+
+            if order_flow_data.get("volume_profile", {}).get("valid"):
+                cp = order_flow_data["volume_profile"]["current_price"]
+                poc = order_flow_data["volume_profile"]["poc_price"]
+                features["poc_distance"] = float((cp - poc) / poc * 100)
+            else:
+                features["poc_distance"] = 0
+
+            if quant_data.get("details", {}).get("mean_reversion", {}).get("valid"):
+                features["mean_reversion_zscore"] = quant_data["details"]["mean_reversion"]["zscore"]
+            else:
+                features["mean_reversion_zscore"] = 0
+
+            if quant_data.get("details", {}).get("momentum", {}).get("valid"):
+                features["momentum"] = quant_data["details"]["momentum"]["momentum"]
+            else:
+                features["momentum"] = 0
+
+            coint_zscore = 0
+            for pair_data in quant_data.get("details", {}).get("cointegration", {}).values():
+                if pair_data.get("valid"):
+                    coint_zscore = pair_data["zscore"]
+                    break
+            features["cointegration_zscore"] = float(coint_zscore)
+
+            return features
+        except Exception as e:
+            log.debug(f"Ошибка создания features для {symbol}: {e}")
+            return {f: 0 for f in self.features}
+
+    def prepare_training_data(self, trades: List[dict]) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[pd.Series], Optional[pd.Series]]:
+        """Готовит данные для обучения модели."""
+        try:
+            X, y = [], []
+            for trade in trades:
+                if trade["score"] < ENTRY_CONFIRM_MIN_SCORE:
+                    continue
+                details = trade.get("details", {})
+                features = {
+                    "rsi": float(details.get("rsi", 50)),
+                    "rsi_1h": float(details.get("rsi_1h", 50)),
+                    "macd": 0, "adx": float(details.get("adx", 20)),
+                    "stoch_k": float(details.get("stoch_k", 50)),
+                    "volume_ratio": float(details.get("объём_ratio", 1)),
+                    "price_change_5m": 0, "price_change_15m": 0, "price_change_1h": 0,
+                    "spread_pct": 0, "imbalance": 0, "poc_distance": 0,
+                    "mean_reversion_zscore": 0, "momentum": 0, "cointegration_zscore": 0
+                }
+                X.append(features)
+                y.append(1 if trade.get("результат", "sl") == "tp" else 0)
+
+            if len(X) < ML_MIN_SAMPLES:
+                return None, None, None, None
+
+            X_df = pd.DataFrame(X)
+            y_series = pd.Series(y)
+            return train_test_split(X_df, y_series, test_size=0.2, random_state=42)
+        except Exception as e:
+            log.debug(f"Ошибка подготовки данных: {e}")
+            return None, None, None, None
+
+    def train(self, trades: List[dict]) -> bool:
+        """Обучает модель."""
+        try:
+            X_train, X_test, y_train, y_test = self.prepare_training_data(trades)
+            if X_train is None:
+                log.info("Недостаточно данных для обучения ML модели")
+                return False
+
+            X_train_scaled = self.scaler.fit_transform(X_train)
+            X_test_scaled = self.scaler.transform(X_test)
+
+            if self.model_type == "RandomForest":
+                self.model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42, class_weight="balanced")
+            else:
+                self.model = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1, max_depth=5, random_state=42)
+
+            self.model.fit(X_train_scaled, y_train)
+            y_pred = self.model.predict(X_test_scaled)
+            self.accuracy = accuracy_score(y_test, y_pred)
+            self.precision = precision_score(y_test, y_pred, zero_division=0)
+            self.trained = True
+            self.last_retrain = time.time()
+            log.info(f"ML модель обучена: Accuracy={self.accuracy:.2f}, Precision={self.precision:.2f}")
+            return True
+        except Exception as e:
+            log.error(f"Ошибка обучения ML модели: {e}")
+            return False
+
+    def predict(self, symbol: str, df_ta: pd.DataFrame, df_1h: pd.DataFrame,
+               order_flow_data: Dict, quant_data: Dict) -> Dict[str, Any]:
+        """Предсказывает сигнал для символа."""
+        if not self.trained:
+            return {"signal": "neutral", "probability": 0.5, "valid": False}
+        try:
+            features = self.create_features(symbol, df_ta, df_1h, order_flow_data, quant_data)
+            for f in self.features:
+                if f not in features:
+                    features[f] = 0
+            X = pd.DataFrame([features])
+            X_scaled = self.scaler.transform(X)
+            prediction = self.model.predict(X_scaled)[0]
+            probability = self.model.predict_proba(X_scaled)[0][1]
+            return {"signal": "buy" if prediction == 1 else "sell", "probability": float(probability), "valid": True, "features": features}
+        except Exception as e:
+            log.debug(f"Ошибка предсказания ML для {symbol}: {e}")
+            return {"signal": "neutral", "probability": 0.5, "valid": False}
+
+    def save_model(self, filepath: str = ML_MODEL_FILE) -> bool:
+        """Сохраняет модель в файл."""
+        try:
+            import joblib
+            joblib.dump({"model": self.model, "scaler": self.scaler, "features": self.features,
+                         "trained": self.trained, "accuracy": self.accuracy, "precision": self.precision}, filepath)
+            log.info(f"ML модель сохранена в {filepath}")
+            return True
+        except Exception as e:
+            log.error(f"Ошибка сохранения ML модели: {e}")
+            return False
+
+    def load_model(self, filepath: str = ML_MODEL_FILE) -> bool:
+        """Загружает модель из файла."""
+        try:
+            import joblib
+            data = joblib.load(filepath)
+            self.model = data["model"]
+            self.scaler = data["scaler"]
+            self.features = data["features"]
+            self.trained = data["trained"]
+            self.accuracy = data["accuracy"]
+            self.precision = data["precision"]
+            log.info(f"ML модель загружена из {filepath}")
+            return True
+        except Exception as e:
+            log.error(f"Ошибка загрузки ML модели: {e}")
+            return False
+
 # ------------------------------------------------------------
 # 📊 Сводный словарь статистики бота
 # ------------------------------------------------------------
