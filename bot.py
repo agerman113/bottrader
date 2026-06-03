@@ -3,9 +3,9 @@
 
 """
 ================================================================================
-Bybit ГИБРИДНЫЙ ПРОФЕССИОНАЛЬНЫЙ БОТ — v21 ULTIMATE
+Bybit ГИБРИДНЫЙ ПРОФЕССИОНАЛЬНЫЙ БОТ — v22 "SEMANTIC QUANTUM MATRIX CORE"
 ================================================================================
-Версия: 21.0 Ultimate
+Версия: 22.0 Ultimate
 Дата выпуска: 03.06.2026
 
 ОПИСАНИЕ:
@@ -16,17 +16,14 @@ Bybit ГИБРИДНЫЙ ПРОФЕССИОНАЛЬНЫЙ БОТ — v21 ULTIMAT
 - Микроструктуру рынка (Order Flow, Volume Profile, Order Book)
 - Продвинутое машинное обучение (Random Forest, Gradient Boosting)
 - Портфельный подход и риск-менеджмент
-- НОВЫЕ ИНДИКАТОРЫ BYBIT API: Open Interest, Funding Rate, Liquidations, Taker Volume
-
-НОВОВВЕДЕНИЯ v21:
-1. Добавлены Open Interest, Funding Rate, Liquidations, Insurance Fund
-2. Добавлен анализ Taker Buy/Sell Volume
-3. Добавлена проверка Mark Price vs Last Price
-4. Исправлена формула размера позиции (макс. 25% от баланса)
-5. Исправлен Kelly Criterion (защита от недостатка данных)
-6. Стабилизация RR (фиксация минимального RR=2:1, максимального RR=3:1)
-7. Улучшен скорринг с новыми индикаторами
-8. Упрощен трейлинг-стоп (фиксированный шаг 0.5%)
+- НОВОВВЕДЕНИЯ v22:
+  1. Матрично-Квантовый Скоринг (MQS) с цветными смайликами
+  2. Семантическое ядро (7 методов анализа)
+  3. Теория игр (Nash Equilibrium)
+  4. Цепи Маркова (Markov Chains)
+  5. Теория хаоса (Hurst Exponent)
+  6. Динамическая монетка (Coin Flip)
+  7. Байесовская вероятность
 """
 
 import os
@@ -104,7 +101,36 @@ TIMEFRAME_TREND = "1h"
 TIMEFRAME_MID = "15m"
 TIMEFRAME_4H = "4h"
 SCAN_INTERVAL = 300
-MIN_SCORE = 65
+MIN_SCORE = 65  # Классический порог (для совместимости)
+
+# --- MQS (Матрично-Квантовый Скоринг) ---
+MQS_MIN_SCORE = 70  # Новый порог для входа
+MQS_WEIGHTS = {
+    "decision_matrix": 0.25,   # Матрица решений
+    "nash_equilibrium": 0.15,  # Теория игр
+    "markov_chain": 0.15,      # Цепи Маркова
+    "hurst_exponent": 0.10,    # Теория хаоса
+    "coin_flip": 0.10,         # Динамическая монетка
+    "bayesian": 0.10,          # Байесовская вероятность
+    "classic_ta": 0.15,        # Классический теханализ
+}
+
+# --- ЦВЕТНЫЕ СМАЙЛИКИ ДЛЯ MQS ---
+MQS_EMOJIS = {
+    (90, 100): "🟢",  # Сильный сигнал
+    (70, 89): "🟡",   # Хороший сигнал
+    (50, 69): "🟠",   # Нейтральный
+    (30, 49): "🔴",   # Слабый сигнал
+    (0, 29): "⚫",    # Плохой сигнал
+}
+
+MQS_DESCRIPTIONS = {
+    (90, 100): "СИЛЬНЫЙ СИГНАЛ (ВХОДИМ!)",
+    (70, 89): "ХОРОШИЙ СИГНАЛ (МОЖНО ВХОДИТЬ)",
+    (50, 69): "НЕЙТРАЛЬНЫЙ (ЖДЁМ ЛУЧШЕГО)",
+    (30, 49): "СЛАБЫЙ СИГНАЛ (РИСКОВАННО)",
+    (0, 29): "ПЛОХОЙ СИГНАЛ (ПРОПУСКАЕМ)",
+}
 
 # --- ТЕЙКПРОФИТ / СТОПЛОСС ---
 TP_PERCENT = 3.0
@@ -112,12 +138,15 @@ SL_PERCENT = 1.0
 MIN_SL_PERCENT = 0.8
 MAX_SL_PERCENT = 2.0
 ATR_SL_MULT = 1.5
-ATR_TP_MULT = 2.0
+ATR_TP_MULT = 3.0
 
 # --- ПЕРЕМЕЩЕНИЕ SL В БЕЗУБЫТОК И ТРЕЙЛИНГ ---
 PARTIAL_BE_ENABLED = True
-PARTIAL_BE_PROFIT = 0.5
-TRAILING_STEP_PCT = 0.5
+PARTIAL_BE_PROFIT = 0.2
+TRAILING_ATR_PERIOD = 14
+TRAILING_ATR_MULT = 2.0
+TRAILING_OFFSET_MULT = 1.5
+MIN_TRAILING_STEP = 0.4
 MIN_TRAILING_OFFSET = 0.6
 MIN_PROFIT_FOR_TRAIL = 1.0
 RR_EXIT_TRIGGER = 0.6
@@ -125,13 +154,12 @@ RR_EXIT_TRIGGER = 0.6
 # --- РИСК-МЕНЕДЖМЕНТ ---
 BASE_RISK_PCT = 0.8
 MAX_RISK_PCT = 1.2
-MAX_MARGIN_PCT = 25.0
 USE_ADVANCED_RISK = True
 MIN_TRADES_FOR_F = 20
 MAX_RISK_PERCENT_F = 2.5
 
 # --- ПОРТФЕЛЬНАЯ ОПТИМИЗАЦИЯ ---
-PORTFOLIO_OPTIMIZATION = False
+PORTFOLIO_OPTIMIZATION = True
 MAX_PORTFOLIO_RISK = 0.05
 CORRELATION_THRESHOLD = 0.8
 
@@ -162,12 +190,12 @@ MONTE_CARLO_SIMULATIONS = 1000
 MONTE_CARLO_DAYS = 30
 
 # --- ФАЙЛЫ ---
-STATE_FILE = "state_bot_v21.json"
-TRADES_FILE = "trades_bot_v21.json"
-INDICATOR_STATS_FILE = "indicator_stats_v21.json"
-METRICS_FILE = "strategy_metrics_v21.json"
-ML_MODEL_FILE = "ml_model_v21.pkl"
-PORTFOLIO_STATE_FILE = "portfolio_state_v21.json"
+STATE_FILE = "state_bot_v22.json"
+TRADES_FILE = "trades_bot_v22.json"
+INDICATOR_STATS_FILE = "indicator_stats_v22.json"
+METRICS_FILE = "strategy_metrics_v22.json"
+ML_MODEL_FILE = "ml_model_v22.pkl"
+PORTFOLIO_STATE_FILE = "portfolio_state_v22.json"
 
 BYBIT_FEE = 0.00055
 
@@ -210,7 +238,7 @@ logging.basicConfig(
     datefmt="%d.%m.%Y %H:%M:%S",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("bot_v21_ultimate.log", encoding="utf-8"),
+        logging.FileHandler("bot_v22_ultimate.log", encoding="utf-8"),
     ],
 )
 log = logging.getLogger(__name__)
@@ -218,7 +246,6 @@ log = logging.getLogger(__name__)
 # ============================================================
 # BYBIT API WRAPPER
 # ============================================================
-
 from pybit.unified_trading import HTTP
 
 class BybitWrapper:
@@ -316,33 +343,26 @@ class BybitWrapper:
     def price_to_precision(self, symbol: str, price: float):
         return str(round(price, 2))
 
-    def amount_to_precision(self, symbol: str, amount: float) -> float:
-        """
-        Возвращает количество, округлённое до допустимого шага лота.
-        НЕ принуждает к минимальному лоту 1!
-        """
+    def amount_to_precision(self, symbol: str, amount: float):
         sym = symbol.replace("/", "").replace(":USDT", "")
-        # Минимальный объём ордера Bybit (можно оставить 0.001 для линеек)
-        min_qty = 0.001
+        whole_qty = {"SOLUSDT", "ADAUSDT", "XRPUSDT", "DOGEUSDT", "HBARUSDT",
+                     "XLMUSDT", "TRXUSDT", "VETUSDT", "NOTUSDT", "SUIUSDT",
+                     "APTUSDT", "NEARUSDT", "ATOMUSDT", "DOTUSDT", "LINKUSDT",
+                     "AVAXUSDT", "INJUSDT", "GRTUSDT", "ARBUSDT", "OPUSDT",
+                     "TIAUSDT", "JTOUSDT", "EIGENUSDT", "CATIUSDT", "BOMEUSDT",
+                     "WIFUSDT", "PEPEUSDT", "VIRTUALUSDT", "RENDERUSDT", "FETUSDT",
+                     "WLDUSDT", "ARKMMUSDT", "IOUSDT", "ONDOUSDT"}
+        tenth_qty = {"ETHUSDT", "BNBUSDT", "TONUSDT", "AAVEUSDT", "UNIUSDT"}
+        hundredth_qty = {"BTCUSDT", "TAOUSDT"}
 
-        # Определяем шаг лота по цене (грубая оценка)
-        try:
-            ticker = self.fetch_ticker(symbol)
-            price = ticker["last"]
-        except:
-            price = 100  # на всякий случай
-
-        if price > 5000:
-            step = 0.001       # BTC, TAO
-        elif price > 500:
-            step = 0.01        # ETH, BNB, SOL...
-        elif price > 10:
-            step = 0.1
+        if sym in whole_qty:
+            return max(1, round(amount))
+        elif sym in tenth_qty:
+            return max(0.1, round(amount, 1))
+        elif sym in hundredth_qty:
+            return max(0.01, round(amount, 2))
         else:
-            step = 1.0         # дешёвые монеты
-
-        qty = max(min_qty, round(amount / step) * step)
-        return qty
+            return round(amount, 3)
 
     def private_post_v5_position_trading_stop(self, params: dict):
         self.session.set_trading_stop(
@@ -397,14 +417,6 @@ class BybitWrapper:
             log.debug(f"Ошибка получения ликвидаций для {symbol}: {e}")
             return []
 
-    def fetch_insurance_fund(self) -> Dict[str, Any]:
-        try:
-            r = self.session.get_insurance_fund()
-            return r["result"]
-        except Exception as e:
-            log.debug(f"Ошибка получения Insurance Fund: {e}")
-            return {}
-
     def fetch_taker_volume(self, symbol: str) -> Dict[str, Any]:
         sym = symbol.replace("/", "").replace(":USDT", "")
         try:
@@ -457,8 +469,487 @@ stats = {
 }
 
 # ============================================================
-# БАЗОВЫЕ ФУНКЦИИ ИНДИКАТОРОВ
+# НОВЫЕ ФУНКЦИИ ДЛЯ MQS
 # ============================================================
+
+# --- Функции для Bybit API ---
+def get_open_interest_data(symbol: str, window: int = 24) -> Dict[str, Any]:
+    try:
+        oi_now = exchange.fetch_open_interest(symbol)
+        if oi_now == 0:
+            return {"oi_value": 0, "oi_change_pct": 0, "signal": "neutral", "valid": False}
+        ticker = exchange.fetch_ticker(symbol)
+        price_now = ticker["last"]
+        price_past = exchange.fetch_ohlcv(symbol, "1h", limit=window)[-window][4]
+        price_change_pct = (price_now - price_past) / price_past * 100
+        oi_change_pct = 5.0  # Упрощённо
+        if oi_change_pct > OI_GROWTH_THRESHOLD and price_change_pct > 0:
+            signal = "bullish"
+        elif oi_change_pct > OI_GROWTH_THRESHOLD and price_change_pct < 0:
+            signal = "bearish"
+        else:
+            signal = "neutral"
+        return {
+            "oi_value": oi_now,
+            "oi_change_pct": oi_change_pct,
+            "signal": signal,
+            "valid": True
+        }
+    except Exception as e:
+        log.debug(f"Ошибка Open Interest для {symbol}: {e}")
+        return {"oi_value": 0, "oi_change_pct": 0, "signal": "neutral", "valid": False}
+
+def get_funding_rate_data(symbol: str) -> Dict[str, Any]:
+    try:
+        data = exchange.fetch_funding_rate(symbol)
+        if not data["valid"]:
+            return {"funding_rate": 0, "signal": "neutral", "extreme": False, "valid": False}
+        funding_rate = data["fundingRate"] * 100
+        extreme = abs(funding_rate) > FUNDING_RATE_THRESHOLD
+        if funding_rate > FUNDING_RATE_THRESHOLD:
+            signal = "bearish"
+        elif funding_rate < -FUNDING_RATE_THRESHOLD:
+            signal = "bullish"
+        else:
+            signal = "neutral"
+        return {
+            "funding_rate": funding_rate,
+            "signal": signal,
+            "extreme": extreme,
+            "valid": True
+        }
+    except Exception as e:
+        log.debug(f"Ошибка Funding Rate для {symbol}: {e}")
+        return {"funding_rate": 0, "signal": "neutral", "extreme": False, "valid": False}
+
+def get_liquidations_data(symbol: str) -> Dict[str, Any]:
+    try:
+        liquidations = exchange.fetch_liquidations(symbol, limit=50)
+        if not liquidations:
+            return {
+                "total_liquidations_usd": 0,
+                "long_liquidations_usd": 0,
+                "short_liquidations_usd": 0,
+                "signal": "neutral",
+                "valid": False
+            }
+        total_long = 0.0
+        total_short = 0.0
+        for liq in liquidations:
+            side = liq.get("side", "")
+            size = float(liq.get("size", 0))
+            price = float(liq.get("price", 0))
+            volume_usd = size * price
+            if side == "Buy":
+                total_short += volume_usd
+            elif side == "Sell":
+                total_long += volume_usd
+        total = total_long + total_short
+        if total > LIQUIDATION_THRESHOLD_USD:
+            if total_long > total_short * 1.5:
+                signal = "bearish"
+            elif total_short > total_long * 1.5:
+                signal = "bullish"
+            else:
+                signal = "neutral"
+        else:
+            signal = "neutral"
+        return {
+            "total_liquidations_usd": total,
+            "long_liquidations_usd": total_long,
+            "short_liquidations_usd": total_short,
+            "signal": signal,
+            "valid": True
+        }
+    except Exception as e:
+        log.debug(f"Ошибка Liquidations для {symbol}: {e}")
+        return {
+            "total_liquidations_usd": 0,
+            "long_liquidations_usd": 0,
+            "short_liquidations_usd": 0,
+            "signal": "neutral",
+            "valid": False
+        }
+
+def get_mark_price_diff(symbol: str) -> Dict[str, Any]:
+    try:
+        ticker = exchange.fetch_ticker(symbol)
+        last_price = ticker["last"]
+        mark_price = ticker.get("mark_price", last_price)
+        if last_price == 0:
+            return {"last_price": 0, "mark_price": 0, "diff_pct": 0, "safe": False, "valid": False}
+        diff_pct = abs(mark_price - last_price) / last_price * 100
+        safe = diff_pct < MARK_PRICE_DIFF_THRESHOLD
+        return {
+            "last_price": last_price,
+            "mark_price": mark_price,
+            "diff_pct": diff_pct,
+            "safe": safe,
+            "valid": True
+        }
+    except Exception as e:
+        log.debug(f"Ошибка Mark Price Diff для {symbol}: {e}")
+        return {"last_price": 0, "mark_price": 0, "diff_pct": 0, "safe": False, "valid": False}
+
+def get_taker_volume_data(symbol: str) -> Dict[str, Any]:
+    try:
+        data = exchange.fetch_taker_volume(symbol)
+        if not data["valid"]:
+            return {"buy_vol": 0, "sell_vol": 0, "ratio": 1, "signal": "neutral", "valid": False}
+        buy_vol = data["buyVol"]
+        sell_vol = data["sellVol"]
+        ratio = buy_vol / (sell_vol + 1e-10)
+        if ratio > TAKER_BUY_SELL_RATIO_THRESHOLD:
+            signal = "bullish"
+        elif ratio < 1 / TAKER_BUY_SELL_RATIO_THRESHOLD:
+            signal = "bearish"
+        else:
+            signal = "neutral"
+        return {
+            "buy_vol": buy_vol,
+            "sell_vol": sell_vol,
+            "ratio": ratio,
+            "signal": signal,
+            "valid": True
+        }
+    except Exception as e:
+        log.debug(f"Ошибка Taker Volume для {symbol}: {e}")
+        return {"buy_vol": 0, "sell_vol": 0, "ratio": 1, "signal": "neutral", "valid": False}
+
+def get_bybit_advanced_signals(symbol: str) -> Dict[str, Any]:
+    signals = {
+        "open_interest": get_open_interest_data(symbol),
+        "funding_rate": get_funding_rate_data(symbol),
+        "liquidations": get_liquidations_data(symbol),
+        "mark_price_diff": get_mark_price_diff(symbol),
+        "taker_volume": get_taker_volume_data(symbol),
+    }
+    advanced_score = 0
+    if signals["open_interest"]["valid"]:
+        if signals["open_interest"]["signal"] == "bullish":
+            advanced_score += 10
+        elif signals["open_interest"]["signal"] == "bearish":
+            advanced_score -= 10
+    if signals["funding_rate"]["valid"]:
+        if signals["funding_rate"]["extreme"]:
+            if signals["funding_rate"]["signal"] == "bullish":
+                advanced_score += 15
+            else:
+                advanced_score -= 15
+        else:
+            if signals["funding_rate"]["signal"] == "bullish":
+                advanced_score += 5
+            elif signals["funding_rate"]["signal"] == "bearish":
+                advanced_score -= 5
+    if signals["liquidations"]["valid"]:
+        if signals["liquidations"]["signal"] == "bullish":
+            advanced_score += 10
+        elif signals["liquidations"]["signal"] == "bearish":
+            advanced_score -= 10
+    if signals["mark_price_diff"]["valid"]:
+        if not signals["mark_price_diff"]["safe"]:
+            advanced_score -= 20
+    if signals["taker_volume"]["valid"]:
+        if signals["taker_volume"]["signal"] == "bullish":
+            advanced_score += 10
+        elif signals["taker_volume"]["signal"] == "bearish":
+            advanced_score -= 10
+    return {
+        "advanced_score": max(-50, min(50, advanced_score)),
+        "details": signals
+    }
+
+# --- Байесовский тренд ---
+def bayes_trend_probability(df: pd.DataFrame) -> float:
+    try:
+        close = df["c"]
+        ema20 = _ema(close, 20).iloc[-1]
+        ema50 = _ema(close, 50).iloc[-1]
+        rsi = calc_rsi(close).iloc[-1]
+        adx, _, _ = calc_adx(df)
+        adx_val = adx.iloc[-1]
+        if any(np.isnan(v) for v in [ema20, ema50, rsi, adx_val]):
+            return 0.5
+        if ema50 == 0:
+            return 0.5
+        z = ((ema20/ema50 - 1)*100 + (rsi - 50)/25 + (adx_val - 25)/10)
+        if np.isnan(z) or np.isinf(z):
+            return 0.5
+        return float(np.clip(1.0 / (1.0 + np.exp(-z)), 0.0, 1.0))
+    except Exception:
+        return 0.5
+
+# --- Decision Matrix ---
+def decision_matrix_score(details: dict, side: str) -> float:
+    weights = {
+        "rsi": 0.15,
+        "macd": 0.12,
+        "supertrend": 0.10,
+        "funding_rate": 0.15,
+        "liquidations": 0.10,
+        "open_interest": 0.08,
+        "taker_volume": 0.05,
+    }
+
+    signals = {
+        "rsi": 1 if details.get("rsi", 50) < 40 else (-1 if details.get("rsi", 50) > 60 else 0),
+        "macd": 1 if details.get("macd") == "бычий" else (-1 if details.get("macd") == "медвежий" else 0),
+        "supertrend": 1 if details.get("supertrend") == "вверх" else (-1 if details.get("supertrend") == "вниз" else 0),
+        "funding_rate": -1 if details.get("funding_rate", {}).get("signal") == "bearish" else (1 if details.get("funding_rate", {}).get("signal") == "bullish" else 0),
+        "liquidations": 1 if details.get("liquidations", {}).get("signal") == "bullish" else (-1 if details.get("liquidations", {}).get("signal") == "bearish" else 0),
+        "open_interest": 1 if details.get("open_interest", {}).get("signal") == "bullish" else (-1 if details.get("open_interest", {}).get("signal") == "bearish" else 0),
+        "taker_volume": 1 if details.get("taker_volume", {}).get("signal") == "bullish" else (-1 if details.get("taker_volume", {}).get("signal") == "bearish" else 0),
+    }
+
+    score = 0.0
+    for indicator, weight in weights.items():
+        signal = signals.get(indicator, 0)
+        if side == "short":
+            signal *= -1
+        score += signal * weight
+    return score
+
+# --- Nash Equilibrium ---
+def nash_equilibrium_score(symbol: str, side: str) -> float:
+    ai_data = получить_bybit_ai(symbol)
+    long_ratio = ai_data.get("long_ratio", 0.5)
+    if side == "long":
+        if long_ratio > 0.7:
+            return -1.0
+        elif long_ratio < 0.3:
+            return 1.0
+        else:
+            return 0.0
+    else:
+        if long_ratio > 0.7:
+            return 1.0
+        elif long_ratio < 0.3:
+            return -1.0
+        else:
+            return 0.0
+
+# --- Markov Chain ---
+class MarkovChain:
+    def __init__(self):
+        self.states = ["bullish", "bearish", "neutral"]
+        self.transition_matrix = np.array([
+            [0.7, 0.2, 0.1],  # Из bullish
+            [0.1, 0.7, 0.2],  # Из bearish
+            [0.3, 0.3, 0.4],  # Из neutral
+        ])
+        self.current_state = "neutral"
+
+    def update_state(self, new_state: str):
+        if new_state in self.states:
+            self.current_state = new_state
+
+    def predict_next_state(self) -> str:
+        idx = self.states.index(self.current_state)
+        probabilities = self.transition_matrix[idx]
+        next_state_idx = np.random.choice(len(self.states), p=probabilities)
+        return self.states[next_state_idx]
+
+    def get_score(self, side: str) -> float:
+        next_state = self.predict_next_state()
+        if side == "long":
+            return 1.0 if next_state == "bullish" else (-1.0 if next_state == "bearish" else 0.0)
+        else:
+            return 1.0 if next_state == "bearish" else (-1.0 if next_state == "bullish" else 0.0)
+
+markov_model = MarkovChain()
+
+def update_markov_state(details: dict):
+    rsi = details.get("rsi", 50)
+    macd = details.get("macd", "нейтральный")
+    if rsi < 30 and macd == "бычий":
+        markov_model.update_state("bullish")
+    elif rsi > 70 and macd == "медвежий":
+        markov_model.update_state("bearish")
+    else:
+        markov_model.update_state("neutral")
+
+def markov_chain_score(details: dict, side: str) -> float:
+    update_markov_state(details)
+    return markov_model.get_score(side)
+
+# --- Hurst Exponent ---
+def calculate_hurst_exponent(series: pd.Series, max_lag: int = 20) -> float:
+    lags = range(2, max_lag)
+    tau = [np.std(np.subtract(series[lag:].values, series[:-lag].values)) for lag in lags]
+    tau = np.array(tau)
+    n = np.array(lags)
+    hurst = np.polyfit(np.log(n), np.log(tau), 1)[0]
+    return hurst
+
+def hurst_signal(symbol: str, timeframe: str = "1h", limit: int = 100) -> str:
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+    if len(ohlcv) < limit:
+        return "neutral"
+    df = pd.DataFrame(ohlcv, columns=["ts", "o", "h", "l", "c", "v"])
+    close = df["c"]
+    hurst = calculate_hurst_exponent(close)
+    if hurst > 0.6:
+        return "trend"
+    elif hurst < 0.4:
+        return "mean_reverting"
+    else:
+        return "neutral"
+
+def hurst_exponent_score(details: dict, side: str, symbol: str) -> float:
+    hurst = hurst_signal(symbol)
+    if hurst == "trend":
+        if side == "long" and тренд_4h_бычий(symbol):
+            return 1.0
+        elif side == "short" and тренд_4h_медвежий(symbol):
+            return 1.0
+        else:
+            return -0.5
+    elif hurst == "mean_reverting":
+        if side == "long" and details.get("rsi", 50) < 30:
+            return 1.0
+        elif side == "short" and details.get("rsi", 50) > 70:
+            return 1.0
+        else:
+            return -0.5
+    else:
+        return 0.0
+
+# --- Динамическая монетка ---
+def dynamic_coin_flip(symbol: str, details: dict, side: str) -> float:
+    prob = 0.5
+    rsi = details.get("rsi", 50)
+    if rsi < 30:
+        prob += 0.2
+    elif rsi > 70:
+        prob -= 0.2
+    macd_signal = details.get("macd", "нейтральный")
+    if macd_signal == "бычий":
+        prob += 0.15
+    elif macd_signal == "медвежий":
+        prob -= 0.15
+    funding_signal = details.get("funding_rate", {}).get("signal", "neutral")
+    if funding_signal == "bullish":
+        prob += 0.1
+    elif funding_signal == "bearish":
+        prob -= 0.1
+    liq_signal = details.get("liquidations", {}).get("signal", "neutral")
+    if liq_signal == "bullish":
+        prob += 0.05
+    elif liq_signal == "bearish":
+        prob -= 0.05
+    prob = max(0.1, min(0.9, prob))
+    if side == "long":
+        return 2 * prob - 1
+    else:
+        return 1 - 2 * prob
+
+# --- Байесовский скор ---
+def bayesian_score(details: dict, side: str) -> float:
+    prob_bullish = bayes_trend_probability(pd.DataFrame({"c": [details.get("price", 0)]}))
+    prob_bearish = 1 - prob_bullish
+    if side == "long":
+        return prob_bullish * 2 - 1
+    else:
+        return prob_bearish * 2 - 1
+
+# --- MQS (Матрично-Квантовый Скоринг) ---
+def рассчитать_mqs(symbol: str, details: dict, side: str) -> Tuple[float, str, str]:
+    # 1. Классический теханализ (15%)
+    classic_score = 0.0
+    rsi_val = details.get("rsi", 50)
+    if 25 <= rsi_val <= 40: classic_score += 20
+    elif 40 < rsi_val <= 50: classic_score += 12
+    elif rsi_val < 25: classic_score += 10
+    elif 50 < rsi_val <= 60: classic_score += 5
+    rsi_1h = details.get("rsi_1h", 50)
+    if rsi_1h < 50: classic_score += 10
+    elif rsi_1h < 60: classic_score += 5
+    macd_bull = details.get("macd") == "бычий"
+    if macd_bull: classic_score += 8
+    rf_up = details.get("range_filter") == "вверх"
+    if rf_up: classic_score += 15
+    st_up = details.get("supertrend") == "вверх"
+    if st_up: classic_score += 12
+    hu_up = details.get("hull") == "вверх"
+    if hu_up: classic_score += 8
+    ema50_1h = details.get("ema50_1h", 0)
+    ema200_1h = details.get("ema200_1h", 0)
+    if ema50_1h > ema200_1h: classic_score += 10
+    adx_val = details.get("adx", 0)
+    if adx_val > 25: classic_score += 10
+    k_val = details.get("stoch_k", 50)
+    if k_val < 20: classic_score += 10
+    elif k_val < 40: classic_score += 5
+    vol_ratio = details.get("объём_ratio", 1)
+    if vol_ratio > 1.5: classic_score += 8
+    elif vol_ratio > 1.2: classic_score += 4
+    sr = details.get("sr_signal", "")
+    if "поддержки" in sr: classic_score += 15
+    elif "сопротивления" in sr: classic_score -= 25
+    bayes_prob = details.get("bayes_prob", 0.5)
+    classic_score += bayes_prob * 10
+    classic_score = min(100, max(0, classic_score))
+    classic_score_normalized = (classic_score / 100) * 2 - 1
+
+    # 2. Decision Matrix (25%)
+    decision_score = decision_matrix_score(details, side)
+
+    # 3. Nash Equilibrium (15%)
+    nash_score = nash_equilibrium_score(symbol, side)
+
+    # 4. Markov Chain (15%)
+    markov_score = markov_chain_score(details, side)
+
+    # 5. Hurst Exponent (10%)
+    hurst_score = hurst_exponent_score(details, side, symbol)
+
+    # 6. Coin Flip (10%)
+    coin_score = dynamic_coin_flip(symbol, details, side)
+
+    # 7. Bayesian Probability (10%)
+    bayesian_score_val = bayesian_score(details, side)
+
+    # Вычисляем MQS как взвешенную сумму
+    mqs = (
+        classic_score_normalized * MQS_WEIGHTS["classic_ta"] +
+        decision_score * MQS_WEIGHTS["decision_matrix"] +
+        nash_score * MQS_WEIGHTS["nash_equilibrium"] +
+        markov_score * MQS_WEIGHTS["markov_chain"] +
+        hurst_score * MQS_WEIGHTS["hurst_exponent"] +
+        coin_score * MQS_WEIGHTS["coin_flip"] +
+        bayesian_score_val * MQS_WEIGHTS["bayesian"]
+    )
+
+    # Нормализуем MQS от 0 до 100
+    mqs = (mqs + 1) * 50
+
+    # Определяем смайлик и описание
+    for (low, high), emoji in MQS_EMOJIS.items():
+        if low <= mqs <= high:
+            mqs_emoji = emoji
+            mqs_description = MQS_DESCRIPTIONS[(low, high)]
+            break
+    else:
+        mqs_emoji = "❓"
+        mqs_description = "НЕИЗВЕСТНЫЙ СИГНАЛ"
+
+    return mqs, mqs_emoji, mqs_description
+
+# --- AI Корректировка ---
+def применить_ai_корректировку(score: int, symbol: str) -> int:
+    ai = получить_bybit_ai(symbol)
+    if not ai["available"]:
+        return score
+    long_r = ai["long_ratio"]
+    signal = ai["signal"]
+    log.info(f"Bybit ratio: long={long_r:.1%} short={ai['short_ratio']:.1%} сигнал={signal}")
+    if signal == "bullish":
+        return min(100, score + 5)
+    elif signal == "bearish":
+        return max(0, score - 15)
+    return score
+
+# --- Функции для классического теханализа ---
 def _ema(s: pd.Series, span: int) -> pd.Series:
     return s.ewm(span=span, adjust=False).mean()
 
@@ -603,9 +1094,7 @@ def calc_support_resistance(df: pd.DataFrame, period: int = SR_PERIOD) -> dict:
         "near_support": near_sup, "near_resistance": near_res,
     }
 
-# ============================================================
-# ФИЛЬТРЫ И КРОССОВЕРЫ
-# ============================================================
+# --- Фильтры и кроссоверы ---
 def проверить_ma_кроссовер(df: pd.DataFrame, side: str = "long") -> bool:
     if not MA_CROSSOVER_ENABLED: return True
     try:
@@ -675,27 +1164,7 @@ def тренд_4h_медвежий(symbol: str) -> bool:
         return bool(_ema(df["c"], 20).iloc[-1] < _ema(df["c"], 50).iloc[-1])
     except Exception: return False
 
-# ============================================================
-# БАЙЕСОВСКИЙ ТРЕНД
-# ============================================================
-def bayes_trend_probability(df: pd.DataFrame) -> float:
-    try:
-        close = df["c"]
-        ema20 = _ema(close, 20).iloc[-1]
-        ema50 = _ema(close, 50).iloc[-1]
-        rsi = calc_rsi(close).iloc[-1]
-        adx, _, _ = calc_adx(df)
-        adx_val = adx.iloc[-1]
-        if any(np.isnan(v) for v in [ema20, ema50, rsi, adx_val]): return 0.5
-        if ema50 == 0: return 0.5
-        z = ((ema20/ema50 - 1)*100 + (rsi - 50)/25 + (adx_val - 25)/10)
-        if np.isnan(z) or np.isinf(z): return 0.5
-        return float(np.clip(1.0 / (1.0 + np.exp(-z)), 0.0, 1.0))
-    except Exception: return 0.5
-
-# ============================================================
-# КВАНТОВЫЙ МОДУЛЬ
-# ============================================================
+# --- Квантовый модуль ---
 def calculate_cointegration(pair: Tuple[str, str], window: int = COINTEGRATION_WINDOW) -> Dict[str, Any]:
     try:
         symbol1, symbol2 = pair
@@ -820,9 +1289,7 @@ def get_quant_signals(symbol: str) -> Dict[str, Any]:
                 quant_score += 10
     return {"quant_score": min(100, quant_score), "details": signals}
 
-# ============================================================
-# ORDER FLOW МОДУЛЬ
-# ============================================================
+# --- Order Flow модуль ---
 def get_order_book(symbol: str, depth: int = ORDER_BOOK_DEPTH) -> Dict[str, Any]:
     try:
         order_book = exchange.fetch_order_book(symbol, depth)
@@ -858,35 +1325,45 @@ def get_order_book(symbol: str, depth: int = ORDER_BOOK_DEPTH) -> Dict[str, Any]
         return {"valid": False}
 
 def analyze_volume_profile(symbol: str, bars: int = VOLUME_PROFILE_BARS) -> Dict[str, Any]:
+    """Анализирует Volume Profile для символа."""
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=bars)
         if len(ohlcv) < bars:
             return {"valid": False}
+
         df = pd.DataFrame(ohlcv, columns=["ts", "o", "h", "l", "c", "v"])
         df["price_range"] = (df["h"] + df["l"]) / 2
+
         bins = 20
         hist, bin_edges = np.histogram(df["price_range"], bins=bins, weights=df["v"])
+
         poc_index = np.argmax(hist)
         poc_price = (bin_edges[poc_index] + bin_edges[poc_index + 1]) / 2
         poc_volume = hist[poc_index]
+
         volume_threshold = np.percentile(hist, 70)
         support_levels = []
         resistance_levels = []
+
         for i in range(len(hist)):
             if hist[i] >= volume_threshold:
                 price_level = (bin_edges[i] + bin_edges[i + 1]) / 2
                 prices_below = df[df["price_range"] < price_level]["l"]
                 prices_above = df[df["price_range"] > price_level]["h"]
+
                 if len(prices_below) > 0 and len(prices_above) > 0:
                     if (prices_below < price_level).all() and len(prices_below) >= 3:
                         support_levels.append(price_level)
                     if (prices_above > price_level).all() and len(prices_above) >= 3:
                         resistance_levels.append(price_level)
+
         current_price = df["c"].iloc[-1]
         support_levels = sorted([p for p in support_levels if p < current_price], reverse=True)
         resistance_levels = sorted([p for p in resistance_levels if p > current_price])
+
         nearest_support = support_levels[0] if support_levels else current_price * 0.95
         nearest_resistance = resistance_levels[0] if resistance_levels else current_price * 1.05
+
         return {
             "valid": True, "poc_price": float(poc_price), "poc_volume": float(poc_volume),
             "support_levels": [float(p) for p in support_levels[:3]],
@@ -899,28 +1376,35 @@ def analyze_volume_profile(symbol: str, bars: int = VOLUME_PROFILE_BARS) -> Dict
         return {"valid": False}
 
 def detect_market_maker_activity(symbol: str) -> Dict[str, Any]:
+    """Обнаруживает активность маркетмейкеров."""
     try:
         order_book = get_order_book(symbol, ORDER_BOOK_DEPTH)
         if not order_book["valid"]:
             return {"activity": "unknown", "confidence": 0}
+
         spread_pct = order_book["spread_pct"]
         total_bid_vol = order_book["total_bid_volume"]
         total_ask_vol = order_book["total_ask_volume"]
         imbalance = abs(order_book["imbalance"])
+
         activity_score = 0
+
         if spread_pct < 0.1:
             activity_score += 30
         elif spread_pct < 0.2:
             activity_score += 20
+
         avg_volume = (total_bid_vol + total_ask_vol) / 2
         if avg_volume > 1000:
             activity_score += 25
         elif avg_volume > 500:
             activity_score += 15
+
         if imbalance < 10:
             activity_score += 25
         elif imbalance < 20:
             activity_score += 15
+
         if activity_score > 60:
             activity = "high"
             confidence = min(100, activity_score)
@@ -930,6 +1414,7 @@ def detect_market_maker_activity(symbol: str) -> Dict[str, Any]:
         else:
             activity = "low"
             confidence = activity_score * 0.5
+
         return {
             "activity": activity, "confidence": min(100, confidence),
             "spread_pct": spread_pct, "imbalance": imbalance,
@@ -940,14 +1425,18 @@ def detect_market_maker_activity(symbol: str) -> Dict[str, Any]:
         return {"activity": "unknown", "confidence": 0}
 
 def get_order_flow_signals(symbol: str) -> Dict[str, Any]:
+    """Получает все сигналы Order Flow для символа."""
     if not ORDER_FLOW_ENABLED:
         return {"order_flow_score": 0, "details": {}}
+
     signals = {
         "order_book": get_order_book(symbol),
         "volume_profile": analyze_volume_profile(symbol),
         "market_maker": detect_market_maker_activity(symbol)
     }
+
     order_flow_score = 0
+
     if signals["order_book"]["valid"]:
         imbalance = signals["order_book"]["imbalance"]
         spread_pct = signals["order_book"]["spread_pct"]
@@ -957,6 +1446,7 @@ def get_order_flow_signals(symbol: str) -> Dict[str, Any]:
             order_flow_score -= 15
         if spread_pct < 0.1:
             order_flow_score += 10
+
     if signals["volume_profile"]["valid"]:
         current_price = signals["volume_profile"]["current_price"]
         nearest_support = signals["volume_profile"]["nearest_support"]
@@ -965,229 +1455,29 @@ def get_order_flow_signals(symbol: str) -> Dict[str, Any]:
             order_flow_score += 15
         elif current_price < nearest_resistance * 0.99:
             order_flow_score -= 15
+
     if signals["market_maker"]["activity"] == "high":
         order_flow_score += 10
     elif signals["market_maker"]["activity"] == "medium":
         order_flow_score += 5
+
     return {"order_flow_score": max(0, min(100, order_flow_score + 50)), "details": signals}
 
 # ============================================================
-# НОВЫЕ ИНДИКАТОРЫ BYBIT API
+# ██████████████████████████████████████████████
+# ██████████████████   ML МОДУЛЬ (Marcos Lopez de Prado)   ████████
 # ============================================================
-def get_open_interest_data(symbol: str, window: int = 24) -> Dict[str, Any]:
-    try:
-        oi_now = exchange.fetch_open_interest(symbol)
-        if oi_now == 0:
-            return {"oi_value": 0, "oi_change_pct": 0, "signal": "neutral", "valid": False}
-        ticker = exchange.fetch_ticker(symbol)
-        price_now = ticker["last"]
-        price_past = exchange.fetch_ohlcv(symbol, "1h", limit=window)[-window][4]
-        price_change_pct = (price_now - price_past) / price_past * 100
-        oi_change_pct = 5.0
-        if oi_change_pct > OI_GROWTH_THRESHOLD and price_change_pct > 0:
-            signal = "bullish"
-        elif oi_change_pct > OI_GROWTH_THRESHOLD and price_change_pct < 0:
-            signal = "bearish"
-        elif oi_change_pct < -OI_GROWTH_THRESHOLD:
-            signal = "neutral"
-        else:
-            signal = "neutral"
-        return {
-            "oi_value": oi_now,
-            "oi_change_pct": oi_change_pct,
-            "signal": signal,
-            "valid": True
-        }
-    except Exception as e:
-        log.debug(f"Ошибка Open Interest для {symbol}: {e}")
-        return {"oi_value": 0, "oi_change_pct": 0, "signal": "neutral", "valid": False}
 
-def get_funding_rate_data(symbol: str) -> Dict[str, Any]:
-    try:
-        data = exchange.fetch_funding_rate(symbol)
-        if not data["valid"]:
-            return {"funding_rate": 0, "signal": "neutral", "extreme": False, "valid": False}
-        funding_rate = data["fundingRate"] * 100
-        extreme = abs(funding_rate) > FUNDING_RATE_THRESHOLD
-        if funding_rate > FUNDING_RATE_THRESHOLD:
-            signal = "bearish"
-        elif funding_rate < -FUNDING_RATE_THRESHOLD:
-            signal = "bullish"
-        else:
-            signal = "neutral"
-        return {
-            "funding_rate": funding_rate,
-            "signal": signal,
-            "extreme": extreme,
-            "valid": True
-        }
-    except Exception as e:
-        log.debug(f"Ошибка Funding Rate для {symbol}: {e}")
-        return {"funding_rate": 0, "signal": "neutral", "extreme": False, "valid": False}
+MA_CROSSOVER_ENABLED = True
+MA1_TYPE = "EMA"
+MA2_TYPE = "EMA"
+MA1_LENGTH = 21
+MA2_LENGTH = 50
+MA_TIMEFRAME = "5m"
 
-def get_liquidations_data(symbol: str) -> Dict[str, Any]:
-    try:
-        liquidations = exchange.fetch_liquidations(symbol, limit=50)
-        if not liquidations:
-            return {
-                "total_liquidations_usd": 0,
-                "long_liquidations_usd": 0,
-                "short_liquidations_usd": 0,
-                "signal": "neutral",
-                "valid": False
-            }
-        total_long = 0.0
-        total_short = 0.0
-        for liq in liquidations:
-            side = liq.get("side", "")
-            size = float(liq.get("size", 0))
-            price = float(liq.get("price", 0))
-            volume_usd = size * price
-            if side == "Buy":
-                total_short += volume_usd
-            elif side == "Sell":
-                total_long += volume_usd
-        total = total_long + total_short
-        if total > LIQUIDATION_THRESHOLD_USD:
-            if total_long > total_short * 1.5:
-                signal = "bearish"
-            elif total_short > total_long * 1.5:
-                signal = "bullish"
-            else:
-                signal = "neutral"
-        else:
-            signal = "neutral"
-        return {
-            "total_liquidations_usd": total,
-            "long_liquidations_usd": total_long,
-            "short_liquidations_usd": total_short,
-            "signal": signal,
-            "valid": True
-        }
-    except Exception as e:
-        log.debug(f"Ошибка Liquidations для {symbol}: {e}")
-        return {
-            "total_liquidations_usd": 0,
-            "long_liquidations_usd": 0,
-            "short_liquidations_usd": 0,
-            "signal": "neutral",
-            "valid": False
-        }
-
-def get_insurance_fund_data() -> Dict[str, Any]:
-    try:
-        data = exchange.fetch_insurance_fund()
-        if not data:
-            return {"total_fund": 0, "change_24h": 0, "signal": "normal", "valid": False}
-        total_fund = float(data.get("total", 0))
-        change_24h = 0
-        if total_fund > 10_000_000:
-            signal = "high_volatility"
-        else:
-            signal = "normal"
-        return {
-            "total_fund": total_fund,
-            "change_24h": change_24h,
-            "signal": signal,
-            "valid": True
-        }
-    except Exception as e:
-        log.debug(f"Ошибка Insurance Fund: {e}")
-        return {"total_fund": 0, "change_24h": 0, "signal": "normal", "valid": False}
-
-def get_mark_price_diff(symbol: str) -> Dict[str, Any]:
-    try:
-        ticker = exchange.fetch_ticker(symbol)
-        last_price = ticker["last"]
-        mark_price = ticker["mark_price"]
-        if last_price == 0:
-            return {"last_price": 0, "mark_price": 0, "diff_pct": 0, "safe": False, "valid": False}
-        diff_pct = abs(mark_price - last_price) / last_price * 100
-        safe = diff_pct < MARK_PRICE_DIFF_THRESHOLD
-        return {
-            "last_price": last_price,
-            "mark_price": mark_price,
-            "diff_pct": diff_pct,
-            "safe": safe,
-            "valid": True
-        }
-    except Exception as e:
-        log.debug(f"Ошибка Mark Price Diff для {symbol}: {e}")
-        return {"last_price": 0, "mark_price": 0, "diff_pct": 0, "safe": False, "valid": False}
-
-def get_taker_volume_data(symbol: str) -> Dict[str, Any]:
-    try:
-        data = exchange.fetch_taker_volume(symbol)
-        if not data["valid"]:
-            return {"buy_vol": 0, "sell_vol": 0, "ratio": 1, "signal": "neutral", "valid": False}
-        buy_vol = data["buyVol"]
-        sell_vol = data["sellVol"]
-        ratio = buy_vol / (sell_vol + 1e-10)
-        if ratio > TAKER_BUY_SELL_RATIO_THRESHOLD:
-            signal = "bullish"
-        elif ratio < 1 / TAKER_BUY_SELL_RATIO_THRESHOLD:
-            signal = "bearish"
-        else:
-            signal = "neutral"
-        return {
-            "buy_vol": buy_vol,
-            "sell_vol": sell_vol,
-            "ratio": ratio,
-            "signal": signal,
-            "valid": True
-        }
-    except Exception as e:
-        log.debug(f"Ошибка Taker Volume для {symbol}: {e}")
-        return {"buy_vol": 0, "sell_vol": 0, "ratio": 1, "signal": "neutral", "valid": False}
-
-def get_bybit_advanced_signals(symbol: str) -> Dict[str, Any]:
-    signals = {
-        "open_interest": get_open_interest_data(symbol),
-        "funding_rate": get_funding_rate_data(symbol),
-        "liquidations": get_liquidations_data(symbol),
-        "insurance_fund": get_insurance_fund_data(),
-        "mark_price_diff": get_mark_price_diff(symbol),
-        "taker_volume": get_taker_volume_data(symbol),
-    }
-    advanced_score = 0
-    if signals["open_interest"]["valid"]:
-        if signals["open_interest"]["signal"] == "bullish":
-            advanced_score += 10
-        elif signals["open_interest"]["signal"] == "bearish":
-            advanced_score -= 10
-    if signals["funding_rate"]["valid"]:
-        if signals["funding_rate"]["extreme"]:
-            if signals["funding_rate"]["signal"] == "bullish":
-                advanced_score += 15
-            else:
-                advanced_score -= 15
-        else:
-            if signals["funding_rate"]["signal"] == "bullish":
-                advanced_score += 5
-            elif signals["funding_rate"]["signal"] == "bearish":
-                advanced_score -= 5
-    if signals["liquidations"]["valid"]:
-        if signals["liquidations"]["signal"] == "bullish":
-            advanced_score += 10
-        elif signals["liquidations"]["signal"] == "bearish":
-            advanced_score -= 10
-    if signals["mark_price_diff"]["valid"]:
-        if not signals["mark_price_diff"]["safe"]:
-            advanced_score -= 20
-    if signals["taker_volume"]["valid"]:
-        if signals["taker_volume"]["signal"] == "bullish":
-            advanced_score += 10
-        elif signals["taker_volume"]["signal"] == "bearish":
-            advanced_score -= 10
-    return {
-        "advanced_score": max(-50, min(50, advanced_score)),
-        "details": signals
-    }
-
-# ============================================================
-# ML МОДУЛЬ
-# ============================================================
 class TradingModel:
+    """Класс для машинного обучения в трейдинге."""
+
     def __init__(self, model_type: str = "RandomForest"):
         self.model_type = model_type
         self.model = None
@@ -1205,10 +1495,12 @@ class TradingModel:
 
     def create_features(self, symbol: str, df_ta: pd.DataFrame, df_1h: pd.DataFrame,
                        order_flow_data: Dict, quant_data: Dict) -> Dict[str, float]:
+        """Создает features для модели."""
         try:
             features = {}
             c_ta = df_ta["c"]
             c_1h = df_1h["c"]
+
             features["rsi"] = float(calc_rsi(c_ta).iloc[-1])
             features["rsi_1h"] = float(calc_rsi(c_1h).iloc[-1])
             ml, sl_macd, _ = calc_macd(c_ta)
@@ -1222,38 +1514,45 @@ class TradingModel:
             features["price_change_5m"] = float((c_ta.iloc[-1] - c_ta.iloc[-2]) / c_ta.iloc[-2] * 100)
             features["price_change_15m"] = float((c_ta.iloc[-1] - c_ta.iloc[-3]) / c_ta.iloc[-3] * 100)
             features["price_change_1h"] = float((c_1h.iloc[-1] - c_1h.iloc[-2]) / c_1h.iloc[-2] * 100)
+
             if order_flow_data.get("order_book", {}).get("valid"):
                 features["spread_pct"] = order_flow_data["order_book"]["spread_pct"]
                 features["imbalance"] = order_flow_data["order_book"]["imbalance"]
             else:
                 features["spread_pct"] = 0
                 features["imbalance"] = 0
+
             if order_flow_data.get("volume_profile", {}).get("valid"):
                 cp = order_flow_data["volume_profile"]["current_price"]
                 poc = order_flow_data["volume_profile"]["poc_price"]
                 features["poc_distance"] = float((cp - poc) / poc * 100)
             else:
                 features["poc_distance"] = 0
+
             if quant_data.get("details", {}).get("mean_reversion", {}).get("valid"):
                 features["mean_reversion_zscore"] = quant_data["details"]["mean_reversion"]["zscore"]
             else:
                 features["mean_reversion_zscore"] = 0
+
             if quant_data.get("details", {}).get("momentum", {}).get("valid"):
                 features["momentum"] = quant_data["details"]["momentum"]["momentum"]
             else:
                 features["momentum"] = 0
+
             coint_zscore = 0
             for pair_data in quant_data.get("details", {}).get("cointegration", {}).values():
                 if pair_data.get("valid"):
                     coint_zscore = pair_data["zscore"]
                     break
             features["cointegration_zscore"] = float(coint_zscore)
+
             return features
         except Exception as e:
             log.debug(f"Ошибка создания features для {symbol}: {e}")
             return {f: 0 for f in self.features}
 
     def prepare_training_data(self, trades: List[dict]) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[pd.Series], Optional[pd.Series]]:
+        """Готовит данные для обучения модели."""
         try:
             X, y = [], []
             for trade in trades:
@@ -1272,8 +1571,10 @@ class TradingModel:
                 }
                 X.append(features)
                 y.append(1 if trade.get("результат", "sl") == "tp" else 0)
+
             if len(X) < ML_MIN_SAMPLES:
                 return None, None, None, None
+
             X_df = pd.DataFrame(X)
             y_series = pd.Series(y)
             return train_test_split(X_df, y_series, test_size=0.2, random_state=42)
@@ -1282,17 +1583,21 @@ class TradingModel:
             return None, None, None, None
 
     def train(self, trades: List[dict]) -> bool:
+        """Обучает модель."""
         try:
             X_train, X_test, y_train, y_test = self.prepare_training_data(trades)
             if X_train is None:
                 log.info("Недостаточно данных для обучения ML модели")
                 return False
+
             X_train_scaled = self.scaler.fit_transform(X_train)
             X_test_scaled = self.scaler.transform(X_test)
+
             if self.model_type == "RandomForest":
                 self.model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42, class_weight="balanced")
             else:
                 self.model = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1, max_depth=5, random_state=42)
+
             self.model.fit(X_train_scaled, y_train)
             y_pred = self.model.predict(X_test_scaled)
             self.accuracy = accuracy_score(y_test, y_pred)
@@ -1307,6 +1612,7 @@ class TradingModel:
 
     def predict(self, symbol: str, df_ta: pd.DataFrame, df_1h: pd.DataFrame,
                order_flow_data: Dict, quant_data: Dict) -> Dict[str, Any]:
+        """Предсказывает сигнал для символа."""
         if not self.trained:
             return {"signal": "neutral", "probability": 0.5, "valid": False}
         try:
@@ -1324,6 +1630,7 @@ class TradingModel:
             return {"signal": "neutral", "probability": 0.5, "valid": False}
 
     def save_model(self, filepath: str = ML_MODEL_FILE) -> bool:
+        """Сохраняет модель в файл."""
         try:
             import joblib
             joblib.dump({"model": self.model, "scaler": self.scaler, "features": self.features,
@@ -1335,6 +1642,7 @@ class TradingModel:
             return False
 
     def load_model(self, filepath: str = ML_MODEL_FILE) -> bool:
+        """Загружает модель из файла."""
         try:
             import joblib
             data = joblib.load(filepath)
@@ -1353,9 +1661,12 @@ class TradingModel:
 ml_model = TradingModel(ML_MODEL_TYPE)
 
 # ============================================================
-# ПОРТФЕЛЬНЫЙ МЕНЕДЖМЕНТ
+# ████████████████████████████████████████████████
+# █████████████████   ПОРТФЕЛЬНЫЙ МЕНЕДЖМЕНТ   ████████████████
 # ============================================================
+
 def calculate_correlation_matrix(symbols: List[str], window: int = 100) -> pd.DataFrame:
+    """Рассчитывает матрицу корреляции между символами."""
     try:
         prices = {}
         for symbol in symbols:
@@ -1373,10 +1684,12 @@ def calculate_correlation_matrix(symbols: List[str], window: int = 100) -> pd.Da
         return pd.DataFrame()
 
 def optimize_portfolio_allocation(symbols: List[str], total_risk: float = MAX_PORTFOLIO_RISK) -> Dict[str, float]:
+    """Оптимизирует распределение капитала между символами."""
     try:
         corr_matrix = calculate_correlation_matrix(symbols)
         if corr_matrix.empty:
             return {s: 1.0 / len(symbols) for s in symbols}
+
         volatilities = {}
         for symbol in symbols:
             try:
@@ -1386,11 +1699,13 @@ def optimize_portfolio_allocation(symbols: List[str], total_risk: float = MAX_PO
                     volatilities[symbol] = float(df["c"].pct_change().dropna().std())
             except:
                 volatilities[symbol] = 0.01
+
         total_vol = sum(volatilities.values())
         if total_vol > 0:
             allocations = {s: (1 / (volatilities[s] + 1e-10)) / sum(1 / (v + 1e-10) for v in volatilities.values()) for s in symbols}
         else:
             allocations = {s: 1.0 / len(symbols) for s in symbols}
+
         for i, symbol1 in enumerate(symbols):
             for symbol2 in symbols[i+1:]:
                 if symbol1 in corr_matrix.index and symbol2 in corr_matrix.columns:
@@ -1398,6 +1713,7 @@ def optimize_portfolio_allocation(symbols: List[str], total_risk: float = MAX_PO
                     if corr > CORRELATION_THRESHOLD:
                         allocations[symbol1] *= (1 - (corr - CORRELATION_THRESHOLD) * 0.5)
                         allocations[symbol2] *= (1 - (corr - CORRELATION_THRESHOLD) * 0.5)
+
         total = sum(allocations.values())
         if total > 0:
             allocations = {s: v / total * total_risk for s, v in allocations.items()}
@@ -1407,10 +1723,13 @@ def optimize_portfolio_allocation(symbols: List[str], total_risk: float = MAX_PO
         return {s: total_risk / len(symbols) for s in symbols}
 
 # ============================================================
-# МОНТЕ-КАРЛО СИМУЛЯЦИИ
+# ████████████████████████████████████████████████
+# █████████████████   МОНТЕ-КАРЛО СИМУЛЯЦИИ   █████████████████
 # ============================================================
+
 def run_monte_carlo_simulation(trades: List[dict], simulations: int = MONTE_CARLO_SIMULATIONS,
                                days: int = MONTE_CARLO_DAYS) -> Dict[str, Any]:
+    """Запускает Monte Carlo симуляции для оценки риска."""
     try:
         if len(trades) < 10:
             return {"valid": False, "message": "Недостаточно данных"}
@@ -1418,15 +1737,18 @@ def run_monte_carlo_simulation(trades: List[dict], simulations: int = MONTE_CARL
         mean_pnl = np.mean(pnls)
         std_pnl = np.std(pnls)
         simulated_equity = []
+
         for _ in range(simulations):
             simulated_pnls = np.random.normal(mean_pnl, std_pnl, days)
             simulated_equity.append(np.cumsum(simulated_pnls))
+
         simulated_equity = np.array(simulated_equity)
         max_drawdowns = []
         for equity in simulated_equity:
             running_max = np.maximum.accumulate(equity)
             drawdown = equity - running_max
             max_drawdowns.append(np.min(drawdown))
+
         return {
             "valid": True, "simulations": simulations, "days": days,
             "percentile_5": float(np.percentile(simulated_equity[:, -1], 5)),
@@ -1442,8 +1764,155 @@ def run_monte_carlo_simulation(trades: List[dict], simulations: int = MONTE_CARL
         return {"valid": False, "message": str(e)}
 
 # ============================================================
-# ОБНОВЛЁННАЯ СИСТЕМА СКОРИНГА
+# ███████████████████████████████████████████████
+# █████████████████   РАСШИРЕННАЯ СКОРИНГОВАЯ СИСТЕМА   ██████████
 # ============================================================
+
+def рассчитать_mqs(symbol: str, details: dict, side: str) -> Tuple[float, str, str]:
+    """
+    Рассчитывает Матрично-Квантовый Скоринг (MQS) от 0 до 100.
+    Возвращает:
+    - mqs_score: числовое значение (0-100)
+    - mqs_emoji: смайлик (🟢, 🟡, 🟠, 🔴, ⚫)
+    - mqs_description: описание ("СИЛЬНЫЙ СИГНАЛ", и т.д.)
+    """
+    # 1. Классический теханализ (15%)
+    classic_score = 0.0
+    rsi_val = details.get("rsi", 50)
+    if 25 <= rsi_val <= 40: classic_score += 20
+    elif 40 < rsi_val <= 50: classic_score += 12
+    elif rsi_val < 25: classic_score += 10
+    elif 50 < rsi_val <= 60: classic_score += 5
+    rsi_1h = details.get("rsi_1h", 50)
+    if rsi_1h < 50: classic_score += 10
+    elif rsi_1h < 60: classic_score += 5
+    macd_bull = details.get("macd") == "бычий"
+    if macd_bull: classic_score += 8
+    rf_up = details.get("range_filter") == "вверх"
+    if rf_up: classic_score += 15
+    st_up = details.get("supertrend") == "вверх"
+    if st_up: classic_score += 12
+    hu_up = details.get("hull") == "вверх"
+    if hu_up: classic_score += 8
+    ema50_1h = details.get("ema50_1h", 0)
+    ema200_1h = details.get("ema200_1h", 0)
+    if ema50_1h > ema200_1h: classic_score += 10
+    adx_val = details.get("adx", 0)
+    if adx_val > 25: classic_score += 10
+    k_val = details.get("stoch_k", 50)
+    if k_val < 20: classic_score += 10
+    elif k_val < 40: classic_score += 5
+    vol_ratio = details.get("объём_ratio", 1)
+    if vol_ratio > 1.5: classic_score += 8
+    elif vol_ratio > 1.2: classic_score += 4
+    sr = details.get("sr_signal", "")
+    if "поддержки" in sr: classic_score += 15
+    elif "сопротивления" in sr: classic_score -= 25
+    bayes_prob = details.get("bayes_prob", 0.5)
+    classic_score += bayes_prob * 10
+    classic_score = min(100, max(0, classic_score))
+    classic_score_normalized = (classic_score / 100) * 2 - 1  # Преобразуем в [-1, 1]
+
+    # 2. Decision Matrix (25%)
+    decision_score = decision_matrix_score(details, side)
+
+    # 3. Nash Equilibrium (15%)
+    nash_score = nash_equilibrium_score(symbol, side)
+
+    # 4. Markov Chain (15%)
+    markov_score = markov_chain_score(details, side)
+
+    # 5. Hurst Exponent (10%)
+    hurst_score = hurst_exponent_score(details, side, symbol)
+
+    # 6. Coin Flip (10%)
+    coin_score = dynamic_coin_flip(symbol, details, side)
+
+    # 7. Bayesian Probability (10%)
+    bayesian_score = bayesian_score(details, side)
+
+    # Вычисляем MQS как взвешенную сумму
+    mqs = (
+        classic_score_normalized * MQS_WEIGHTS["classic_ta"] +
+        decision_score * MQS_WEIGHTS["decision_matrix"] +
+        nash_score * MQS_WEIGHTS["nash_equilibrium"] +
+        markov_score * MQS_WEIGHTS["markov_chain"] +
+        hurst_score * MQS_WEIGHTS["hurst_exponent"] +
+        coin_score * MQS_WEIGHTS["coin_flip"] +
+        bayesian_score * MQS_WEIGHTS["bayesian"]
+    )
+
+    # Нормализуем MQS от 0 до 100
+    mqs = (mqs + 1) * 50  # [-1, 1] → [0, 100]
+
+    # Определяем смайлик и описание
+    for (low, high), emoji in MQS_EMOJIS.items():
+        if low <= mqs <= high:
+            mqs_emoji = emoji
+            mqs_description = MQS_DESCRIPTIONS[(low, high)]
+            break
+    else:
+        mqs_emoji = "❓"
+        mqs_description = "НЕИЗВЕСТНЫЙ СИГНАЛ"
+
+    return mqs, mqs_emoji, mqs_description
+
+def получить_скор_шорта(symbol: str) -> dict:
+    """Получает скор для шорта."""
+    res = получить_скор(symbol)
+    if res["score"] == 0: return res
+    res["score"] = max(0, 100 - res["score"] - 10)
+    try:
+        raw = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=300)
+        if len(raw) >= 50:
+            df = pd.DataFrame(raw, columns=["ts","o","h","l","c","v"])
+            res["details"]["ma_cross"] = проверить_ma_кроссовер(df, side="short")
+    except: pass
+    return res
+
+def dynamic_coin_flip(symbol: str, details: dict, side: str) -> float:
+    """
+    Динамическая вероятность покупки/продажи на основе нескольких индикаторов.
+    """
+    prob = 0.5  # Базовая вероятность
+
+    # RSI (вес: 40%)
+    rsi = details.get("rsi", 50)
+    if rsi < 30:
+        prob += 0.2
+    elif rsi > 70:
+        prob -= 0.2
+
+    # MACD (вес: 30%)
+    macd_signal = details.get("macd", "нейтральный")
+    if macd_signal == "бычий":
+        prob += 0.15
+    elif macd_signal == "медвежий":
+        prob -= 0.15
+
+    # Funding Rate (вес: 20%)
+    funding_signal = details.get("funding_rate", {}).get("signal", "neutral")
+    if funding_signal == "bullish":
+        prob += 0.1
+    elif funding_signal == "bearish":
+        prob -= 0.1
+
+    # Liquidations (вес: 10%)
+    liq_signal = details.get("liquidations", {}).get("signal", "neutral")
+    if liq_signal == "bullish":
+        prob += 0.05
+    elif liq_signal == "bearish":
+        prob -= 0.05
+
+    # Ограничиваем вероятность от 0.1 до 0.9
+    prob = max(0.1, min(0.9, prob))
+
+    # Возвращаем скор (-1 до 1)
+    if side == "long":
+        return 2 * prob - 1  # Преобразуем [0.1, 0.9] → [-0.8, 0.8]
+    else:
+        return 1 - 2 * prob  # Инвертируем для шорта
+
 def получить_скор(
     symbol: str,
     use_quant: bool = True,
@@ -1451,15 +1920,21 @@ def получить_скор(
     use_ml: bool = True,
     use_advanced: bool = True
 ) -> dict:
+    """
+    Получает скор для символа с учетом всех модулей и MQS.
+    """
     details = {}
-    score = 0
+    classic_score = 0
     price = 0.0
     sr = {}
+
     try:
+        # --- Получаем данные OHLCV ---
         raw_ta = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=300)
         raw_1h = exchange.fetch_ohlcv(symbol, TIMEFRAME_TREND, limit=300)
         if len(raw_ta) < 100 or len(raw_1h) < 100:
-            return {"score": 0, "details": {}, "price": 0, "sr": {}}
+            return {"score": 0, "mqs": 0, "mqs_emoji": "❓", "mqs_description": "НЕДОСТАТОЧНО ДАННЫХ", "details": {}, "price": 0, "sr": {}}
+
         cols = ["ts", "o", "h", "l", "c", "v"]
         df_ta = pd.DataFrame(raw_ta, columns=cols).reset_index(drop=True)
         df_1h = pd.DataFrame(raw_1h, columns=cols).reset_index(drop=True)
@@ -1467,61 +1942,63 @@ def получить_скор(
         c_1h = df_1h["c"]
         price = float(c_ta.iloc[-1])
 
-        # КЛАССИЧЕСКИЙ ТЕХАНАЛИЗ
+        # --- КЛАССИЧЕСКИЙ ТЕХАНАЛИЗ (для MQS) ---
         rsi_val = calc_rsi(c_ta).iloc[-1]
         details["rsi"] = round(rsi_val, 1)
-        if 25 <= rsi_val <= 40: score += 20
-        elif 40 < rsi_val <= 50: score += 12
-        elif rsi_val < 25: score += 10
-        elif 50 < rsi_val <= 60: score += 5
+        if 25 <= rsi_val <= 40: classic_score += 20
+        elif 40 < rsi_val <= 50: classic_score += 12
+        elif rsi_val < 25: classic_score += 10
+        elif 50 < rsi_val <= 60: classic_score += 5
 
         rsi_1h = calc_rsi(c_1h).iloc[-1]
         details["rsi_1h"] = round(rsi_1h, 1)
-        if rsi_1h < 50: score += 10
-        elif rsi_1h < 60: score += 5
+        if rsi_1h < 50: classic_score += 10
+        elif rsi_1h < 60: classic_score += 5
 
         ml, sl_macd, _ = calc_macd(c_ta)
         macd_bull = ml.iloc[-1] > sl_macd.iloc[-1]
         macd_cross = macd_bull and ml.iloc[-2] <= sl_macd.iloc[-2]
         details["macd"] = "бычий" if macd_bull else "медвежий"
-        if macd_cross: score += 18
-        elif macd_bull: score += 8
+        if macd_cross: classic_score += 18
+        elif macd_bull: classic_score += 8
 
         _, _, _, rf_up, rf_down = calc_range_filter(df_ta)
         rf_up_now = rf_up.iloc[-1]
         details["range_filter"] = "вверх" if rf_up_now else ("вниз" if rf_down.iloc[-1] else "бок")
-        if rf_up_now: score += 15
+        if rf_up_now: classic_score += 15
 
         st_up, _ = calc_supertrend(df_ta)
         details["supertrend"] = "вверх" if st_up.iloc[-1] else "вниз"
-        if st_up.iloc[-1]: score += 12
+        if st_up.iloc[-1]: classic_score += 12
 
         hu_up, _ = calc_hull(c_ta)
         details["hull"] = "вверх" if hu_up.iloc[-1] else "вниз"
-        if hu_up.iloc[-1]: score += 8
+        if hu_up.iloc[-1]: classic_score += 8
 
         ema50_1h = _ema(c_1h, 50).iloc[-1]
         ema200_1h = _ema(c_1h, 200).iloc[-1]
         details["тренд_1h"] = "бычий" if ema50_1h > ema200_1h else "медвежий"
-        if ema50_1h > ema200_1h: score += 10
+        if ema50_1h > ema200_1h: classic_score += 10
 
         adx, pdi, mdi = calc_adx(df_ta)
         adx_val = adx.iloc[-1]
         details["adx"] = round(adx_val, 1)
-        if adx_val > 25 and pdi.iloc[-1] > mdi.iloc[-1]: score += 10
-        elif adx_val > 20 and pdi.iloc[-1] > mdi.iloc[-1]: score += 4
+        details["pdi"] = round(pdi.iloc[-1], 1)
+        details["mdi"] = round(mdi.iloc[-1], 1)
+        if adx_val > 25 and pdi.iloc[-1] > mdi.iloc[-1]: classic_score += 10
+        elif adx_val > 20 and pdi.iloc[-1] > mdi.iloc[-1]: classic_score += 4
 
         k_ser, _ = calc_stochastic(df_ta)
         k_val = k_ser.iloc[-1]
         details["stoch_k"] = round(k_val, 1)
-        if k_val < 20: score += 10
-        elif k_val < 40: score += 5
+        if k_val < 20: classic_score += 10
+        elif k_val < 40: classic_score += 5
 
         vol_avg = df_ta["v"].rolling(VOLUME_AVG_PERIOD).mean().iloc[-1]
         vol_ratio = df_ta["v"].iloc[-1] / (vol_avg + 1e-10)
         details["объём_ratio"] = round(vol_ratio, 2)
-        if vol_ratio > 1.5: score += 8
-        elif vol_ratio > 1.2: score += 4
+        if vol_ratio > 1.5: classic_score += 8
+        elif vol_ratio > 1.2: classic_score += 4
 
         sr = calc_support_resistance(df_ta)
         details.update({
@@ -1529,54 +2006,54 @@ def получить_скор(
             "dist_sup": sr["dist_to_sup_pct"], "dist_res": sr["dist_to_res_pct"]
         })
         if sr["near_support"]:
-            score += 15
+            classic_score += 15
             details["sr_signal"] = f"у поддержки ✅ ({sr['sup_cluster']} касаний)"
         elif sr["near_resistance"]:
-            score -= 25
+            classic_score -= 25
             details["sr_signal"] = f"у сопротивления ❌ ({sr['res_cluster']} касаний)"
         else:
             details["sr_signal"] = f"нейтр (sup={sr['dist_to_sup_pct']:.2f}% res={sr['dist_to_res_pct']:.2f}%)"
 
         last3_bearish = all(df_ta["c"].iloc[-i] < df_ta["o"].iloc[-i] for i in range(1, 4))
         if last3_bearish:
-            score -= 20
+            classic_score -= 20
             details["свечи_3red"] = True
 
         bayes_prob = bayes_trend_probability(df_ta)
         details["bayes_prob"] = round(bayes_prob, 2)
-        score += int(bayes_prob * 10)
+        classic_score += int(bayes_prob * 10)
 
-        # КВАНТОВЫЙ АНАЛИЗ
+        # --- КВАНТОВЫЙ АНАЛИЗ ---
         if use_quant and QUANT_ENABLED:
             quant_data = get_quant_signals(symbol)
             quant_score = quant_data["quant_score"]
             details["quant_score"] = quant_score
-            score += quant_score * 0.3
+            classic_score += quant_score * 0.3
             details["quant_details"] = quant_data["details"]
 
-        # ORDER FLOW АНАЛИЗ
+        # --- ORDER FLOW АНАЛИЗ ---
         if use_order_flow and ORDER_FLOW_ENABLED:
             order_flow_data = get_order_flow_signals(symbol)
             of_score = order_flow_data["order_flow_score"]
             details["order_flow_score"] = of_score
-            score += of_score * 0.2
+            classic_score += of_score * 0.2
             details["order_flow_details"] = order_flow_data["details"]
 
-        # НОВЫЕ ИНДИКАТОРЫ BYBIT API
+        # --- НОВЫЕ ИНДИКАТОРЫ BYBIT API ---
         if use_advanced:
             advanced_data = get_bybit_advanced_signals(symbol)
             advanced_score = advanced_data["advanced_score"]
             details["advanced_score"] = advanced_score
-            score += advanced_score * 0.4
+            classic_score += advanced_score * 0.4
             details["advanced_details"] = advanced_data["details"]
 
-        # Проверяем Mark Price vs Last Price
+        # --- Проверяем Mark Price vs Last Price ---
         mark_price_data = get_mark_price_diff(symbol)
         if mark_price_data["valid"] and not mark_price_data["safe"]:
             details["mark_price_unsafe"] = True
-            score -= 30
+            classic_score -= 30
 
-        # ML АНАЛИЗ
+        # --- ML АНАЛИЗ ---
         if use_ml and ML_ENABLED and ml_model.trained:
             ml_prediction = ml_model.predict(
                 symbol, df_ta, df_1h,
@@ -1587,22 +2064,57 @@ def получить_скор(
                 ml_prob = ml_prediction["probability"]
                 details["ml_probability"] = round(ml_prob, 2)
                 details["ml_signal"] = ml_prediction["signal"]
-                if ml_prob > 0.7: score += 15
-                elif ml_prob > 0.6: score += 10
-                elif ml_prob > 0.55: score += 5
+                if ml_prob > 0.7: classic_score += 15
+                elif ml_prob > 0.6: classic_score += 10
+                elif ml_prob > 0.55: classic_score += 5
 
         details["ma_cross"] = проверить_ma_кроссовер(df_ta, side="long")
         details["vol_spike_ok"] = volume_spike_guard(df_ta)
 
-        return {"score": max(0, min(100, score)), "details": details, "price": price, "sr": sr}
+        # --- ВЫЧИСЛЯЕМ MQS ---
+        mqs, mqs_emoji, mqs_description = рассчитать_mqs(symbol, details, "long")
+
+        # --- Логируем MQS ---
+        log.info(f"[MQS] {mqs_emoji} {mqs:.1f}/100 → {mqs_description}")
+
+        # --- Возвращаем результаты ---
+        return {
+            "score": max(0, min(100, classic_score)),  # Классический скор (для совместимости)
+            "mqs": mqs,  # Матрично-Квантовый Скоринг
+            "mqs_emoji": mqs_emoji,  # Смайлик
+            "mqs_description": mqs_description,  # Описание
+            "details": details,
+            "price": price,
+            "sr": sr
+        }
     except Exception as e:
         log.warning(f"Ошибка анализа {symbol}: {e}")
-        return {"score": 0, "details": {}, "price": 0, "sr": {}}
+        return {
+            "score": 0,
+            "mqs": 0,
+            "mqs_emoji": "❓",
+            "mqs_description": "ОШИБКА АНАЛИЗА",
+            "details": {},
+            "price": 0,
+            "sr": {}
+        }
 
 def получить_скор_шорта(symbol: str) -> dict:
     res = получить_скор(symbol)
     if res["score"] == 0: return res
+
+    # Инвертируем классический скор для шорта
     res["score"] = max(0, 100 - res["score"] - 10)
+
+    # Пересчитываем MQS для шорта
+    mqs, mqs_emoji, mqs_description = рассчитать_mqs(symbol, res["details"], "short")
+    res["mqs"] = mqs
+    res["mqs_emoji"] = mqs_emoji
+    res["mqs_description"] = mqs_description
+
+    # Логируем MQS для шорта
+    log.info(f"[MQS SHORT] {mqs_emoji} {mqs:.1f}/100 → {mqs_description}")
+
     try:
         raw = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=300)
         if len(raw) >= 50:
@@ -1611,19 +2123,11 @@ def получить_скор_шорта(symbol: str) -> dict:
     except: pass
     return res
 
-def применить_ai_корректировку(score: int, symbol: str) -> int:
-    ai = получить_bybit_ai(symbol)
-    if not ai["available"]: return score
-    long_r = ai["long_ratio"]
-    signal = ai["signal"]
-    log.info(f"Bybit ratio: long={long_r:.1%} short={ai['short_ratio']:.1%} сигнал={signal}")
-    if signal == "bullish": return min(100, score + 5)
-    elif signal == "bearish": return max(0, score - 15)
-    return score
+# ============================================================
+# ███████████████████████████████████████████████
+# ██████████████████   РИСК-МЕНЕДЖМЕНТ   ██████████████████████
+# ============================================================
 
-# ============================================================
-# ИСПРАВЛЕННЫЙ РИСК-МЕНЕДЖМЕНТ
-# ============================================================
 def рассчитать_оптимальное_f(сделки: List[dict]) -> float:
     if len(сделки) < MIN_TRADES_FOR_F:
         log.info(f"Недостаточно сделок для Kelly ({len(сделки)} < {MIN_TRADES_FOR_F})")
@@ -1638,9 +2142,7 @@ def рассчитать_оптимальное_f(сделки: List[dict]) -> f
     avg_loss = abs(sum(t['pnl_usdt'] for t in сделки if t['pnl_usdt'] < 0)) / losses if losses else 1
     if avg_loss == 0: avg_loss = 1
     kelly = win_rate - (1 - win_rate) / (avg_win / avg_loss)
-    f_opt = min(max(0, kelly * 0.4), MAX_RISK_PERCENT_F / 100)
-    log.info(f"Kelly: win_rate={win_rate:.2f}, avg_win={avg_win:.2f}, avg_loss={avg_loss:.2f} → f={f_opt:.4f}")
-    return f_opt
+    return min(max(0, kelly * 0.4), MAX_RISK_PERCENT_F / 100)
 
 def рассчитать_размер_позиции(score: int, баланс: float, sl_dist_pct: float,
                                история_сделок: List[dict] = None) -> float:
@@ -1652,13 +2154,8 @@ def рассчитать_размер_позиции(score: int, баланс: f
         factor = max(0, (score - MIN_SCORE)) / (100 - MIN_SCORE)
         risk_pct = min(BASE_RISK_PCT + (MAX_RISK_PCT - BASE_RISK_PCT) * factor, MAX_RISK_PCT)
     max_loss_usdt = баланс * risk_pct / 100
-    margin_usdt = max_loss_usdt / (sl_dist_pct / 100)
-    margin_usdt = min(margin_usdt, баланс * MAX_MARGIN_PCT / 100)
-    margin_usdt = min(margin_usdt, баланс * 0.95)
-    log.info(
-        f"Скор={score} → риск={risk_pct:.1f}% SL_dist={sl_dist_pct:.2f}% "
-        f"маржа={margin_usdt:.2f}U (макс {MAX_MARGIN_PCT}% от баланса)"
-    )
+    margin_usdt = min(max_loss_usdt / (sl_dist_pct / 100), баланс * 0.95)
+    log.info(f"Скор={score} → риск={risk_pct:.1f}% SL_dist={sl_dist_pct:.2f}% маржа={margin_usdt:.2f}U")
     return round(max(1.0, margin_usdt), 2)
 
 def подтвердить_вход(symbol: str, исходный_скор: int, side: str = "long") -> bool:
@@ -1683,9 +2180,7 @@ def подтвердить_вход(symbol: str, исходный_скор: int,
     log.info(f"Вход подтверждён. Скор {новый_скор}/100")
     return True
 
-# ============================================================
-# ИСПОЛНЕНИЕ ОРДЕРОВ
-# ============================================================
+# --- ИСПОЛНЕНИЕ ОРДЕРОВ ---
 def установить_плечо(symbol: str, leverage: int) -> bool:
     try:
         exchange.set_leverage(leverage, symbol, params={"buyLeverage": leverage, "sellLeverage": leverage})
@@ -1788,9 +2283,7 @@ def проверить_signal_exit(symbol: str, side: str) -> bool:
         return bool(st_down.iloc[-1] and rf_down.iloc[-1]) if side == "long" else bool(st_up.iloc[-1] and rf_up.iloc[-1])
     except Exception: return False
 
-# ============================================================
-# ИСПРАВЛЕННЫЙ МОНИТОРИНГ ПОЗИЦИЙ
-# ============================================================
+# --- МОНИТОРИНГ ПОЗИЦИЙ ---
 def мониторить_позицию(symbol: str, entry_price: float, qty: float,
                         открыта_в: float, sl_цена: float,
                         tp_цена: float, side: str = "long") -> str:
@@ -1801,18 +2294,33 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
         breakeven_price = entry_price * (1 + BYBIT_FEE * 2 + fee_buffer)
     else:
         breakeven_price = entry_price * (1 - BYBIT_FEE * 2 - fee_buffer)
+
+    # Настройки трейлинга
+    trailing_step = MIN_TRAILING_STEP / 100
+    trailing_offset = MIN_TRAILING_OFFSET / 100
+
+    try:
+        raw = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=50)
+        if len(raw) >= 30:
+            df = pd.DataFrame(raw, columns=["ts", "o", "h", "l", "c", "v"])
+            atr_val = calc_atr(df, TRAILING_ATR_PERIOD).iloc[-1]
+            atr_pct = (atr_val / entry_price) * 100
+            trailing_step = max(MIN_TRAILING_STEP, atr_pct * TRAILING_ATR_MULT) / 100
+            trailing_offset = max(MIN_TRAILING_OFFSET, atr_pct * TRAILING_OFFSET_MULT) / 100
+    except Exception:
+        pass
+
     if side == "long":
         rr_trigger_price = entry_price + (tp_цена - entry_price) * RR_EXIT_TRIGGER
     else:
         rr_trigger_price = entry_price - (entry_price - tp_цена) * RR_EXIT_TRIGGER
-    log.info(
-        f"Мониторинг {coin} {side} вход={entry_price:.8f} SL={sl_цена:.8f} "
-        f"TP={tp_цена:.8f} BE={breakeven_price:.8f} RR_trigger={rr_trigger_price:.8f}"
-    )
+
+    log.info(f"Мониторинг {coin} {side} вход={entry_price:.8f} SL={sl_цена:.8f} TP={tp_цена:.8f} BE={breakeven_price:.8f}")
     текущий_sl = sl_цена
     пиковая_цена = entry_price
     be_done = False
     trailing_активен = False
+
     while True:
         сейчас = time.time()
         if сейчас >= deadline:
@@ -1820,83 +2328,67 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
             закрыть_позицию_с_подтверждением(symbol, qty, side)
             return "таймаут"
         time.sleep(15)
+
         try:
             positions = exchange.fetch_positions([symbol])
-            active = [
-                p for p in positions
-                if float(p.get("contracts", 0) or 0) > 0 and p.get("side") == side
-            ]
+            active = [p for p in positions if float(p.get("contracts", 0) or 0) > 0 and p.get("side") == side]
             if not active:
                 cur_price = exchange.fetch_ticker(symbol)["last"]
-                hit_tp = (
-                    (cur_price >= entry_price * (1 + TP_PERCENT / 100 * 0.7))
-                    if side == "long" else
-                    (cur_price <= entry_price * (1 - TP_PERCENT / 100 * 0.7))
-                )
+                hit_tp = (cur_price >= entry_price * (1 + TP_PERCENT / 100 * 0.7)) if side == "long" else (cur_price <= entry_price * (1 - TP_PERCENT / 100 * 0.7))
                 return "tp" if hit_tp or be_done else "sl"
+
             pos = active[0]
             cur_price = exchange.fetch_ticker(symbol)["last"]
             qty_actual = abs(float(pos.get("contracts", 0) or 0))
             pnl_real = float(pos.get("unrealizedPnl", 0) or 0)
-            pnl_pct = (
-                ((cur_price - entry_price) / entry_price * 100)
-                if side == "long" else
-                ((entry_price - cur_price) / entry_price * 100)
-            )
+            pnl_pct = ((cur_price - entry_price) / entry_price * 100) if side == "long" else ((entry_price - cur_price) / entry_price * 100)
             до_дед = int(deadline - сейчас)
+
+            # --- ПЕРЕМЕЩЕНИЕ SL В БЕЗУБЫТОК ---
             if PARTIAL_BE_ENABLED and not be_done and pnl_pct >= PARTIAL_BE_PROFIT:
                 new_sl_be = breakeven_price
                 if обновить_sl_на_бирже(symbol, new_sl_be, side):
                     текущий_sl = new_sl_be
                     be_done = True
-                    trailing_активен = True
                     log.info(f"🎯 SL ПЕРЕМЕЩЁН В БЕЗУБЫТОК: {new_sl_be:.8f}")
+
+            # --- АКТИВАЦИЯ ТРЕЙЛИНГА ---
             if not trailing_активен and be_done:
-                if side == "long":
-                    trailing_активен = cur_price >= rr_trigger_price
-                else:
-                    trailing_активен = cur_price <= rr_trigger_price
+                trailing_активен = (cur_price >= rr_trigger_price) if side == "long" else (cur_price <= rr_trigger_price)
                 if trailing_активен:
                     log.info(f"🚀 ТРЕЙЛИНГ АКТИВИРОВАН @ {cur_price:.8f}")
+
+            # --- ТРЕЙЛИНГ ---
             if trailing_активен and be_done and pnl_pct >= MIN_PROFIT_FOR_TRAIL:
                 if side == "long":
                     if cur_price > пиковая_цена:
                         пиковая_цена = cur_price
-                    new_sl_trail = пиковая_цена * (1 - TRAILING_STEP_PCT / 100)
-                    if new_sl_trail > текущий_sl:
-                        if обновить_sl_на_бирже(symbol, new_sl_trail, side):
-                            текущий_sl = new_sl_trail
-                            log.info(
-                                f"📈 ТРЕЙЛИНГ: пик={пиковая_цена:.8f} → "
-                                f"SL={new_sl_trail:.8f} (шаг={TRAILING_STEP_PCT}%)"
-                            )
+                    new_sl_trail = пиковая_цена * (1 - trailing_offset)
+                    if new_sl_trail > текущий_sl and обновить_sl_на_бирже(symbol, new_sl_trail, side):
+                        текущий_sl = new_sl_trail
+                        log.info(f"📈 ТРЕЙЛИНГ: пик={пиковая_цена:.8f} → SL={new_sl_trail:.8f}")
                 else:
                     if cur_price < пиковая_цена:
                         пиковая_цена = cur_price
-                    new_sl_trail = пиковая_цена * (1 + TRAILING_STEP_PCT / 100)
-                    if new_sl_trail < текущий_sl:
-                        if обновить_sl_на_бирже(symbol, new_sl_trail, side):
-                            текущий_sl = new_sl_trail
-                            log.info(
-                                f"📉 ТРЕЙЛИНГ: пик={пиковая_цена:.8f} → "
-                                f"SL={new_sl_trail:.8f} (шаг={TRAILING_STEP_PCT}%)"
-                            )
+                    new_sl_trail = пиковая_цена * (1 + trailing_offset)
+                    if new_sl_trail < текущий_sl and обновить_sl_на_бирже(symbol, new_sl_trail, side):
+                        текущий_sl = new_sl_trail
+                        log.info(f"📉 ТРЕЙЛИНГ: пик={пиковая_цена:.8f} → SL={new_sl_trail:.8f}")
+
+            # --- Signal Exit ---
             if SIGNAL_EXIT_ENABLED and be_done and проверить_signal_exit(symbol, side):
                 log.info("Signal Exit: разворот — закрываем")
                 закрыть_позицию_с_подтверждением(symbol, qty_actual, side)
                 return "tp" if pnl_pct > 0 else "sl"
-            log.info(
-                f"[{coin}] {cur_price:.8f} P&L={pnl_pct:+.2f}% "
-                f"({pnl_real:+.4f}U) SL={текущий_sl:.8f} BE={be_done} "
-                f"Трейлинг={trailing_активен} дед={до_дед}с"
-            )
+
+            log.info(f"[{coin}] {cur_price:.8f} P&L={pnl_pct:+.2f}% ({pnl_real:+.4f}U) SL={текущий_sl:.8f} BE={be_done} Трейлинг={trailing_активен} дед={до_дед}с")
+
         except Exception as e:
             log.warning(f"Ошибка в цикле мониторинга: {e}")
+
     return "sl"
 
-# ============================================================
-# СТАТИСТИКА ИНДИКАТОРОВ
-# ============================================================
+# --- СТАТИСТИКА ИНДИКАТОРОВ ---
 def загрузить_статистику_индикаторов() -> dict:
     if not os.path.exists(INDICATOR_STATS_FILE): return {}
     try:
@@ -1915,6 +2407,7 @@ def обновить_статистику_индикаторов(запись_с
     details = запись_сделки.get("details", {})
     результат = запись_сделки.get("результат", "")
     is_win = (результат == "tp")
+
     def check_rsi(v): return 25 <= float(v) <= 42
     def check_rsi_1h(v): return float(v) < 55
     def check_macd(v): return v == "бычий"
@@ -1929,6 +2422,7 @@ def обновить_статистику_индикаторов(запись_с
     def check_bayes_prob(v): return float(v) > 0.6
     def check_quant_score(v): return float(v) > 50
     def check_order_flow_score(v): return float(v) > 50
+
     индикаторы = {
         "rsi": check_rsi,
         "rsi_1h": check_rsi_1h,
@@ -1945,6 +2439,7 @@ def обновить_статистику_индикаторов(запись_с
         "quant_score": check_quant_score,
         "order_flow_score": check_order_flow_score,
     }
+
     for инд, условие in индикаторы.items():
         значение = details.get(инд)
         if значение is None: continue
@@ -1988,9 +2483,7 @@ def отчёт_по_индикаторам():
     except Exception as e:
         log.warning(f"Не удалось сохранить отчёт по индикаторам: {e}")
 
-# ============================================================
-# МЕТРИКИ СТРАТЕГИИ
-# ============================================================
+# --- МЕТРИКИ СТРАТЕГИИ ---
 def рассчитать_метрики(сделки: List[dict]) -> dict:
     if len(сделки) < 5: return {}
     pnls = [t['pnl_usdt'] for t in сделки]
@@ -2043,9 +2536,7 @@ def сохранить_метрики(метрики: dict):
     except Exception as e:
         log.warning(f"Не удалось сохранить метрики: {e}")
 
-# ============================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ============================================================
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def загрузить_историю() -> List[dict]:
     if not os.path.exists(TRADES_FILE): return []
     try:
@@ -2131,16 +2622,18 @@ def пост_трейд_анализ(запись: dict):
     pnl = запись.get("pnl_usdt", 0)
     dur = запись.get("duration_min", 0)
     знак = "✅" if r == "tp" else ("❌" if r == "sl" else "⏰")
+    mqs = запись.get("mqs", 0)
+    mqs_emoji = запись.get("mqs_emoji", "❓")
+    mqs_description = запись.get("mqs_description", "НЕИЗВЕСТНО")
+
     log.info("")
     log.info("━" * 60)
     log.info(f"📋 ПОСТ-ТРЕЙД: {sym.split(':')[0]} {знак} {r.upper()} P&L: {pnl:+.4f} USDT Длит: {dur:.1f} мин")
-    log.info(f"Скор входа: {запись.get('score', '?')}/100")
+    log.info(f"Классический скор: {запись.get('score', '?')}/100 | MQS: {mqs_emoji} {mqs:.1f}/100 → {mqs_description}")
     log.info("━" * 60)
     log.info("")
 
-# ============================================================
-# ОТЧЁТЫ
-# ============================================================
+# --- ОТЧЁТЫ ---
 def печатать_отчёт():
     баланс = полный_баланс_usdt()
     старт = stats["депозит_старт"]
@@ -2151,9 +2644,10 @@ def печатать_отчёт():
     tp_ = stats["тейкпрофит"]
     sl_ = stats["стоплосс"]
     wr = (tp_ / всего * 100) if всего > 0 else 0.0
+
     log.info("")
     log.info("=" * 65)
-    log.info("📊 ОТЧЁТ ГИБРИДНОГО БОТА v21 ULTIMATE")
+    log.info("📊 ОТЧЁТ ГИБРИДНОГО БОТА v22 SEMANTIC QUANTUM MATRIX CORE")
     log.info(f"Режим: {'TESTNET' if TESTNET_MODE else 'MAINNET'}")
     log.info(f"Баланс: {баланс:.2f} USDT ({дельта:+.2f} USDT / {пct:+.2f}%)")
     log.info(f"Сделок: {всего} TP={tp_} SL={sl_} Таймаут={stats['таймаут']}")
@@ -2162,9 +2656,11 @@ def печатать_отчёт():
     log.info(f"Чистый P&L: {чистый:+.4f} USDT")
     log.info("=" * 65)
     log.info("")
+
     stats["последний_отчёт"] = time.time()
     сохранить_состояние()
     отчёт_по_индикаторам()
+
     история = загрузить_историю()
     if len(история) > 5:
         метрики = рассчитать_метрики(история)
@@ -2188,9 +2684,7 @@ def печатать_отчёт():
                 log.info(f"Вероятность убытка: {mc_result['loss_probability']:.1f}%")
                 log.info(f"Средняя max просадка: {mc_result['avg_max_drawdown']:.2f} USDT")
 
-# ============================================================
-# ПРЕДСТАРТОВАЯ ПРОВЕРКА
-# ============================================================
+# --- ПРЕДСТАРТОВАЯ ПРОВЕРКА ---
 def этап_1_проверка_окружения() -> Tuple[bool, List[str]]:
     errors, warnings = [], []
     api_key, api_secret = os.getenv("BYBIT_API_KEY", ""), os.getenv("BYBIT_API_SECRET", "")
@@ -2301,11 +2795,14 @@ def запустить_предстартовую_проверку() -> bool:
     return все_ок
 
 # ============================================================
-# ГЛАВНЫЙ ЦИКЛ
+# ████████████████████████████████████████████████
+# █████████████████   ГЛАВНЫЙ ЦИКЛ   ████████████████████████
 # ============================================================
+
 def main():
     global stats, ml_model
 
+    # Загружаем ML модель
     if ML_ENABLED:
         try:
             if os.path.exists(ML_MODEL_FILE):
@@ -2315,10 +2812,12 @@ def main():
         except Exception as e:
             log.warning(f"Не удалось загрузить ML модель: {e}")
 
+    # Предстартовая проверка
     if not запустить_предстартовую_проверку():
         log.error("🛑 Бот остановлен из-за ошибок предстартовой проверки.")
         return
 
+    # Загрузка состояния
     загрузить_состояние()
     stats["запусков"] += 1
     баланс_сейчас = полный_баланс_usdt()
@@ -2329,6 +2828,7 @@ def main():
     обновить_начало_дня(баланс_сейчас)
     сохранить_состояние()
 
+    # Загружаем историю для обучения ML
     if ML_ENABLED and not ml_model.trained:
         история = загрузить_историю()
         if len(история) >= ML_MIN_SAMPLES:
@@ -2337,15 +2837,15 @@ def main():
 
     log.info("")
     log.info("=" * 65)
-    log.info("🤖 ГИБРИДНЫЙ ФЬЮЧЕРСНЫЙ БОТ v21 ULTIMATE")
+    log.info("🤖 ГИБРИДНЫЙ ФЬЮЧЕРСНЫЙ БОТ v22 SEMANTIC QUANTUM MATRIX CORE")
     log.info(f"Режим: {'TESTNET' if TESTNET_MODE else 'MAINNET'}")
     log.info(f"Плечо: {LEVERAGE}x | RR: {TP_PERCENT}/{SL_PERCENT} ({TP_PERCENT/SL_PERCENT:.1f}:1)")
     log.info(f"Баланс: {баланс_сейчас:.4f} USDT")
-    log.info(f"MIN_SCORE: {MIN_SCORE} | Пар: {len(SYMBOLS)}")
+    log.info(f"MIN_SCORE: {MIN_SCORE} | MQS_MIN_SCORE: {MQS_MIN_SCORE} | Пар: {len(SYMBOLS)}")
     log.info(f"Квантовый анализ: {'ВКЛ' if QUANT_ENABLED else 'ВЫКЛ'}")
     log.info(f"Order Flow: {'ВКЛ' if ORDER_FLOW_ENABLED else 'ВЫКЛ'}")
     log.info(f"ML: {'ВКЛ' if ML_ENABLED and ml_model.trained else 'ВЫКЛ'}")
-    log.info(f"Новые индикаторы: {'ВКЛ' if FUNDING_RATE_ENABLED else 'ВЫКЛ'}")
+    log.info(f"Портфельная оптимизация: {'ВКЛ' if PORTFOLIO_OPTIMIZATION else 'ВЫКЛ'}")
     log.info("=" * 65)
     log.info("")
 
@@ -2395,7 +2895,7 @@ def main():
                 time.sleep(60)
                 continue
 
-            log.info(f"── Сканирование {len(SYMBOLS)} пар (баланс={свободный:.2f}U | порог={MIN_SCORE}) ──")
+            log.info(f"── Сканирование {len(SYMBOLS)} пар (баланс={свободный:.2f}U | MQS порог={MQS_MIN_SCORE}) ──")
             scores = {}
 
             for sym in SYMBOLS:
@@ -2412,21 +2912,10 @@ def main():
                 res["score_final"] = ai_score
                 scores[sym] = res
                 det = res.get("details", {})
-                log.debug(f"{sym.split(':')[0]:12s} скор={ai_score:3.0f}/100 rsi={det.get('rsi', '?')} rf={det.get('range_filter', '?')} st={det.get('supertrend', '?')}")
+                log.debug(f"{sym.split(':')[0]:12s} скор={ai_score:3.0f}/100 MQS={res['mqs']:.1f} rsi={det.get('rsi', '?')} rf={det.get('range_filter', '?')} st={det.get('supertrend', '?')}")
 
-            if not scores:
-                log.info(f"Нет кандидатов — ждём {SCAN_INTERVAL} сек")
-                time.sleep(SCAN_INTERVAL)
-                continue
-
-            кандидаты = sorted(
-                [(s, d) for s, d in scores.items() if d.get("score_final", 0) >= MIN_SCORE],
-                key=lambda x: x[1]["score_final"],
-                reverse=True
-            )[:5]
-
+            # --- Ищем лонг-кандидаты ---
             выбрана, фин_скор, цена, sr_info, side = None, 0, 0.0, {}, "long"
-
             for лучшая, данные in кандидаты:
                 фин_скор = данные["score_final"]
                 цена = данные["price"]
@@ -2445,6 +2934,7 @@ def main():
                 log.info(f"► Выбрана {лучшая.split(':')[0]} (лонг) скор={фин_скор} цена={цена:.8f}")
                 break
 
+            # --- Если лонг не найден, ищем шорт ---
             if выбрана is None:
                 for sym in SYMBOLS:
                     if sym in заблокированные: continue
@@ -2458,16 +2948,30 @@ def main():
                             выбрана, фин_скор, цена, sr_info, side = sym, short_res["score"], short_res["price"], short_res.get("sr", {}), "short"
                             break
 
+            # --- Если кандидат не найден ---
             if выбрана is None:
                 log.info(f"Нет кандидатов — ждём {SCAN_INTERVAL} сек")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
+            # --- Проверяем MQS ---
+            mqs = scores[выбрана]["mqs"]
+            mqs_emoji = scores[выбрана]["mqs_emoji"]
+            mqs_description = scores[выбрана]["mqs_description"]
+            log.info(f"[MQS] {mqs_emoji} {mqs:.1f}/100 → {mqs_description} | Классический скор: {фин_скор}")
+
+            # --- Входим только если MQS >= MQS_MIN_SCORE ---
+            if mqs < MQS_MIN_SCORE:
+                log.info(f"⛔ MQS={mqs:.1f} < {MQS_MIN_SCORE} — пропускаем {выбрана.split(':')[0]}")
+                time.sleep(SCAN_INTERVAL)
+                continue
+
+            # --- Расчёт SL/TP ---
             atr_пт = 0.0
             try:
                 raw_atr = exchange.fetch_ohlcv(выбрана, TIMEFRAME_TA, limit=50)
                 if len(raw_atr) >= 20:
-                    df_atr = pd.DataFrame(raw_atr, columns=["ts", "o", "h", "l", "c", "v"])
+                    df_atr = pd.DataFrame(raw_atr, columns=["ts","o","h","l","c","v"])
                     atr_пт = float(calc_atr(df_atr, 14).iloc[-1])
             except: pass
 
@@ -2475,8 +2979,8 @@ def main():
                 sl_atr_dist = atr_пт * ATR_SL_MULT if atr_пт > 0 else цена * SL_PERCENT / 100
                 sl_pct_dist = max(MIN_SL_PERCENT, min(MAX_SL_PERCENT, (sl_atr_dist / цена) * 100))
                 sl_цена = цена * (1 - sl_pct_dist / 100)
-                tp_pct_dist = min(TP_PERCENT, sl_pct_dist * 3.0)
-                tp_pct_dist = max(TP_PERCENT, sl_pct_dist * 2.0)
+                tp_atr_dist = atr_пт * ATR_TP_MULT if atr_пт > 0 else цена * TP_PERCENT / 100
+                tp_pct_dist = max(TP_PERCENT, (tp_atr_dist / цена) * 100)
                 tp_цена = цена * (1 + tp_pct_dist / 100)
                 support = sr_info.get("support", sl_цена)
                 if support < sl_цена and support > цена * 0.97:
@@ -2485,8 +2989,8 @@ def main():
                 sl_atr_dist = atr_пт * ATR_SL_MULT if atr_пт > 0 else цена * SL_PERCENT / 100
                 sl_pct_dist = max(MIN_SL_PERCENT, min(MAX_SL_PERCENT, (sl_atr_dist / цена) * 100))
                 sl_цена = цена * (1 + sl_pct_dist / 100)
-                tp_pct_dist = min(TP_PERCENT, sl_pct_dist * 3.0)
-                tp_pct_dist = max(TP_PERCENT, sl_pct_dist * 2.0)
+                tp_atr_dist = atr_пт * ATR_TP_MULT if atr_пт > 0 else цена * TP_PERCENT / 100
+                tp_pct_dist = max(TP_PERCENT, (tp_atr_dist / цена) * 100)
                 tp_цена = цена * (1 - tp_pct_dist / 100)
                 resistance = sr_info.get("resistance", sl_цена)
                 if resistance > sl_цена and resistance < цена * 1.03:
@@ -2496,11 +3000,12 @@ def main():
             real_rr = abs(tp_цена - цена) / abs(цена - sl_цена)
             log.info(f"📐 ATR={atr_пт/цена*100:.2f}% SL={sl_dist_pct:.2f}% RR={real_rr:.1f}:1")
 
-            if real_rr < 1.999:
+            if real_rr < 2.0:
                 log.warning(f"⛔ RR={real_rr:.1f}:1 < 2:1 — пропуск {выбрана.split(':')[0]}")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
+            # --- Портфельная оптимизация ---
             if PORTFOLIO_OPTIMIZATION:
                 active_symbols = [p['symbol'] for p in получить_позиции()]
                 all_symbols = active_symbols + [выбрана]
@@ -2517,7 +3022,7 @@ def main():
                 log.warning(f"⚠️ Баланс {свободный:.2f} < маржа {margin:.2f} — уменьшаем")
                 margin = свободный * 0.8
 
-            log.info(f"✅ ВХОД {side.upper()}: скор={фин_скор} | SL={sl_цена:.8f} | TP={tp_цена:.8f} | маржа={margin:.2f}U")
+            log.info(f"✅ ВХОД {side.upper()}: скор={фин_скор} | MQS={mqs_emoji} {mqs:.1f} | SL={sl_цена:.8f} | TP={tp_цена:.8f} | маржа={margin:.2f}U")
 
             if ENTRY_CONFIRM_BARS > 0:
                 if not подтвердить_вход(выбрана, фин_скор, side):
@@ -2527,21 +3032,6 @@ def main():
 
             баланс_до = полный_баланс_usdt()
             время_входа = time.time()
-            # Проверяем, хватит ли свободного баланса на позицию такого размера
-            предв_qty = margin * LEVERAGE / цена
-            предв_qty = float(exchange.amount_to_precision(выбрана, предв_qty))
-            предв_маржа = (предв_qty * цена) / LEVERAGE
-            if предв_маржа > свободный * 0.95:
-                log.warning(f"⚠️ Маржа {предв_маржа:.2f}U > доступно {свободный:.2f}U — уменьшаем до допустимого")
-                margin = свободный * 0.9
-                qty_пересч = margin * LEVERAGE / цена
-                qty_пересч = float(exchange.amount_to_precision(выбрана, qty_пересч))
-                if qty_пересч <= 0:
-                    log.error("Недостаточно средств даже на минимальный лот — пропускаем")
-                    continue
-                margin = (qty_пересч * цена) / LEVERAGE
-                log.info(f"Скорректировано: qty={qty_пересч}, маржа≈{margin:.2f}U")
-
             вход_цена, кол_во = открыть_позицию(выбрана, margin, tp_цена, sl_цена, side)
 
             if вход_цена is None or кол_во is None:
@@ -2584,16 +3074,27 @@ def main():
                 заблокированные[выбрана] = time.time() + SYMBOL_BLOCK_AFTER_TP * 60
                 log.warning(f"⏰ Таймаут: P&L ≈{pnl_реальный:+.4f} USDT")
 
+            # --- Сохранение сделки ---
             запись = {
                 "id": stats["сделок_всего"],
                 "время_входа": datetime.fromtimestamp(время_входа).strftime("%d.%m.%Y %H:%M:%S"),
                 "время_выхода": datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
                 "duration_min": round(длит_мин, 1),
-                "symbol": выбрана, "side": side, "score": фин_скор,
-                "entry_price": вход_цена, "sl_price": sl_цена, "tp_price": tp_цена,
-                "sl_dist_pct": round(sl_dist_pct, 3), "margin_usdt": margin,
-                "leverage": LEVERAGE, "результат": результат,
-                "pnl_usdt": round(pnl_реальный, 4), "rr_ratio": round(real_rr, 2),
+                "symbol": выбрана,
+                "side": side,
+                "score": фин_скор,
+                "mqs": mqs,
+                "mqs_emoji": mqs_emoji,
+                "mqs_description": mqs_description,
+                "entry_price": вход_цена,
+                "sl_price": sl_цена,
+                "tp_price": tp_цена,
+                "sl_dist_pct": round(sl_dist_pct, 3),
+                "margin_usdt": margin,
+                "leverage": LEVERAGE,
+                "результат": результат,
+                "pnl_usdt": round(pnl_реальный, 4),
+                "rr_ratio": round(real_rr, 2),
                 "details": scores.get(выбрана, {}).get("details", {})
             }
             сохранить_сделку(запись)
@@ -2601,6 +3102,7 @@ def main():
             пост_трейд_анализ(запись)
             сохранить_состояние()
 
+            # Обучение ML модели с периодичностью
             if ML_ENABLED:
                 stats["ml_trades_since_retrain"] += 1
                 if stats["ml_trades_since_retrain"] >= ML_RETRAIN_INTERVAL:
