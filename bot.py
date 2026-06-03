@@ -1607,12 +1607,6 @@ def get_order_book(symbol: str, depth: int = ORDER_BOOK_DEPTH) -> Dict[str, Any]
         return {"valid": False}
 
 
-def analyze_volume_profile(symbol: str,
-                          bars: int = VOLUME_PROFILE_BARS) -> Dict[str, Any]:
-    """Анализ Volume Profile."""
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=bars)
-        if len(
 # ------------------------------------------------------------
 # 📊 Анализ Volume Profile
 # ------------------------------------------------------------
@@ -1623,6 +1617,7 @@ def analyze_volume_profile(symbol: str,
         ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA, limit=bars)
         if len(ohlcv) < bars:
             return {"valid": False}
+        ...
 
         df = pd.DataFrame(ohlcv,
                           columns=["ts", "o", "h", "l", "c", "v"])
