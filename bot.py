@@ -104,7 +104,7 @@ SCAN_INTERVAL = 300
 MIN_SCORE = 65  # Классический порог (для совместимости)
 
 # --- MQS (Матрично-Квантовый Скоринг) ---
-MQS_MIN_SCORE = 70  # Новый порог для входа
+MQS_MIN_SCORE = 40  # Новый порог для входа
 MQS_WEIGHTS = {
     "decision_matrix": 0.25,   # Матрица решений
     "nash_equilibrium": 0.15,  # Теория игр
