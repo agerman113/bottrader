@@ -111,12 +111,16 @@ class BybitWrapper:
         rows = list(reversed(r["result"]["list"]))
         return [[int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])] for x in rows]
 
-    def fetch_ticker(self, symbol):
+    def fetch_ticker(self, symbol: str):
         sym = symbol.replace("/", "").replace(":USDT", "")
         r = self.session.get_tickers(category="linear", symbol=sym)
-        last = float(r["result"]["list"][0]["lastPrice"])
-        mark = float(r["result"]["list"][0].get("markPrice", last))
-        return {"last": last, "mark_price": mark}
+        tickers = r.get("result", {}).get("list", [])
+        if not tickers:
+            log.warning(f"Пустой список тикеров для {symbol}")
+            return {"last": 0.0, "mark_price": 0.0}
+        last = float(tickers[0].get("lastPrice", 0))
+        mark_price = float(tickers[0].get("markPrice", last))
+        return {"last": last, "mark_price": mark_price}
 
     def fetch_positions(self):
         r = self.session.get_positions(category="linear", settleCoin="USDT")
@@ -399,6 +403,8 @@ def получить_скор(symbol):
 
         # Mark‑Price safety
         ticker = exchange.fetch_ticker(symbol)
+        if ticker["last"] == 0:
+            return {"score": 0, "price": 0, "sr": {}}
         diff = abs(ticker["mark_price"] - ticker["last"]) / ticker["last"] * 100
         if diff >= MARK_PRICE_DIFF_THRESHOLD: score -= 30
 
@@ -429,6 +435,8 @@ def открыть_позицию(symbol, margin_usdt, tp_price, sl_price, side=
             return None, None
         ticker = exchange.fetch_ticker(symbol)
         price = ticker["last"]
+        if price == 0:
+            return None, None
         pos_size_usdt = margin_usdt * LEVERAGE
         qty_raw = pos_size_usdt / price
         qty = exchange.amount_to_precision(symbol, qty_raw)
@@ -521,6 +529,7 @@ def мониторить_позицию(symbol, entry_price, qty, открыта
 
             pos = active[0]
             cur_price = exchange.fetch_ticker(symbol)["last"]
+            if cur_price == 0: continue
             pnl_pct = ((cur_price - entry_price) / entry_price * 100) if side=="long" else ((entry_price - cur_price) / entry_price * 100)
             qty_actual = abs(float(pos.get("contracts",0) or 0))
 
@@ -536,7 +545,6 @@ def мониторить_позицию(symbol, entry_price, qty, открыта
 
             # Трейлинг
             if not trailing_активен and be_done:
-                # Активируем при достижении MIN_PROFIT_FOR_TRAIL
                 if pnl_pct >= MIN_PROFIT_FOR_TRAIL:
                     trailing_активен = True
                     log.info(f"🚀 ТРЕЙЛИНГ АКТИВИРОВАН @ {cur_price:.8f}")
@@ -650,6 +658,8 @@ def main():
                 if sym in заблокированные: del заблокированные[sym]
                 # Проверка Mark‑Price
                 ticker = exchange.fetch_ticker(sym)
+                if ticker["last"] == 0:
+                    continue
                 diff = abs(ticker["mark_price"] - ticker["last"]) / ticker["last"] * 100
                 if diff >= MARK_PRICE_DIFF_THRESHOLD: continue
                 # Требуем бычий 4h тренд
@@ -686,6 +696,7 @@ def main():
                     df_4h = pd.DataFrame(raw_4h, columns=["ts","o","h","l","c","v"])
                     if _ema(df_4h["c"], 20).iloc[-1] >= _ema(df_4h["c"], 50).iloc[-1]: continue
                     res = получить_скор(sym)
+                    if res["score"] == 0: continue
                     inv_score = 100 - res["score"]   # простой инверсный скор для шорта
                     if inv_score >= MIN_SCORE:
                         выбрана, скор, цена, sr_info, side = sym, inv_score, res["price"], res["sr"], "short"
