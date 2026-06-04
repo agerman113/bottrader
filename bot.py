@@ -31,7 +31,7 @@ SYMBOLS = [
     "ARB/USDT:USDT", "FIL/USDT:USDT",
 ]
 
-MIN_SCORE      = 45
+MIN_SCORE      = 20
 
 # --- Риск ---
 BASE_RISK_PCT      = 0.8
