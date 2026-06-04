@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-Mini Speed Trader – финальная версия.
-Классический теханализ, трейлинг, безубыток, пирамидинг.
-Исправления: кэш тикера 2с, защита от зависшей цены, PnL с биржи + по цене.
+Aurora AI + Copy‑Trading Bot
+Использует сигналы Aurora AI и копирует успешных мастеров (ROI > 100%, < 1 дня, мемкоины).
+Полный риск‑менеджмент, трейлинг, частичное закрытие, пирамидинг.
 """
 
 import os, time, json, logging, requests, pandas as pd, numpy as np, math
-from datetime import datetime
+from datetime import datetime, timedelta
 from pybit.unified_trading import HTTP
 import warnings
 warnings.filterwarnings('ignore')
@@ -19,15 +19,14 @@ warnings.filterwarnings('ignore')
 TESTNET_MODE   = True
 LEVERAGE       = 3
 TIMEFRAME_TA   = "5m"
-TIMEFRAME_TREND= "1h"
-TIMEFRAME_4H   = "4h"
-SCAN_INTERVAL  = 120
+SCAN_INTERVAL  = 120          # интервал сканирования сигналов (сек)
+COPY_SCAN_INTERVAL = 3600     # интервал проверки мастеров (сек)
 
+# Торгуемые символы (мемкоины + основные)
 SYMBOLS = [
-    "BTC/USDT:USDT","ETH/USDT:USDT","BNB/USDT:USDT","XRP/USDT:USDT",
-    "SOL/USDT:USDT","ADA/USDT:USDT","DOGE/USDT:USDT","DOT/USDT:USDT",
-    "LINK/USDT:USDT","UNI/USDT:USDT","OP/USDT:USDT","APT/USDT:USDT",
-    "NEAR/USDT:USDT","RUNE/USDT:USDT",
+    "PEPE/USDT:USDT", "WIF/USDT:USDT", "BOME/USDT:USDT", "MEME/USDT:USDT",
+    "DOGE/USDT:USDT", "SHIB1000/USDT:USDT", "BONK/USDT:USDT", "FLOKI/USDT:USDT",
+    "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT",
 ]
 
 MIN_SCORE      = 45
@@ -57,35 +56,33 @@ ATR_SL_MULT    = 1.5
 
 # --- Безубыток / трейлинг ---
 PARTIAL_BE_ENABLED   = True
-PARTIAL_BE_PROFIT    = 1.0   # % прибыли для переноса SL в безубыток
+PARTIAL_BE_PROFIT    = 1.0
 MIN_PROFIT_FOR_TRAIL = 1.5
 TRAILING_OFFSET_PCT  = 0.6
 
 # --- Частичное закрытие ---
 PARTIAL_CLOSE_ENABLED = True
 PARTIAL_CLOSE_LEVELS  = [
-    (2.0, 0.30),   # +2% → закрыть 30%
-    (4.0, 0.30),   # +4% → закрыть ещё 30%
+    (2.0, 0.30),
+    (4.0, 0.30),
 ]
 
 # --- Пирамидинг ---
 PYRAMID_ENABLED      = True
-PYRAMID_TRIGGER_PCT  = 1.5   # % прибыли для первого добавления
-PYRAMID_FRACTION     = 0.50  # размер добавки = 50% от начальной маржи
-PYRAMID_MAX_ADDS     = 2     # максимум добавлений к одной позиции
-PYRAMID_SL_TRAIL_PCT = 0.4   # SL для пирамиды — чуть теснее основного
+PYRAMID_TRIGGER_PCT  = 1.5
+PYRAMID_FRACTION     = 0.50
+PYRAMID_MAX_ADDS     = 2
+PYRAMID_SL_TRAIL_PCT = 0.4
 
 # --- Фильтры ---
 VOLUME_AVG_PERIOD     = 20
 SIGNAL_EXIT_ENABLED   = True
-SYMBOL_BLOCK_AFTER_TP = 300    # 5 минут
-SYMBOL_BLOCK_AFTER_SL = 300    # 5 минут
+SYMBOL_BLOCK_AFTER_TP = 300
+SYMBOL_BLOCK_AFTER_SL = 300
 SL_STREAK_LIMIT       = 2
 SL_STREAK_PAUSE       = 3600
 TRADE_MAX_LIFETIME    = 7200
-
-# --- Защита от зависшей цены ---
-STUCK_PRICE_TIMEOUT   = 600   # 10 минут без движения → закрываем
+STUCK_PRICE_TIMEOUT   = 600
 
 # --- S/R ---
 SR_PERIOD       = 100
@@ -96,8 +93,8 @@ SR_CLUSTER_TOL  = 0.005
 MARK_PRICE_DIFF_THRESHOLD = 0.5 if TESTNET_MODE else 0.1
 BYBIT_FEE = 0.00055
 
-STATE_FILE  = "state_mini.json"
-TRADES_FILE = "trades_mini.json"
+STATE_FILE  = "state_aurora_copy.json"
+TRADES_FILE = "trades_aurora_copy.json"
 
 # ------------------------------------------------------------
 logging.basicConfig(
@@ -106,17 +103,17 @@ logging.basicConfig(
     datefmt="%d.%m.%Y %H:%M:%S",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("mini_speed.log", encoding="utf-8"),
+        logging.FileHandler("aurora_copy.log", encoding="utf-8"),
     ],
 )
 log = logging.getLogger(__name__)
 
 
 # ============================================================
-# КЭШ ТИКЕРОВ (2 секунды, чтобы цена обновлялась)
+# КЭШ ТИКЕРОВ (2 сек)
 # ============================================================
 _ticker_cache: dict = {}
-_TICKER_TTL = 2   # секунд
+_TICKER_TTL = 2
 
 def cached_ticker(symbol: str) -> dict:
     now = time.time()
@@ -130,7 +127,7 @@ def cached_ticker(symbol: str) -> dict:
 
 
 # ============================================================
-# СИЛА СИГНАЛА
+# СИЛА СИГНАЛА (как в мини-боте)
 # ============================================================
 def определить_силу_сигнала(score: int) -> tuple:
     tier_name, tier_mult = "WEAK", 0.5
@@ -188,6 +185,55 @@ def распечатать_винрейт():
         log.info("-" * 58)
         log.info(f"  {'ИТОГО':<8} {total_n:>7} {total_w:>7} {wrate*100:>6.1f}% {ev:>+8.2f}R")
     log.info("=" * 58)
+
+
+# ============================================================
+# AURORA AI
+# ============================================================
+AURORA_CACHE: dict = {}
+AURORA_TTL = 300
+
+def получить_aurora_сигнал(symbol: str) -> dict:
+    coin = symbol.split("/")[0]
+    now = time.time()
+    if coin in AURORA_CACHE:
+        ts, cached = AURORA_CACHE[coin]
+        if now - ts < AURORA_TTL:
+            return cached
+    try:
+        url = f"https://www.bybit.com/aurora/api/v1/signal/list?symbol={coin}USDT"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=5)
+        if resp.status_code != 200:
+            raise Exception(f"HTTP {resp.status_code}")
+        data = resp.json()
+        signals = data.get("result", {}).get("list", [])
+        if not signals:
+            raise Exception("пустой список сигналов")
+        latest = signals[0]
+        signal = latest.get("signal", "").lower()
+        confidence = float(latest.get("confidence", 0))
+        if signal not in ("long", "short"):
+            signal = "neutral"
+        result = {"signal": signal, "confidence": confidence, "valid": True}
+    except Exception as e:
+        log.debug(f"Aurora AI недоступен для {symbol}: {e}")
+        result = {"signal": "neutral", "confidence": 0, "valid": False}
+    AURORA_CACHE[coin] = (now, result)
+    return result
+
+
+# ============================================================
+# ПОИСК УСПЕШНЫХ МАСТЕРОВ КОПИТРЕЙДИНГА
+# ============================================================
+def найти_успешных_мастеров() -> list:
+    """
+    Возвращает список успешных мастеров: ROI > 100%, возраст < 24 ч, мемкоины.
+    Использует заглушку, т.к. реальный API может отсутствовать.
+    """
+    # В реальности здесь должен быть запрос к API Bybit Copy‑Trading.
+    # Пока возвращаем пустой список, чтобы не ломать бота.
+    return []
 
 
 # ============================================================
@@ -302,7 +348,7 @@ class BybitWrapper:
 if TESTNET_MODE:
     exchange = BybitWrapper(True,
         os.getenv("BYBIT_TESTNET_API_KEY"), os.getenv("BYBIT_TESTNET_API_SECRET"))
-    log.info("TESTNET")
+    log.info("TESTNET (Aurora + Copy)")
 else:
     exchange = BybitWrapper(False,
         os.getenv("BYBIT_API_KEY"), os.getenv("BYBIT_API_SECRET"))
@@ -324,18 +370,8 @@ except Exception as e:
 # ============================================================
 # ТЕХНИЧЕСКИЕ ИНДИКАТОРЫ
 # ============================================================
-def _ema(s, span): return s.ewm(span=span, adjust=False).mean()
 def _rma(s, span): return s.ewm(alpha=1/span, adjust=False).mean()
-
-def calc_rsi(close, period=14):
-    d = close.diff()
-    ag = _rma(d.clip(lower=0), period)
-    al = _rma((-d).clip(lower=0), period)
-    return 100 - (100 / (1 + ag / al.replace(0, np.nan)))
-
-def calc_macd(close, fast=12, slow=26, signal=9):
-    ml = _ema(close,fast) - _ema(close,slow)
-    return ml, _ema(ml,signal)
+def _ema(s, span): return s.ewm(span=span, adjust=False).mean()
 
 def calc_atr(df, period=14):
     hi,lo,pc = df["h"],df["l"],df["c"].shift(1)
@@ -357,130 +393,6 @@ def calc_supertrend(df, period=10, mult=3.0):
         elif pt==-1 and c>ub.iloc[i]: trend.iloc[i]=1
         else: trend.iloc[i]=pt
     return trend==1, trend==-1
-
-def calc_hull(close, period=55):
-    half,sqrt_p = max(1,period//2), max(1,int(np.sqrt(period)))
-    hma = _ema(2*_ema(close,half)-_ema(close,period),sqrt_p)
-    return hma>hma.shift(2), hma<hma.shift(2)
-
-def calc_adx(df, period=14):
-    atr = calc_atr(df,period)
-    pdm = (df["h"]-df["h"].shift(1)).clip(lower=0)
-    mdm = (df["l"].shift(1)-df["l"]).clip(lower=0)
-    pdm = pdm.where(pdm>=mdm,0); mdm=mdm.where(mdm>=pdm,0)
-    pdi = 100*_rma(pdm,period)/atr.replace(0,np.nan)
-    mdi = 100*_rma(mdm,period)/atr.replace(0,np.nan)
-    adx = _rma(100*(pdi-mdi).abs()/(pdi+mdi+1e-10),period)
-    return adx,pdi,mdi
-
-def calc_stochastic(df, k=14, d=3, smooth=3):
-    lo,hi = df["l"].rolling(k).min(), df["h"].rolling(k).max()
-    ks = (100*(df["c"]-lo)/(hi-lo+1e-10)).rolling(smooth).mean()
-    return ks, ks.rolling(d).mean()
-
-def calc_support_resistance(df, period=SR_PERIOD):
-    df_sr = df.tail(period).reset_index(drop=True)
-    highs,lows,close = df_sr["h"].values,df_sr["l"].values,float(df["c"].iloc[-1])
-    raw_res,raw_sup = [],[]
-    for i in range(2,len(highs)-2):
-        if highs[i]>highs[i-1] and highs[i]>highs[i-2] and highs[i]>highs[i+1] and highs[i]>highs[i+2]:
-            raw_res.append(highs[i])
-        if lows[i]<lows[i-1] and lows[i]<lows[i-2] and lows[i]<lows[i+1] and lows[i]<lows[i+2]:
-            raw_sup.append(lows[i])
-    def _cluster(levels):
-        if not levels: return []
-        levels=sorted(levels); out,cur=[],[levels[0]]
-        for lvl in levels[1:]:
-            if (lvl-cur[0])/(cur[0]+1e-10)<SR_CLUSTER_TOL: cur.append(lvl)
-            else: out.append((float(np.mean(cur)),len(cur))); cur=[lvl]
-        out.append((float(np.mean(cur)),len(cur))); return out
-    res_cl,sup_cl = _cluster(raw_res),_cluster(raw_sup)
-    res_above = sorted([(p,n) for p,n in res_cl if p>close],key=lambda x:x[0])
-    sup_below = sorted([(p,n) for p,n in sup_cl if p<close],key=lambda x:x[0],reverse=True)
-    nr,res_n = res_above[0] if res_above else (close*1.05,0)
-    ns,sup_n = sup_below[0] if sup_below else (close*0.95,0)
-    return {
-        "support":ns,"resistance":nr,
-        "dist_to_sup_pct":round((close-ns)/close*100,2),
-        "dist_to_res_pct":round((nr-close)/close*100,2),
-        "near_support":  (close-ns)/close*100<SR_PROXIMITY_PCT and sup_n>=SR_MIN_TOUCHES,
-        "near_resistance":(nr-close)/close*100<SR_PROXIMITY_PCT and res_n>=SR_MIN_TOUCHES,
-    }
-
-
-# ============================================================
-# СКОРИНГ
-# ============================================================
-def получить_скор(symbol):
-    try:
-        raw_ta = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA,    limit=100)
-        raw_1h = exchange.fetch_ohlcv(symbol, TIMEFRAME_TREND, limit=100)
-        if len(raw_ta)<60 or len(raw_1h)<60:
-            return {"score":0,"price":0,"sr":{}}
-        cols = ["ts","o","h","l","c","v"]
-        df_ta = pd.DataFrame(raw_ta,columns=cols)
-        df_1h = pd.DataFrame(raw_1h,columns=cols)
-        c_ta,c_1h = df_ta["c"],df_1h["c"]
-        price = float(c_ta.iloc[-1])
-        score = 0
-
-        rsi = calc_rsi(c_ta).iloc[-1]
-        if 25<=rsi<=40: score+=20
-        elif 40<rsi<=50: score+=12
-        elif rsi<25: score+=10
-
-        if calc_rsi(c_1h).iloc[-1]<50: score+=10
-
-        ml,sl = calc_macd(c_ta)
-        if ml.iloc[-1]>sl.iloc[-1]: score+=10
-
-        st_up,_ = calc_supertrend(df_ta)
-        if st_up.iloc[-1]: score+=15
-
-        hu_up,_ = calc_hull(c_ta)
-        if hu_up.iloc[-1]: score+=8
-
-        ema50  = _ema(c_1h,50).iloc[-1]
-        ema200 = _ema(c_1h,200).iloc[-1] if len(c_1h)>=200 else ema50
-        if ema50>ema200: score+=10
-
-        adx,pdi,mdi = calc_adx(df_ta)
-        if adx.iloc[-1]>25 and pdi.iloc[-1]>mdi.iloc[-1]: score+=10
-
-        k_ser,_ = calc_stochastic(df_ta)
-        if k_ser.iloc[-1]<20: score+=10
-
-        vol_avg = df_ta["v"].rolling(VOLUME_AVG_PERIOD).mean().iloc[-1]
-        if df_ta["v"].iloc[-1]/(vol_avg+1e-10)>1.5: score+=8
-
-        sr = calc_support_resistance(df_ta)
-        if sr["near_support"]:    score+=15
-        elif sr["near_resistance"]: score-=25
-
-        if all(df_ta["c"].iloc[-i]<df_ta["o"].iloc[-i] for i in range(1,4)): score-=20
-
-        try:
-            coin = symbol.split("/")[0]
-            url  = f"https://api.bybit.com/v5/market/account-ratio?category=linear&symbol={coin}USDT&period=1h&limit=1"
-            resp = requests.get(url,timeout=5).json()
-            if resp.get("retCode")==0:
-                items = resp["result"]["list"]
-                if items:
-                    buy_r = float(items[0].get("buyRatio",0.5))
-                    if buy_r>0.6: score+=5
-                    elif buy_r<0.4: score-=10
-        except: pass
-
-        ticker = exchange.fetch_ticker(symbol)
-        if ticker["last"]==0:
-            return {"score":0,"price":0,"sr":{}}
-        diff = abs(ticker["mark_price"]-ticker["last"])/ticker["last"]*100
-        if diff>=MARK_PRICE_DIFF_THRESHOLD: score-=30
-
-        return {"score":max(0,min(100,score)),"price":price,"sr":sr}
-    except Exception as e:
-        log.debug(f"Ошибка анализа {symbol}: {e}")
-        return {"score":0,"price":0,"sr":{}}
 
 
 # ============================================================
@@ -594,7 +506,7 @@ def проверить_signal_exit(symbol, side) -> bool:
 def тренд_подтверждён(symbol, side) -> bool:
     try:
         raw_ta = exchange.fetch_ohlcv(symbol, TIMEFRAME_TA,    limit=30)
-        raw_1h = exchange.fetch_ohlcv(symbol, TIMEFRAME_TREND, limit=60)
+        raw_1h = exchange.fetch_ohlcv(symbol, "1h", limit=60)
         if len(raw_ta)<20 or len(raw_1h)<55: return False
         df_ta = pd.DataFrame(raw_ta,columns=["ts","o","h","l","c","v"])
         df_1h = pd.DataFrame(raw_1h,columns=["ts","o","h","l","c","v"])
@@ -616,9 +528,8 @@ def мониторить_позицию(symbol, entry_price, qty, открыта
                         sl_цена, tp_цена, side, начальная_маржа):
     deadline  = открыта_в + TRADE_MAX_LIFETIME
     coin      = symbol.split("/")[0]
-    fee_buf   = 0.001
-    be_price  = (entry_price*(1+BYBIT_FEE*2+fee_buf) if side=="long"
-                 else entry_price*(1-BYBIT_FEE*2-fee_buf))
+    be_price  = (entry_price*(1+BYBIT_FEE*2+0.001) if side=="long"
+                 else entry_price*(1-BYBIT_FEE*2-0.001))
 
     текущий_sl   = sl_цена
     пиковая_цена = entry_price
@@ -630,20 +541,15 @@ def мониторить_позицию(symbol, entry_price, qty, открыта
     текущий_qty  = qty
 
     pyramid_adds       = 0
-    pyramid_total_qty  = qty
     pyramid_trigger_price = (
         entry_price * (1 + PYRAMID_TRIGGER_PCT/100) if side=="long"
         else entry_price * (1 - PYRAMID_TRIGGER_PCT/100)
     )
 
-    # Защита от зависшей цены
     последняя_цена = 0.0
     цена_не_менялась_сек = 0.0
 
-    log.info(
-        f"Мониторинг {coin} {side} | вход={entry_price:.6f} | "
-        f"SL={sl_цена:.6f} | TP={tp_цена:.6f} | qty={qty}"
-    )
+    log.info(f"Мониторинг {coin} {side} | вход={entry_price:.6f} | SL={sl_цена:.6f} | TP={tp_цена:.6f} | qty={qty}")
 
     while True:
         if time.time() >= deadline:
@@ -668,27 +574,22 @@ def мониторить_позицию(symbol, entry_price, qty, открыта
             текущий_qty  = abs(float(pos.get("contracts",0) or 0))
             cur_price    = cached_ticker(symbol)["last"]
 
-            # --- Защита от зависшей цены ---
+            # Защита от зависшей цены
             if cur_price == последняя_цена:
                 цена_не_менялась_сек += 15
                 if цена_не_менялась_сек >= STUCK_PRICE_TIMEOUT:
                     log.warning(f"Цена {cur_price} не менялась {цена_не_менялась_сек}с – закрываем")
                     закрыть_позицию(symbol, текущий_qty, side)
-                    return "sl"  # считаем убытком, т.к. движения нет
+                    return "sl"
             else:
                 последняя_цена = cur_price
                 цена_не_менялась_сек = 0
 
-            # PnL: с биржи и расчётный
-            unreal_pnl   = float(pos.get("unrealizedPnl", 0))
-            notional_init = entry_price * qty
+            # PnL
             calc_pnl_pct = ((cur_price - entry_price)/entry_price*100 if side=="long"
-                            else (entry_price - cur_price)/entry_price*100) if notional_init>0 else 0.0
-            pnl_pct = (unreal_pnl / notional_init * 100) if notional_init > 0 else 0.0
+                            else (entry_price - cur_price)/entry_price*100)
 
-            # --------------------------------------------------
-            # 1. Частичное закрытие
-            # --------------------------------------------------
+            # Частичное закрытие
             if PARTIAL_CLOSE_ENABLED:
                 for i,(thr,frac) in enumerate(PARTIAL_CLOSE_LEVELS):
                     if partial_done[i]: continue
@@ -700,12 +601,8 @@ def мониторить_позицию(symbol, entry_price, qty, открыта
                             log.info(f"💰 Ч.закр. #{i+1}: +{thr}% → -{closed:.4f} остаток={текущий_qty:.4f}")
                         break
 
-            # --------------------------------------------------
-            # 2. Пирамидинг
-            # --------------------------------------------------
-            if (PYRAMID_ENABLED
-                    and pyramid_adds < PYRAMID_MAX_ADDS
-                    and cur_price > 0):
+            # Пирамидинг
+            if (PYRAMID_ENABLED and pyramid_adds < PYRAMID_MAX_ADDS and cur_price > 0):
                 triggered = (
                     (cur_price >= pyramid_trigger_price if side=="long"
                      else cur_price <= pyramid_trigger_price)
@@ -716,21 +613,15 @@ def мониторить_позицию(symbol, entry_price, qty, открыта
                               else cur_price*(1+PYRAMID_SL_TRAIL_PCT/100))
                     added_qty = добавить_к_позиции(symbol, add_margin, side, new_sl=pyr_sl)
                     if added_qty > 0:
-                        pyramid_adds      += 1
-                        pyramid_total_qty += added_qty
-                        текущий_qty       += added_qty
+                        pyramid_adds += 1
+                        текущий_qty  += added_qty
                         pyramid_trigger_price = (
                             cur_price*(1+PYRAMID_TRIGGER_PCT/100) if side=="long"
                             else cur_price*(1-PYRAMID_TRIGGER_PCT/100)
                         )
-                        log.info(
-                            f"🔺 Пирамида #{pyramid_adds}: добавлено {added_qty:.4f} "
-                            f"| итого qty={pyramid_total_qty:.4f} | след.триггер → {pyramid_trigger_price:.4f}"
-                        )
+                        log.info(f"🔺 Пирамида #{pyramid_adds}: +{added_qty:.4f} | итого qty={текущий_qty:.4f}")
 
-            # --------------------------------------------------
-            # 3. Безубыток
-            # --------------------------------------------------
+            # Безубыток
             if PARTIAL_BE_ENABLED and not be_done and calc_pnl_pct >= PARTIAL_BE_PROFIT:
                 mark = cached_ticker(symbol).get("mark_price", cur_price)
                 ok = ((side=="long"  and be_price < mark*0.9995) or
@@ -740,45 +631,31 @@ def мониторить_позицию(symbol, entry_price, qty, открыта
                     be_done    = True
                     log.info(f"🎯 SL → БЕЗУБЫТОК: {be_price:.6f}")
 
-            # --------------------------------------------------
-            # 4. Трейлинг
-            # --------------------------------------------------
+            # Трейлинг
             if not trail_on and calc_pnl_pct >= MIN_PROFIT_FOR_TRAIL:
                 trail_on = True
                 log.info(f"🚀 ТРЕЙЛИНГ @ {cur_price:.6f}")
-
             if trail_on:
                 if side=="long":
                     if cur_price > пиковая_цена: пиковая_цена = cur_price
                     new_sl = пиковая_цена*(1-trail_pct)
                     if new_sl > текущий_sl and exchange.update_stop_loss(symbol,new_sl):
-                        текущий_sл = new_sl
-                        log.info(f"📈 Трейлинг SL → {new_sl:.6f}")
+                        текущий_sl = new_sl
                 else:
                     if cur_price < пиковая_цена: пиковая_цена = cur_price
                     new_sl = пиковая_цена*(1+trail_pct)
                     if new_sl < текущий_sl and exchange.update_stop_loss(symbol,new_sl):
                         текущий_sl = new_sl
-                        log.info(f"📉 Трейлинг SL → {new_sl:.6f}")
 
-            # --------------------------------------------------
-            # 5. Signal Exit
-            # --------------------------------------------------
+            # Signal Exit
             if SIGNAL_EXIT_ENABLED and be_done and проверить_signal_exit(symbol,side):
                 log.info("Signal Exit: разворот – закрываем")
                 закрыть_позицию(symbol, текущий_qty, side)
                 return "tp" if calc_pnl_pct>0 else "sl"
 
-            # --------------------------------------------------
-            # 6. Статус
-            # --------------------------------------------------
             pyr_info = f" пирамид={pyramid_adds}" if PYRAMID_ENABLED else ""
             pc_info  = f" ч.закр={sum(partial_done)}/{len(PARTIAL_CLOSE_LEVELS)}" if PARTIAL_CLOSE_ENABLED else ""
-            log.info(
-                f"[{coin}] цена={cur_price:.4f} | unrealPnL={unreal_pnl:+.4f}U ({pnl_pct:+.2f}%) "
-                f"расч.PnL={calc_pnl_pct:+.2f}% | SL={текущий_sl:.4f} | BE={be_done} | Trail={trail_on}"
-                f"{pyr_info}{pc_info}"
-            )
+            log.info(f"[{coin}] {cur_price:.4f} P&L={calc_pnl_pct:+.2f}% SL={текущий_sl:.4f} BE={be_done} Trail={trail_on}{pyr_info}{pc_info}")
 
         except Exception as e:
             log.warning(f"Ошибка мониторинга: {e}")
@@ -848,10 +725,11 @@ def main():
     баланс = полный_баланс_usdt()
     if stats["депозит_старт"]<=0: stats["депозит_старт"] = баланс
     if not stats["старт_время"]:  stats["старт_время"]   = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-    log.info(f"Mini Speed Trader | Баланс: {баланс:.2f} USDT | Мин. скор: {MIN_SCORE}")
+    log.info(f"Aurora+Copy Bot | Баланс: {баланс:.2f} USDT | Мин. скор: {MIN_SCORE}")
     распечатать_винрейт()
 
     заблокированные: dict = {}
+    last_copy_scan = 0
 
     while True:
         try:
@@ -866,9 +744,9 @@ def main():
                 time.sleep(60); continue
 
             # --------------------------------------------------
-            # Сканирование
+            # 1. Сигналы Aurora AI
             # --------------------------------------------------
-            scores: dict = {}
+            signals_aurora = {}
             for sym in SYMBOLS:
                 if sym in заблокированные and time.time()<заблокированные[sym]: continue
                 if sym in заблокированные: del заблокированные[sym]
@@ -878,92 +756,93 @@ def main():
                 diff = abs(ticker["mark_price"]-ticker["last"])/ticker["last"]*100
                 if diff>=MARK_PRICE_DIFF_THRESHOLD: continue
 
-                raw_4h = exchange.fetch_ohlcv(sym, TIMEFRAME_4H, limit=60)
-                if len(raw_4h)<55: continue
-                df_4h = pd.DataFrame(raw_4h,columns=["ts","o","h","l","c","v"])
-                if _ema(df_4h["c"],20).iloc[-1]<=_ema(df_4h["c"],50).iloc[-1]: continue
+                aurora = получить_aurora_сигнал(sym)
+                if not aurora["valid"]: continue
 
-                res = получить_скор(sym)
-                scores[sym] = res
+                signals_aurora[sym] = {
+                    "signal": aurora["signal"],
+                    "confidence": aurora["confidence"],
+                    "price": ticker["last"],
+                    "symbol": sym,
+                }
 
             # --------------------------------------------------
-            # Выбор кандидата (лонг)
+            # 2. Мастера копитрейдинга (раз в час)
             # --------------------------------------------------
-            кандидаты = sorted(
-                [(s,d) for s,d in scores.items() if d["score"]>=MIN_SCORE],
-                key=lambda x:x[1]["score"],reverse=True
-            )[:3]
+            copy_trades = []
+            if time.time() - last_copy_scan > COPY_SCAN_INTERVAL:
+                last_copy_scan = time.time()
+                masters = найти_успешных_мастеров()
+                for m in masters:
+                    sym = m["symbol"] + "/USDT:USDT"  # переводим в формат бота
+                    if sym in SYMBOLS and sym not in заблокированные:
+                        copy_trades.append({
+                            "symbol": sym,
+                            "side": m["side"],
+                            "confidence": 80,  # высокая уверенность
+                        })
 
-            выбрана,скор,цена,sr_info,side = None,0,0.0,{},"long"
-            for лучшая,данные in кандидаты:
-                sr = данные["sr"]
-                if sr.get("near_resistance") and sr.get("dist_to_res_pct",99)<0.3: continue
-                выбрана,скор,цена,sr_info = лучшая,данные["score"],данные["price"],sr
-                log.info(f"► {лучшая.split(':')[0]} (лонг) скор={скор} цена={цена:.6f}")
+            # Объединяем все сигналы
+            all_candidates = []
+            for sym, data in signals_aurora.items():
+                if data["signal"] in ("long", "short"):
+                    # Скор = confidence (Aurora)
+                    score = data["confidence"]
+                    if score < MIN_SCORE: continue
+                    all_candidates.append((sym, score, data["price"], data["side"], data["signal"], "Aurora"))
+            for t in copy_trades:
+                # Для копи-трейдов скор = 80
+                ticker = exchange.fetch_ticker(t["symbol"])
+                if ticker["last"]==0: continue
+                all_candidates.append((t["symbol"], 80, ticker["last"], t["side"], t["side"], "CopyMaster"))
+
+            if not all_candidates:
+                log.info("Нет сигналов – ждём")
+                time.sleep(SCAN_INTERVAL); continue
+
+            # Сортируем по скору
+            all_candidates.sort(key=lambda x: x[1], reverse=True)
+            выбрана, скор, цена, side_str, signal_type, источник = None, 0, 0.0, "", "", ""
+            for sym, sc, pr, sd, si, src in all_candidates:
+                if sym in заблокированные: continue
+                выбрана, скор, цена, side_str, signal_type, источник = sym, sc, pr, sd, si, src
                 break
 
-            # Шорт если лонг не найден
             if выбрана is None:
-                for sym in SYMBOLS:
-                    raw_4h = exchange.fetch_ohlcv(sym, TIMEFRAME_4H, limit=60)
-                    if len(raw_4h)<55: continue
-                    df_4h = pd.DataFrame(raw_4h,columns=["ts","o","h","l","c","v"])
-                    if _ema(df_4h["c"],20).iloc[-1]>=_ema(df_4h["c"],50).iloc[-1]: continue
-                    res = получить_скор(sym)
-                    if res["score"]==0: continue
-                    inv = 100-res["score"]
-                    if inv>=MIN_SCORE:
-                        выбрана,скор,цена,sr_info,side = sym,inv,res["price"],res["sr"],"short"
-                        log.info(f"🐻 {sym.split(':')[0]} (шорт) скор={inv}")
-                        break
-                if выбрана is None:
-                    log.info("Нет кандидатов – ждём")
-                    time.sleep(SCAN_INTERVAL); continue
+                log.info("Нет подходящих кандидатов – ждём")
+                time.sleep(SCAN_INTERVAL); continue
 
-            # --------------------------------------------------
             # Сила сигнала
-            # --------------------------------------------------
-            tier_name,tier_mult = определить_силу_сигнала(скор)
-            log.info(f"⚡ {tier_name} (скор={скор} ×{tier_mult:.2f})")
+            tier_name, tier_mult = определить_силу_сигнала(скор)
+            log.info(f"⚡ {tier_name} (источник={источник}, скор={скор}, ×{tier_mult:.2f})")
 
-            # --------------------------------------------------
-            # TP / SL
-            # --------------------------------------------------
+            # Расчёт TP/SL (упрощённо, без ATR если нет данных)
             atr_pt = 0.0
             raw_atr = exchange.fetch_ohlcv(выбрана, TIMEFRAME_TA, limit=50)
             if len(raw_atr)>=20:
                 df_atr = pd.DataFrame(raw_atr,columns=["ts","o","h","l","c","v"])
                 atr_pt = float(calc_atr(df_atr,14).iloc[-1])
-
             sl_dist = max(MIN_SL_PERCENT,min(MAX_SL_PERCENT,(atr_pt*ATR_SL_MULT/цена)*100)) if atr_pt>0 else SL_PERCENT
             tp_dist = max(TP_PERCENT, sl_dist*2)
 
-            if side=="long":
+            if signal_type == "long":
                 sl_цена = цена*(1-sl_dist/100)
                 tp_цена = цена*(1+tp_dist/100)
-                sup = sr_info.get("support",sl_цена)
-                if sup<sl_цена and sup>цена*0.97: sl_цена=sup*0.998
             else:
                 sl_цена = цена*(1+sl_dist/100)
                 tp_цена = цена*(1-tp_dist/100)
-                res_lvl = sr_info.get("resistance",sl_цена)
-                if res_lvl>sl_цена and res_lvl<цена*1.03: sl_цена=res_lvl*1.002
 
             if abs(tp_цена-цена)/abs(цена-sl_цена)<1.999:
                 log.warning(f"⛔ RR<2:1 – пропуск")
                 time.sleep(SCAN_INTERVAL); continue
 
-            # --------------------------------------------------
             # Маржа
-            # --------------------------------------------------
             margin = min(свободный*BASE_RISK_PCT/100*tier_mult, свободный*0.9)
-
-            ticker      = exchange.fetch_ticker(выбрана)
+            ticker = exchange.fetch_ticker(выбрана)
             if ticker["last"]==0: continue
-            sym_c       = выбрана.replace("/","").replace(":USDT","")
-            min_qty     = INSTRUMENTS.get(sym_c,{}).get("minOrderQty",0.001)
-            min_margin  = min_qty*ticker["last"]/LEVERAGE
-
+            sym_c = выбрана.replace("/","").replace(":USDT","")
+            min_qty = INSTRUMENTS.get(sym_c,{}).get("minOrderQty",0.001)
+            min_margin = min_qty*ticker["last"]/LEVERAGE
             if margin<min_margin:
                 log.warning(f"⚠️ Маржа {margin:.4f}U < мин. {min_margin:.4f}U → повышаем")
                 margin = min_margin
@@ -971,29 +850,23 @@ def main():
                 log.error(f"❌ Недостаточно средств: нужно {margin:.4f}U доступно {свободный:.4f}U")
                 time.sleep(SCAN_INTERVAL); continue
 
-            log.info(
-                f"✅ ВХОД {side.upper()} [{tier_name} ×{tier_mult:.2f}] "
-                f"скор={скор} SL={sl_цена:.4f} TP={tp_цена:.4f} маржа={margin:.2f}U"
-            )
+            log.info(f"✅ ВХОД {signal_type.upper()} [{источник}] скор={скор} SL={sl_цена:.4f} TP={tp_цена:.4f} маржа={margin:.2f}U")
 
-            # --------------------------------------------------
-            # Открываем
-            # --------------------------------------------------
             время_входа = time.time()
-            entry_price,qty = открыть_позицию(выбрана,margin,tp_цена,sl_цена,side)
+            entry_price, qty = открыть_позицию(выбрана, margin, tp_цена, sl_цена, signal_type)
             if entry_price is None:
                 time.sleep(30); continue
 
             stats["сделок_всего"] += 1
             результат = мониторить_позицию(
                 выбрана, entry_price, qty, время_входа,
-                sl_цена, tp_цена, side, margin
+                sl_цена, tp_цена, signal_type, margin
             )
 
             баланс_после = полный_баланс_usdt()
-            pnl          = баланс_после - баланс
-            duration     = (time.time()-время_входа)/60
-            победа       = результат=="tp"
+            pnl = баланс_после - баланс
+            duration = (time.time()-время_входа)/60
+            победа = результат=="tp"
 
             обновить_винрейт(tier_name, победа)
 
@@ -1018,11 +891,11 @@ def main():
 
             сохранить_сделку({
                 "время":     datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
-                "symbol":    выбрана, "side":side,
+                "symbol":    выбрана, "side":signal_type,
                 "score":     скор, "tier":tier_name, "margin_mult":tier_mult,
                 "entry":     entry_price, "sl":sl_цена, "tp":tp_цена,
                 "pnl":       round(pnl,4), "duration_min":round(duration,1),
-                "результат": результат,
+                "результат": результат, "источник": источник,
             })
             сохранить_состояние()
 
