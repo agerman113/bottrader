@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Bybit Мем-Коин Бот v5.0 — Testnet (Задача о разорении, без мартингейла)
-──────────────────────────────────────────────────────────────────────
-Изменения относительно v4.0:
-  • Полностью убран мартингейл (нет увеличения ставок после убытков).
-  • Убран «догон» (смена направления после убытка). Сигнал всегда по тренду.
-  • Убрана блокировка входа при P(ruin) > 80% – торговля идёт всегда.
-  • Оставлена стратегия «смелая игра» при низком винрейте (из теории разорения).
-  • Целевой барьер +20%, стоп по просадке -40% от стартового баланса.
-  • Плечо 5x, риск до 50% депозита (в смелой игре).
+Bybit Мем-Коин Бот v3.1 — Testnet
+- Тренд с Bybit (EMA 9/21 на 3m свечах)
+- Мартингейл до 10 шагов (x1.5 за шаг) с переворотом после убытка
+- При серии убытков ≥ 6 → переход в recovery-режим:
+    * сделки только по тренду, TP в безубыток (0.15% от входа)
+    * максимальное время удержания 15 минут
+    * возврат к мартингейлу после выхода общего PnL в ноль/плюс
+- Трейлинг-стоп (в обычном режиме), комиссии, плечо 5x
 """
 
 import os, time, math, logging
-from collections import deque
-from typing import Deque, Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -22,42 +20,45 @@ from pybit.unified_trading import HTTP
 
 load_dotenv()
 
-# ══════════════════════════════════════════════════════
-# КОНФИГУРАЦИЯ
-# ══════════════════════════════════════════════════════
-SYMBOLS        = ["1000PEPEUSDT", "WIFUSDT", "1000BONKUSDT"]
-LEVERAGE       = 5        # плечо
-TRADE_DURATION = 180      # сек на сделку
-BASE_RISK_PCT  = 2.0      # % баланса — базовая ставка (при недостатке истории)
-FEE_RATE       = 0.00055  # тейкер-комиссия Bybit
-MIN_BALANCE    = 5.0      # мин. баланс USDT
-INITIAL_SL_PCT = 2.0      # базовый SL %
-TRAILING_PCT   = 1.0      # трейлинг-дельта %
-TIMEFRAME      = "3"      # 3-минутные свечи
+# ───────────────────────────────────────────────
+# КОНФИГ
+# ───────────────────────────────────────────────
+SYMBOLS = ["1000PEPEUSDT", "WIFUSDT", "1000BONKUSDT"]
 
-# ── Параметры задачи о разорении ──────────────────────
-TARGET_PROFIT_PCT    = 20.0   # целевой барьер прибыли (% от старт. баланса)
-MAX_DRAWDOWN_PCT     = 40.0   # стоп при просадке баланса (% от старт.)
-WINRATE_WINDOW       = 20     # последние N сделок для оценки winrate
+LEVERAGE         = 5
+TRADE_DURATION   = 180      # секунд на сделку (обычный режим)
+MAX_MART_STEPS   = 10
+BASE_RISK_PCT    = 2.0
+MART_MULT        = 1.5
+FEE_RATE         = 0.00055
+MIN_BALANCE      = 5.0
+INITIAL_SL_PCT   = 2.0
+TRAILING_PCT     = 1.0
+TIMEFRAME        = "3"
 
-# ══════════════════════════════════════════════════════
+# Параметры recovery-режима
+RECOVERY_TRIGGER    = 6       # количество убыточных сделок подряд для переключения
+RECOVERY_MAX_DURATION = 900   # 15 минут
+RECOVERY_TP_PCT     = 0.15    # тейк-профит в % от цены входа (0.15% покрывает комиссии)
+
+# ───────────────────────────────────────────────
 # ЛОГГЕР
-# ══════════════════════════════════════════════════════
+# ───────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("meme_bot_v5.log", encoding="utf-8"),
+        logging.FileHandler("meme_bot.log", encoding="utf-8"),
     ],
 )
 log = logging.getLogger(__name__)
 
 
-# ══════════════════════════════════════════════════════
-# BYBIT WRAPPER
-# ══════════════════════════════════════════════════════
+# ───────────────────────────────────────────────
+# BYBIT WRAPPER (расширен)
+# ───────────────────────────────────────────────
 class Bybit:
     def __init__(self):
         self.s = HTTP(
@@ -86,7 +87,7 @@ class Bybit:
         try:
             r = self.s.get_kline(
                 category="linear", symbol=symbol,
-                interval=TIMEFRAME, limit=limit,
+                interval=TIMEFRAME, limit=limit
             )
             rows = [
                 [int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4])]
@@ -101,7 +102,7 @@ class Bybit:
         try:
             self.s.set_leverage(
                 category="linear", symbol=symbol,
-                buyLeverage=str(lev), sellLeverage=str(lev),
+                buyLeverage=str(lev), sellLeverage=str(lev)
             )
             log.info(f"  Плечо {lev}x → {symbol} ✅")
         except Exception as e:
@@ -116,19 +117,29 @@ class Bybit:
             log.error(f"min_qty({symbol}): {e}")
             return 1.0, 1.0
 
-    def open_order(self, symbol: str, side: str, qty: float, sl: float) -> Optional[str]:
+    def open_order(self, symbol: str, side: str, qty: float,
+                   sl: float, tp: Optional[float] = None) -> Optional[str]:
+        """
+        Открывает рыночный ордер со стоп-лоссом и опциональным тейк-профитом.
+        Возвращает orderId или None.
+        """
+        params = {
+            "category": "linear",
+            "symbol": symbol,
+            "side": "Buy" if side == "long" else "Sell",
+            "orderType": "Market",
+            "qty": str(qty),
+            "stopLoss": str(round(sl, 8)),
+            "slTriggerBy": "MarkPrice",
+            "timeInForce": "GTC",
+            "reduceOnly": False,
+        }
+        if tp is not None:
+            params["takeProfit"] = str(round(tp, 8))
+            params["tpTriggerBy"] = "MarkPrice"
+
         try:
-            r = self.s.place_order(
-                category="linear",
-                symbol=symbol,
-                side="Buy" if side == "long" else "Sell",
-                orderType="Market",
-                qty=str(qty),
-                stopLoss=str(round(sl, 8)),
-                slTriggerBy="MarkPrice",
-                timeInForce="GTC",
-                reduceOnly=False,
-            )
+            r = self.s.place_order(**params)
             oid = r["result"]["orderId"]
             log.info(f"  Ордер открыт: {oid}")
             return oid
@@ -177,15 +188,23 @@ class Bybit:
                         "entry": float(p.get("avgPrice", 0)),
                         "pnl":   float(p.get("unrealisedPnl", 0)),
                         "sl":    float(p.get("stopLoss", 0)),
+                        "tp":    float(p.get("takeProfit", 0)),
                     }
         except Exception as e:
             log.error(f"position({symbol}): {e}")
         return None
 
+    def cancel_all_orders(self, symbol: str):
+        """Отмена всех активных ордеров (TP/SL)"""
+        try:
+            self.s.cancel_all_orders(category="linear", symbol=symbol)
+        except Exception as e:
+            log.warning(f"cancel_all_orders({symbol}): {e}")
 
-# ══════════════════════════════════════════════════════
+
+# ───────────────────────────────────────────────
 # ИНДИКАТОРЫ
-# ══════════════════════════════════════════════════════
+# ───────────────────────────────────────────────
 def ema(series: pd.Series, n: int) -> float:
     return float(series.ewm(span=n, adjust=False).mean().iloc[-1])
 
@@ -202,134 +221,53 @@ def get_trend(df: pd.DataFrame) -> Optional[str]:
     return None
 
 
-# ══════════════════════════════════════════════════════
-# МАТЕМАТИКА ЗАДАЧИ О РАЗОРЕНИИ ИГРОКА
-# ══════════════════════════════════════════════════════
-def ruin_probability(p: float, capital: float, target: float) -> float:
-    """
-    Вероятность разорения игрока с капиталом `capital`,
-    играющего до достижения `target` (или нуля).
-    Формула: P(ruin) = (r^capital - r^target) / (1 - r^target),
-    где r = (1-p)/p, при p ≠ 0.5.
-    При p = 0.5: P(ruin) = 1 - capital/target.
-    """
-    if target <= capital:
-        return 0.0
-    if abs(p - 0.5) < 1e-9:
-        return 1.0 - capital / target
-    r = (1.0 - p) / p
-    try:
-        num = r**capital - r**target
-        den = 1.0 - r**target
-        if den == 0:
-            return 1.0
-        return max(0.0, min(1.0, num / den))
-    except (OverflowError, ZeroDivisionError):
-        return 1.0 if p < 0.5 else 0.0
-
-
-def bold_bet(p: float, balance: float, target: float) -> float:
-    """
-    Смелая игра: при p < 0.5 оптимально ставить как можно
-    больше за раз (ближе к целевому барьеру за один шаг).
-    Возвращает рекомендуемый размер ставки в USDT.
-    При p >= 0.5 — осторожная игра (стандартный BASE_RISK_PCT).
-    """
-    if p >= 0.5:
-        return balance * BASE_RISK_PCT / 100
-    # Ставим минимум из: (target - balance) и 50% баланса
-    bold = min(target - balance, balance * 0.5)
-    return max(bold, balance * BASE_RISK_PCT / 100)
-
-
-# ══════════════════════════════════════════════════════
+# ───────────────────────────────────────────────
 # БОТ
-# ══════════════════════════════════════════════════════
+# ───────────────────────────────────────────────
 class Bot:
     def __init__(self):
-        self.ex          = Bybit()
+        self.ex           = Bybit()
+        self.mart_step    = 0
+        self.loss_streak  = 0
         self.last_side: Optional[str] = None
-        self.total_pnl   = 0.0
-        self.trade_n     = 0
+        self.total_pnl    = 0.0
+        self.trade_n      = 0
+        self.recovery_mode = False   # флаг восстановительного режима
 
-        # История результатов для winrate (1=win, 0=loss)
-        self.history: Deque[int] = deque(maxlen=WINRATE_WINDOW)
-
-        # Стартовый баланс — для расчёта целевого барьера и просадки
-        self.start_balance = self.ex.balance()
-        self.target_balance = self.start_balance * (1 + TARGET_PROFIT_PCT / 100)
-        self.floor_balance  = self.start_balance * (1 - MAX_DRAWDOWN_PCT / 100)
-
-        log.info("═══════════════════════════════════════════════")
-        log.info("  Bybit Meme Bot v5.0 (Testnet)")
-        log.info("  + Задача о разорении игрока (без мартингейла)")
-        log.info("═══════════════════════════════════════════════")
-        log.info(f"  Стартовый баланс : {self.start_balance:.2f} USDT")
-        log.info(f"  Цель сессии      : {self.target_balance:.2f} USDT (+{TARGET_PROFIT_PCT}%)")
-        log.info(f"  Стоп просадки    : {self.floor_balance:.2f} USDT (-{MAX_DRAWDOWN_PCT}%)")
-        log.info(f"  Символы          : {SYMBOLS}")
-        log.info(f"  Плечо {LEVERAGE}x | Только по тренду, без догона")
-
+        log.info("=== Bybit Meme Bot v3.1 (Testnet) ===")
         for sym in SYMBOLS:
             self.ex.set_leverage(sym, LEVERAGE)
 
-    # ── WINRATE ────────────────────────────────────────
-    def winrate(self) -> float:
-        """Доля побед в последних WINRATE_WINDOW сделках."""
-        if not self.history:
-            return 0.5  # нейтральная оценка при старте
-        return sum(self.history) / len(self.history)
-
-    # ── ЛОГИРОВАНИЕ ВЕРОЯТНОСТИ РАЗОРЕНИЯ ─────────────
-    def log_ruin_info(self, balance: float):
-        """Выводит в лог вероятность разорения, но никогда не блокирует вход."""
-        p = self.winrate()
-        unit = balance * BASE_RISK_PCT / 100
-        if unit <= 0:
-            return
-        capital_units = balance / unit
-        target_units  = self.target_balance / unit
-        p_ruin = ruin_probability(p, capital_units, target_units)
-        log.info(
-            f"  📐 Разорение игрока: winrate={p:.1%} | "
-            f"P(ruin)={p_ruin:.1%} | "
-            f"капитал={capital_units:.1f}u / цель={target_units:.1f}u"
-        )
-
-    # ── РАЗМЕР СТАВКИ ──────────────────────────────────
-    def calc_qty(self, symbol: str, price: float, balance: float) -> float:
-        if balance < MIN_BALANCE:
+    # ── РАСЧЁТ ОБЪЁМА ──────────────────────────
+    def calc_qty(self, symbol: str, price: float, use_martingale: bool = True) -> float:
+        """Рассчитывает объём позиции с учётом мартингейла или без него"""
+        bal = self.ex.balance()
+        if bal < MIN_BALANCE:
             return 0.0
 
-        p = self.winrate()
-
-        # Выбор размера ставки согласно задаче о разорении (без мартингейла)
-        if len(self.history) >= 5:
-            risk_usdt = bold_bet(p, balance, self.target_balance) * LEVERAGE
-            game_mode = "СМЕЛАЯ" if p < 0.5 else "ОСТОРОЖНАЯ"
+        if use_martingale:
+            risk_usdt = bal * (BASE_RISK_PCT / 100) * (MART_MULT ** self.mart_step) * LEVERAGE
         else:
-            risk_usdt = balance * (BASE_RISK_PCT / 100) * LEVERAGE
-            game_mode = "СТАНДАРТ"
+            risk_usdt = bal * (BASE_RISK_PCT / 100) * LEVERAGE   # базовый риск
 
-        # Потолок 50% баланса с плечом (жёсткое ограничение)
-        risk_usdt = min(risk_usdt, balance * 0.5 * LEVERAGE)
-
-        commission = risk_usdt * FEE_RATE * 2
-        log.info(
-            f"  💰 Игра: {game_mode} | winrate={p:.1%} | "
-            f"ставка={risk_usdt:.2f} USDT | комиссия≈{commission:.4f} USDT"
-        )
+        risk_usdt = min(risk_usdt, bal * 0.5 * LEVERAGE)
 
         min_q, step = self.ex.min_qty(symbol)
         qty = math.floor((risk_usdt / price) / step) * step
         return max(min_q, qty)
 
-    # ── SL ─────────────────────────────────────────────
+    # ── SL / TP ДЛЯ ОБЫЧНОГО РЕЖИМА ──────────────
     def calc_sl(self, side: str, price: float) -> float:
         pct = INITIAL_SL_PCT / 100
         return price * (1 - pct) if side == "long" else price * (1 + pct)
 
-    # ── СИГНАЛ (ТОЛЬКО ПО ТРЕНДУ, БЕЗ ДОГОНА) ────────
+    # ── TP ДЛЯ RECOVERY (безубыток) ────────────
+    def calc_recovery_tp(self, side: str, price: float) -> float:
+        """TP с небольшим запасом, чтобы перекрыть комиссии и получить нулевой/слабоположительный результат"""
+        pct = RECOVERY_TP_PCT / 100
+        return price * (1 + pct) if side == "long" else price * (1 - pct)
+
+    # ── СИГНАЛ ─────────────────────────────────
     def get_signal(self, symbol: str) -> Optional[str]:
         df = self.ex.klines(symbol)
         if df.empty:
@@ -337,15 +275,23 @@ class Bot:
         trend = get_trend(df)
         if trend is None:
             return None
+
+        # В обычном режиме: переворот после убытка (догон)
+        if not self.recovery_mode and self.loss_streak > 0 and self.last_side:
+            flip = "short" if self.last_side == "long" else "long"
+            log.info(f"  🔄 Догон: переворачиваем {self.last_side} → {flip}")
+            return flip
+
+        # В recovery или при отсутствии догона — просто тренд
         return trend
 
-    # ── ОТКРЫТИЕ СДЕЛКИ ────────────────────────────────
-    def open_trade(self, symbol: str, side: str, balance: float) -> Optional[Dict]:
+    # ── ОТКРЫТИЕ СДЕЛКИ (ОБЫЧНЫЙ РЕЖИМ) ────────
+    def open_trade(self, symbol: str, side: str) -> Optional[Dict]:
         price = self.ex.price(symbol)
         if not price:
             return None
 
-        qty = self.calc_qty(symbol, price, balance)
+        qty = self.calc_qty(symbol, price, use_martingale=True)
         if qty <= 0:
             log.warning("  Объём = 0, пропуск")
             return None
@@ -356,19 +302,44 @@ class Bot:
             return None
 
         time.sleep(1)
-
+        # Трейлинг-стоп (только в обычном режиме)
         trailing_delta = price * TRAILING_PCT / 100
         self.ex.set_trailing_stop(symbol, trailing_delta)
 
         self.last_side = side
         log.info(
-            f"🟢 ОТКРЫТО: {side.upper()} {symbol} | "
-            f"qty={qty} | price={price:.8f} | SL={sl:.8f}"
+            f"🟢 ОТКРЫТО (обычный): {side.upper()} {symbol} | "
+            f"qty={qty} | price={price:.8f} | SL={sl:.8f} | "
+            f"mart={self.mart_step}"
         )
         return {"symbol": symbol, "side": side, "entry": price,
                 "qty": qty, "sl": sl, "t0": time.time()}
 
-    # ── МОНИТОРИНГ ─────────────────────────────────────
+    # ── ОТКРЫТИЕ СДЕЛКИ В RECOVERY РЕЖИМЕ ───────
+    def open_recovery_trade(self, symbol: str, side: str) -> Optional[Dict]:
+        price = self.ex.price(symbol)
+        if not price:
+            return None
+
+        qty = self.calc_qty(symbol, price, use_martingale=False)
+        if qty <= 0:
+            log.warning("  Recovery: объём = 0, пропуск")
+            return None
+
+        sl = self.calc_sl(side, price)
+        tp = self.calc_recovery_tp(side, price)
+        oid = self.ex.open_order(symbol, side, qty, sl, tp)
+        if not oid:
+            return None
+
+        log.info(
+            f"🔄 RECOVERY: открыта {side.upper()} {symbol} | "
+            f"qty={qty} | price={price:.8f} | SL={sl:.8f} | TP={tp:.8f}"
+        )
+        return {"symbol": symbol, "side": side, "entry": price,
+                "qty": qty, "sl": sl, "tp": tp, "t0": time.time()}
+
+    # ── МОНИТОРИНГ ОБЫЧНОЙ СДЕЛКИ ──────────────
     def monitor(self, trade: Dict) -> Tuple[float, str]:
         symbol = trade["symbol"]
         side   = trade["side"]
@@ -379,149 +350,234 @@ class Bot:
         while time.time() - t0 < TRADE_DURATION:
             try:
                 pos = self.ex.position(symbol)
-
                 if pos is None or pos["side"] != side:
                     pnl = pos["pnl"] if pos else 0.0
-                    log.info(f"  Закрыта биржей | PnL≈{pnl:.4f} USDT")
+                    log.info(f"  Позиция закрыта биржей | PnL≈{pnl:.4f}")
                     return pnl, "sl" if pnl <= 0 else "tp"
 
                 elapsed = int(time.time() - t0)
                 log.info(
-                    f"  [{elapsed}s/{TRADE_DURATION}s] {side.upper()} {symbol} | "
+                    f"  [{elapsed}s] {side.upper()} {symbol} | "
                     f"PnL={pos['pnl']:.4f} USDT | SL={pos['sl']:.8f}"
                 )
                 time.sleep(5)
-
             except Exception as e:
                 log.error(f"monitor: {e}")
                 time.sleep(5)
 
-        log.info("  ⏰ Время вышло — закрываем принудительно")
+        # Таймаут — закрываем
+        log.info("  ⏰ Время вышло — закрываем")
         cur = self.ex.price(symbol)
         self.ex.close_order(symbol, side, qty)
 
-        pnl = ((cur - entry) if side == "long" else (entry - cur)) * qty * LEVERAGE
+        if side == "long":
+            pnl = (cur - entry) * qty * LEVERAGE
+        else:
+            pnl = (entry - cur) * qty * LEVERAGE
         pnl -= entry * qty * FEE_RATE * 2
         return pnl, "timeout"
 
-    # ── ПРОВЕРКА БАРЬЕРОВ ──────────────────────────────
-    def check_barriers(self, balance: float) -> Optional[str]:
-        """
-        Возвращает:
-          'target'   — достигнут целевой барьер (победа сессии)
-          'drawdown' — достигнута максимальная просадка (стоп)
-          None       — всё в норме
-        """
-        if balance >= self.target_balance:
-            return "target"
-        if balance <= self.floor_balance:
-            return "drawdown"
-        return None
+    # ── МОНИТОРИНГ RECOVERY СДЕЛКИ (до 15 мин) ──
+    def monitor_recovery(self, trade: Dict) -> Tuple[float, str]:
+        symbol = trade["symbol"]
+        side   = trade["side"]
+        entry  = trade["entry"]
+        qty    = trade["qty"]
+        t0     = trade["t0"]
+        tp_price = trade["tp"]
 
-    # ── ГЛАВНЫЙ ЦИКЛ ───────────────────────────────────
-    def run(self):
-        while True:
+        log.info(f"  Recovery мониторинг: ждём TP={tp_price:.8f} или таймаут {RECOVERY_MAX_DURATION//60} мин")
+
+        while time.time() - t0 < RECOVERY_MAX_DURATION:
+            try:
+                pos = self.ex.position(symbol)
+                # Позиция закрыта (сработал TP или SL)
+                if pos is None or pos["side"] != side:
+                    pnl = pos["pnl"] if pos else 0.0
+                    log.info(f"  Recovery: позиция закрыта | PnL={pnl:.4f}")
+                    return pnl, "tp_closed" if pnl > 0 else "sl_closed"
+
+                elapsed = int(time.time() - t0)
+                cur_price = self.ex.price(symbol)
+                log.info(
+                    f"  [recovery {elapsed}s] {side.upper()} {symbol} | "
+                    f"цена={cur_price:.8f} | TP={tp_price:.8f} | PnL={pos['pnl']:.4f}"
+                )
+                time.sleep(5)
+            except Exception as e:
+                log.error(f"monitor_recovery: {e}")
+                time.sleep(5)
+
+        # Таймаут — принудительное закрытие
+        log.info("  ⏰ Recovery: время истекло, закрываем по рынку")
+        cur = self.ex.price(symbol)
+        self.ex.cancel_all_orders(symbol)          # убираем TP/SL ордера
+        self.ex.close_order(symbol, side, qty)
+
+        if side == "long":
+            pnl = (cur - entry) * qty * LEVERAGE
+        else:
+            pnl = (entry - cur) * qty * LEVERAGE
+        pnl -= entry * qty * FEE_RATE * 2
+        return pnl, "timeout"
+
+    # ── ВХОД В RECOVERY РЕЖИМ ──────────────────
+    def enter_recovery_mode(self):
+        log.warning(f"⚠️  Активирован RECOVERY РЕЖИМ (серия убытков = {self.loss_streak})")
+        self.recovery_mode = True
+        # Сбрасываем счётчики мартингейла, они не нужны в recovery
+        self.mart_step = 0
+        self.loss_streak = 0
+        self.last_side = None
+
+    # ── ВЫХОД ИЗ RECOVERY РЕЖИМА ───────────────
+    def exit_recovery_mode(self):
+        log.info("✅ Выход из RECOVERY режима — общий PnL стал неотрицательным, возвращаемся к мартингейлу")
+        self.recovery_mode = False
+        self.mart_step = 0
+        self.loss_streak = 0
+        self.last_side = None
+
+    # ── ЦИКЛ RECOVERY (повторяем, пока PnL не ≥0) ─
+    def run_recovery_cycle(self):
+        """Выполняет сделки в recovery-режиме до восстановления общего PnL >= 0"""
+        log.info("🔄 Запуск recovery-цикла, цель: вывести total_pnl в ноль или плюс")
+        while self.recovery_mode:
             try:
                 bal = self.ex.balance()
-
-                # ── Проверка барьеров ──────────────────
-                barrier = self.check_barriers(bal)
-                if barrier == "target":
-                    log.info(
-                        f"🏆 ЦЕЛЬ ДОСТИГНУТА! Баланс={bal:.2f} USDT "
-                        f"(+{TARGET_PROFIT_PCT}% от старта) | "
-                        f"Сброс истории. Пауза 60s."
-                    )
-                    self.history.clear()
-                    # Сдвигаем стартовый баланс и цель вперёд
-                    self.start_balance  = bal
-                    self.target_balance = bal * (1 + TARGET_PROFIT_PCT / 100)
-                    self.floor_balance  = bal * (1 - MAX_DRAWDOWN_PCT  / 100)
-                    log.info(
-                        f"  Новая цель: {self.target_balance:.2f} USDT | "
-                        f"Стоп: {self.floor_balance:.2f} USDT"
-                    )
-                    time.sleep(60)
-                    continue
-
-                if barrier == "drawdown":
-                    log.error(
-                        f"🛑 СТОП ПРОСАДКИ: баланс={bal:.2f} USDT "
-                        f"(-{MAX_DRAWDOWN_PCT}% от старта {self.start_balance:.2f} USDT). "
-                        f"Бот остановлен."
-                    )
-                    break
-
                 if bal < MIN_BALANCE:
                     log.warning(f"Баланс {bal:.2f} < {MIN_BALANCE} USDT — ожидание")
                     time.sleep(60)
                     continue
 
-                # ── Проверка открытых позиций ──────────
+                # Проверяем открытые позиции
                 busy = False
                 for sym in SYMBOLS:
-                    p = self.ex.position(sym)
-                    if p:
-                        log.info(f"⏳ Открыта: {p['side'].upper()} {sym} | PnL={p['pnl']:.4f}")
+                    if self.ex.position(sym):
+                        log.info("⏳ Recovery: уже есть открытая позиция, ждём её закрытия")
                         busy = True
                         break
                 if busy:
                     time.sleep(10)
                     continue
 
-                # ── Выбор символа ──────────────────────
+                # Выбираем символ по кругу
                 symbol = SYMBOLS[self.trade_n % len(SYMBOLS)]
                 self.trade_n += 1
 
-                log.info(
-                    f"\n{'─'*50}\n"
-                    f"  Сделка #{self.trade_n} | {symbol} | баланс={bal:.2f} USDT"
-                )
-
-                # ── Информация о вероятности разорения (не блокирует) ──
-                self.log_ruin_info(bal)
-
-                # ── Сигнал (строго по тренду) ─────────
-                signal = self.get_signal(symbol)
+                log.info(f"\n─── Recovery сделка #{self.trade_n} | {symbol} ───")
+                signal = self.get_signal(symbol)   # в recovery переворот не работает, только тренд
                 if not signal:
-                    log.info("  Нет чёткого тренда — пропуск")
+                    log.info("Recovery: нет чёткого тренда — пропуск")
                     time.sleep(30)
                     continue
 
-                log.info(f"  Сигнал: {signal.upper()}")
-                trade = self.open_trade(symbol, signal, bal)
+                log.info(f"  Recovery сигнал: {signal.upper()}")
+                trade = self.open_recovery_trade(symbol, signal)
                 if not trade:
                     time.sleep(30)
                     continue
 
-                # ── Мониторинг ─────────────────────────
+                pnl, _ = self.monitor_recovery(trade)
+                self.total_pnl += pnl
+                log.info(f"Recovery сделка завершена | PnL={pnl:.4f} | Общий PnL={self.total_pnl:.4f}")
+
+                # Проверяем, вышли ли в плюс/ноль
+                if self.total_pnl >= 0:
+                    self.exit_recovery_mode()
+                    break
+                else:
+                    log.info(f"Общий PnL всё ещё отрицательный ({self.total_pnl:.4f}), продолжаем recovery...")
+                    time.sleep(10)
+
+            except KeyboardInterrupt:
+                log.info("🛑 Остановлен во время recovery")
+                raise
+            except Exception as e:
+                log.error(f"Ошибка в recovery-цикле: {e}")
+                time.sleep(30)
+
+    # ── ГЛАВНЫЙ ЦИКЛ ───────────────────────────
+    def run(self):
+        log.info(f"Символы: {SYMBOLS}")
+        log.info(f"Плечо: {LEVERAGE}x | Обычный таймаут: {TRADE_DURATION}s | Мартингейл: до {MAX_MART_STEPS} шагов")
+        log.info(f"Recovery триггер: {RECOVERY_TRIGGER} убытков подряд | TP {RECOVERY_TP_PCT}% | макс. время {RECOVERY_MAX_DURATION//60} мин")
+
+        while True:
+            try:
+                # Если мы в recovery-режиме — выполняем recovery-цикл
+                if self.recovery_mode:
+                    self.run_recovery_cycle()
+                    # После выхода из recovery продолжаем обычную работу
+                    continue
+
+                # --- Обычный режим (мартингейл + трейлинг) ---
+                bal = self.ex.balance()
+                if bal < MIN_BALANCE:
+                    log.warning(f"Баланс {bal:.2f} < {MIN_BALANCE} USDT — ожидание")
+                    time.sleep(60)
+                    continue
+
+                # Проверяем открытые позиции
+                busy = False
+                for sym in SYMBOLS:
+                    p = self.ex.position(sym)
+                    if p:
+                        log.info(f"⏳ Уже открыта: {p['side'].upper()} {sym} | PnL={p['pnl']:.4f}")
+                        busy = True
+                        break
+                if busy:
+                    time.sleep(10)
+                    continue
+
+                # Выбираем символ
+                symbol = SYMBOLS[self.trade_n % len(SYMBOLS)]
+                self.trade_n += 1
+
+                log.info(f"\n─── Сделка #{self.trade_n} | {symbol} | mart={self.mart_step} ───")
+
+                signal = self.get_signal(symbol)
+                if not signal:
+                    log.info("Нет чёткого тренда — пропуск")
+                    time.sleep(30)
+                    continue
+
+                log.info(f"  Сигнал: {signal.upper()}")
+                trade = self.open_trade(symbol, signal)
+                if not trade:
+                    time.sleep(30)
+                    continue
+
                 pnl, result = self.monitor(trade)
                 self.total_pnl += pnl
 
-                is_win = pnl > 0
-                self.history.append(1 if is_win else 0)
-
-                if is_win:
-                    log.info(f"✅ ПРИБЫЛЬ | PnL={pnl:.4f} USDT | result={result}")
+                # Обновляем счётчики мартингейла и убытков
+                if result in ("sl", "timeout") and pnl < 0:
+                    self.loss_streak += 1
+                    self.mart_step = min(self.mart_step + 1, MAX_MART_STEPS)
+                    log.warning(
+                        f"❌ Убыток | PnL={pnl:.4f} USDT | "
+                        f"Loss streak={self.loss_streak} | Mart step={self.mart_step}"
+                    )
+                    # Проверяем, не пора ли перейти в recovery
+                    if self.loss_streak >= RECOVERY_TRIGGER:
+                        self.enter_recovery_mode()
+                        continue   # сразу уходим в recovery на следующей итерации
                 else:
-                    log.warning(f"❌ УБЫТОК | PnL={pnl:.4f} USDT | result={result}")
+                    self.loss_streak = 0
+                    self.mart_step = max(0, self.mart_step - 1)
+                    log.info(f"✅ Прибыль | PnL={pnl:.4f} USDT")
 
-                new_bal = self.ex.balance()
-                log.info(
-                    f"📊 Итого PnL: {self.total_pnl:.4f} USDT | "
-                    f"Баланс: {new_bal:.2f} USDT | "
-                    f"Winrate: {self.winrate():.1%} ({sum(self.history)}/{len(self.history)})"
-                )
+                log.info(f"📊 Итого PnL: {self.total_pnl:.4f} USDT | Баланс: {self.ex.balance():.2f} USDT")
                 time.sleep(10)
 
             except KeyboardInterrupt:
-                log.info("🛑 Остановлен пользователем")
+                log.info("🛑 Остановлен")
                 break
             except Exception as e:
                 log.error(f"Главный цикл: {e}")
                 time.sleep(30)
 
 
-# ══════════════════════════════════════════════════════
 if __name__ == "__main__":
     Bot().run()
