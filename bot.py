@@ -1,26 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Bybit Мем-Коин Бот v4.0 — Testnet
-────────────────────────────────────────────────────────
-Торговые механизмы:
-  • Тренд по EMA 9/21 (3m свечи с Bybit)
-  • После убытка — разворот направления (стратегия догон)
-  • Мартингейл до 10 шагов (x1.5 за шаг)
-  • Трейлинг-стоп через Bybit API
-  • Учёт комиссий в расчёте ставки
-  • Лимит сделки 3 минуты, без тейк-профита
-  • Плечо 5x (риск до 50% депозита)
-
-Механизмы из задачи о разорении игрока:
-  • Вычисление вероятности разорения P(ruin) перед входом
-  • Блокировка торговли при P(ruin) > 80%
-  • Смелая игра: при winrate < 50% — увеличиваем ставку
-    (математически выгоднее дробных шагов при p < 0.5)
-  • Целевой барьер +20% к стартовому балансу:
-    достигли — сбрасываем мартингейл, фиксируем сессию
-  • Стоп по просадке: баланс упал на 40% — торговля стоп
-────────────────────────────────────────────────────────
+Bybit Мем-Коин Бот v5.0 — Testnet (Задача о разорении, без мартингейла)
+──────────────────────────────────────────────────────────────────────
+Изменения относительно v4.0:
+  • Полностью убран мартингейл (нет увеличения ставок после убытков).
+  • Убран «догон» (смена направления после убытка). Сигнал всегда по тренду.
+  • Убрана блокировка входа при P(ruin) > 80% – торговля идёт всегда.
+  • Оставлена стратегия «смелая игра» при низком винрейте (из теории разорения).
+  • Целевой барьер +20%, стоп по просадке -40% от стартового баланса.
+  • Плечо 5x, риск до 50% депозита (в смелой игре).
 """
 
 import os, time, math, logging
@@ -39,9 +28,7 @@ load_dotenv()
 SYMBOLS        = ["1000PEPEUSDT", "WIFUSDT", "1000BONKUSDT"]
 LEVERAGE       = 5        # плечо
 TRADE_DURATION = 180      # сек на сделку
-MAX_MART_STEPS = 10       # макс шагов мартингейла
-BASE_RISK_PCT  = 2.0      # % баланса — базовая ставка
-MART_MULT      = 1.5      # множитель мартингейла
+BASE_RISK_PCT  = 2.0      # % баланса — базовая ставка (при недостатке истории)
 FEE_RATE       = 0.00055  # тейкер-комиссия Bybit
 MIN_BALANCE    = 5.0      # мин. баланс USDT
 INITIAL_SL_PCT = 2.0      # базовый SL %
@@ -49,7 +36,6 @@ TRAILING_PCT   = 1.0      # трейлинг-дельта %
 TIMEFRAME      = "3"      # 3-минутные свечи
 
 # ── Параметры задачи о разорении ──────────────────────
-RUIN_BLOCK_THRESHOLD = 0.80   # блокируем вход при P(ruin) > 80%
 TARGET_PROFIT_PCT    = 20.0   # целевой барьер прибыли (% от старт. баланса)
 MAX_DRAWDOWN_PCT     = 40.0   # стоп при просадке баланса (% от старт.)
 WINRATE_WINDOW       = 20     # последние N сделок для оценки winrate
@@ -63,7 +49,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("meme_bot.log", encoding="utf-8"),
+        logging.FileHandler("meme_bot_v5.log", encoding="utf-8"),
     ],
 )
 log = logging.getLogger(__name__)
@@ -241,6 +227,7 @@ def ruin_probability(p: float, capital: float, target: float) -> float:
     except (OverflowError, ZeroDivisionError):
         return 1.0 if p < 0.5 else 0.0
 
+
 def bold_bet(p: float, balance: float, target: float) -> float:
     """
     Смелая игра: при p < 0.5 оптимально ставить как можно
@@ -261,8 +248,6 @@ def bold_bet(p: float, balance: float, target: float) -> float:
 class Bot:
     def __init__(self):
         self.ex          = Bybit()
-        self.mart_step   = 0
-        self.loss_streak = 0
         self.last_side: Optional[str] = None
         self.total_pnl   = 0.0
         self.trade_n     = 0
@@ -276,14 +261,14 @@ class Bot:
         self.floor_balance  = self.start_balance * (1 - MAX_DRAWDOWN_PCT / 100)
 
         log.info("═══════════════════════════════════════════════")
-        log.info("  Bybit Meme Bot v4.0 (Testnet)")
-        log.info("  + Задача о разорении игрока")
+        log.info("  Bybit Meme Bot v5.0 (Testnet)")
+        log.info("  + Задача о разорении игрока (без мартингейла)")
         log.info("═══════════════════════════════════════════════")
         log.info(f"  Стартовый баланс : {self.start_balance:.2f} USDT")
         log.info(f"  Цель сессии      : {self.target_balance:.2f} USDT (+{TARGET_PROFIT_PCT}%)")
         log.info(f"  Стоп просадки    : {self.floor_balance:.2f} USDT (-{MAX_DRAWDOWN_PCT}%)")
         log.info(f"  Символы          : {SYMBOLS}")
-        log.info(f"  Плечо {LEVERAGE}x | Мартингейл до {MAX_MART_STEPS} шагов")
+        log.info(f"  Плечо {LEVERAGE}x | Только по тренду, без догона")
 
         for sym in SYMBOLS:
             self.ex.set_leverage(sym, LEVERAGE)
@@ -295,34 +280,21 @@ class Bot:
             return 0.5  # нейтральная оценка при старте
         return sum(self.history) / len(self.history)
 
-    # ── ФИЛЬТР РАЗОРЕНИЯ ───────────────────────────────
-    def check_ruin_filter(self, balance: float) -> bool:
-        """
-        Возвращает True если торговать можно,
-        False если вероятность разорения слишком высока.
-        """
+    # ── ЛОГИРОВАНИЕ ВЕРОЯТНОСТИ РАЗОРЕНИЯ ─────────────
+    def log_ruin_info(self, balance: float):
+        """Выводит в лог вероятность разорения, но никогда не блокирует вход."""
         p = self.winrate()
-        # Расстояние до цели в условных единицах (шагах BASE_RISK_PCT)
         unit = balance * BASE_RISK_PCT / 100
         if unit <= 0:
-            return False
+            return
         capital_units = balance / unit
         target_units  = self.target_balance / unit
         p_ruin = ruin_probability(p, capital_units, target_units)
-
         log.info(
             f"  📐 Разорение игрока: winrate={p:.1%} | "
             f"P(ruin)={p_ruin:.1%} | "
             f"капитал={capital_units:.1f}u / цель={target_units:.1f}u"
         )
-
-        if p_ruin > RUIN_BLOCK_THRESHOLD:
-            log.warning(
-                f"  ⛔ P(ruin)={p_ruin:.1%} > {RUIN_BLOCK_THRESHOLD:.0%} — "
-                f"вход заблокирован"
-            )
-            return False
-        return True
 
     # ── РАЗМЕР СТАВКИ ──────────────────────────────────
     def calc_qty(self, symbol: str, price: float, balance: float) -> float:
@@ -331,19 +303,15 @@ class Bot:
 
         p = self.winrate()
 
-        # Смелая vs осторожная игра (из теории разорения)
+        # Выбор размера ставки согласно задаче о разорении (без мартингейла)
         if len(self.history) >= 5:
             risk_usdt = bold_bet(p, balance, self.target_balance) * LEVERAGE
             game_mode = "СМЕЛАЯ" if p < 0.5 else "ОСТОРОЖНАЯ"
         else:
-            # Мало данных — стандартный BASE_RISK_PCT
             risk_usdt = balance * (BASE_RISK_PCT / 100) * LEVERAGE
             game_mode = "СТАНДАРТ"
 
-        # Мартингейл поверх базовой ставки
-        risk_usdt *= (MART_MULT ** self.mart_step)
-
-        # Жёсткий потолок — 50% баланса с плечом
+        # Потолок 50% баланса с плечом (жёсткое ограничение)
         risk_usdt = min(risk_usdt, balance * 0.5 * LEVERAGE)
 
         commission = risk_usdt * FEE_RATE * 2
@@ -361,7 +329,7 @@ class Bot:
         pct = INITIAL_SL_PCT / 100
         return price * (1 - pct) if side == "long" else price * (1 + pct)
 
-    # ── СИГНАЛ ─────────────────────────────────────────
+    # ── СИГНАЛ (ТОЛЬКО ПО ТРЕНДУ, БЕЗ ДОГОНА) ────────
     def get_signal(self, symbol: str) -> Optional[str]:
         df = self.ex.klines(symbol)
         if df.empty:
@@ -369,13 +337,6 @@ class Bot:
         trend = get_trend(df)
         if trend is None:
             return None
-
-        # После убытка — разворот (стратегия догон)
-        if self.loss_streak > 0 and self.last_side:
-            flip = "short" if self.last_side == "long" else "long"
-            log.info(f"  🔄 Догон: {self.last_side} → {flip} (убытков подряд: {self.loss_streak})")
-            return flip
-
         return trend
 
     # ── ОТКРЫТИЕ СДЕЛКИ ────────────────────────────────
@@ -402,7 +363,7 @@ class Bot:
         self.last_side = side
         log.info(
             f"🟢 ОТКРЫТО: {side.upper()} {symbol} | "
-            f"qty={qty} | price={price:.8f} | SL={sl:.8f} | mart={self.mart_step}"
+            f"qty={qty} | price={price:.8f} | SL={sl:.8f}"
         )
         return {"symbol": symbol, "side": side, "entry": price,
                 "qty": qty, "sl": sl, "t0": time.time()}
@@ -469,10 +430,8 @@ class Bot:
                     log.info(
                         f"🏆 ЦЕЛЬ ДОСТИГНУТА! Баланс={bal:.2f} USDT "
                         f"(+{TARGET_PROFIT_PCT}% от старта) | "
-                        f"Мартингейл сброшен. Пауза 60s."
+                        f"Сброс истории. Пауза 60s."
                     )
-                    self.mart_step = 0
-                    self.loss_streak = 0
                     self.history.clear()
                     # Сдвигаем стартовый баланс и цель вперёд
                     self.start_balance  = bal
@@ -516,17 +475,13 @@ class Bot:
 
                 log.info(
                     f"\n{'─'*50}\n"
-                    f"  Сделка #{self.trade_n} | {symbol} | mart={self.mart_step} | "
-                    f"баланс={bal:.2f} USDT"
+                    f"  Сделка #{self.trade_n} | {symbol} | баланс={bal:.2f} USDT"
                 )
 
-                # ── Фильтр разорения ───────────────────
-                if not self.check_ruin_filter(bal):
-                    log.info("  Ждём 30s...")
-                    time.sleep(30)
-                    continue
+                # ── Информация о вероятности разорения (не блокирует) ──
+                self.log_ruin_info(bal)
 
-                # ── Сигнал ─────────────────────────────
+                # ── Сигнал (строго по тренду) ─────────
                 signal = self.get_signal(symbol)
                 if not signal:
                     log.info("  Нет чёткого тренда — пропуск")
@@ -547,16 +502,9 @@ class Bot:
                 self.history.append(1 if is_win else 0)
 
                 if is_win:
-                    self.loss_streak = 0
-                    self.mart_step = max(0, self.mart_step - 1)
                     log.info(f"✅ ПРИБЫЛЬ | PnL={pnl:.4f} USDT | result={result}")
                 else:
-                    self.loss_streak += 1
-                    self.mart_step = min(self.mart_step + 1, MAX_MART_STEPS)
-                    log.warning(
-                        f"❌ УБЫТОК | PnL={pnl:.4f} USDT | result={result} | "
-                        f"loss_streak={self.loss_streak} | mart={self.mart_step}"
-                    )
+                    log.warning(f"❌ УБЫТОК | PnL={pnl:.4f} USDT | result={result}")
 
                 new_bal = self.ex.balance()
                 log.info(
