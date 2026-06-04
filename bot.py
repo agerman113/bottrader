@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Bybit Мем-Коин Бот v3.1 — Testnet
-- Тренд с Bybit (EMA 9/21 на 3m свечах)
-- Мартингейл до 10 шагов (x1.5 за шаг) с переворотом после убытка
-- При серии убытков ≥ 6 → переход в recovery-режим:
-    * сделки только по тренду, TP в безубыток (0.15% от входа)
-    * максимальное время удержания 15 минут
-    * возврат к мартингейлу после выхода общего PnL в ноль/плюс
-- Трейлинг-стоп (в обычном режиме), комиссии, плечо 5x
+Bybit Мем-Коин Бот v3.2 — Testnet (FIXED)
+- Исправлена ошибка position: пустые строки в API больше не ломают бота
+- Добавлено ожидание появления позиции после открытия ордера
+- Мониторинг теперь корректно определяет реальные позиции
 """
 
 import os, time, math, logging
@@ -36,10 +32,9 @@ INITIAL_SL_PCT   = 2.0
 TRAILING_PCT     = 1.0
 TIMEFRAME        = "3"
 
-# Параметры recovery-режима
-RECOVERY_TRIGGER    = 6       # количество убыточных сделок подряд для переключения
+RECOVERY_TRIGGER    = 6
 RECOVERY_MAX_DURATION = 900   # 15 минут
-RECOVERY_TP_PCT     = 0.15    # тейк-профит в % от цены входа (0.15% покрывает комиссии)
+RECOVERY_TP_PCT     = 0.15
 
 # ───────────────────────────────────────────────
 # ЛОГГЕР
@@ -57,7 +52,7 @@ log = logging.getLogger(__name__)
 
 
 # ───────────────────────────────────────────────
-# BYBIT WRAPPER (расширен)
+# BYBIT WRAPPER (исправленный)
 # ───────────────────────────────────────────────
 class Bybit:
     def __init__(self):
@@ -119,10 +114,6 @@ class Bybit:
 
     def open_order(self, symbol: str, side: str, qty: float,
                    sl: float, tp: Optional[float] = None) -> Optional[str]:
-        """
-        Открывает рыночный ордер со стоп-лоссом и опциональным тейк-профитом.
-        Возвращает orderId или None.
-        """
         params = {
             "category": "linear",
             "symbol": symbol,
@@ -177,25 +168,40 @@ class Bybit:
             return False
 
     def position(self, symbol: str) -> Optional[Dict]:
+        """Возвращает информацию о позиции, защищён от пустых строк в API"""
         try:
             r = self.s.get_positions(category="linear", symbol=symbol)
             for p in r["result"]["list"]:
-                sz = float(p.get("size", 0))
+                size_str = p.get("size", "0")
+                if not size_str or size_str == "":
+                    continue
+                sz = float(size_str)
                 if sz > 0:
+                    avg_price = p.get("avgPrice", "0")
+                    if avg_price == "":
+                        avg_price = "0"
+                    unrealised = p.get("unrealisedPnl", "0")
+                    if unrealised == "":
+                        unrealised = "0"
+                    stop_loss = p.get("stopLoss", "0")
+                    if stop_loss == "":
+                        stop_loss = "0"
+                    take_profit = p.get("takeProfit", "0")
+                    if take_profit == "":
+                        take_profit = "0"
                     return {
                         "side":  "long" if p["side"] == "Buy" else "short",
                         "size":  sz,
-                        "entry": float(p.get("avgPrice", 0)),
-                        "pnl":   float(p.get("unrealisedPnl", 0)),
-                        "sl":    float(p.get("stopLoss", 0)),
-                        "tp":    float(p.get("takeProfit", 0)),
+                        "entry": float(avg_price),
+                        "pnl":   float(unrealised),
+                        "sl":    float(stop_loss),
+                        "tp":    float(take_profit),
                     }
         except Exception as e:
             log.error(f"position({symbol}): {e}")
         return None
 
     def cancel_all_orders(self, symbol: str):
-        """Отмена всех активных ордеров (TP/SL)"""
         try:
             self.s.cancel_all_orders(category="linear", symbol=symbol)
         except Exception as e:
@@ -209,7 +215,6 @@ def ema(series: pd.Series, n: int) -> float:
     return float(series.ewm(span=n, adjust=False).mean().iloc[-1])
 
 def get_trend(df: pd.DataFrame) -> Optional[str]:
-    """EMA9 vs EMA21 → 'long' | 'short' | None"""
     if len(df) < 22:
         return None
     e9  = ema(df["c"], 9)
@@ -222,7 +227,7 @@ def get_trend(df: pd.DataFrame) -> Optional[str]:
 
 
 # ───────────────────────────────────────────────
-# БОТ
+# БОТ (исправленный)
 # ───────────────────────────────────────────────
 class Bot:
     def __init__(self):
@@ -232,15 +237,13 @@ class Bot:
         self.last_side: Optional[str] = None
         self.total_pnl    = 0.0
         self.trade_n      = 0
-        self.recovery_mode = False   # флаг восстановительного режима
+        self.recovery_mode = False
 
-        log.info("=== Bybit Meme Bot v3.1 (Testnet) ===")
+        log.info("=== Bybit Meme Bot v3.2 (Testnet - FIXED) ===")
         for sym in SYMBOLS:
             self.ex.set_leverage(sym, LEVERAGE)
 
-    # ── РАСЧЁТ ОБЪЁМА ──────────────────────────
     def calc_qty(self, symbol: str, price: float, use_martingale: bool = True) -> float:
-        """Рассчитывает объём позиции с учётом мартингейла или без него"""
         bal = self.ex.balance()
         if bal < MIN_BALANCE:
             return 0.0
@@ -248,7 +251,7 @@ class Bot:
         if use_martingale:
             risk_usdt = bal * (BASE_RISK_PCT / 100) * (MART_MULT ** self.mart_step) * LEVERAGE
         else:
-            risk_usdt = bal * (BASE_RISK_PCT / 100) * LEVERAGE   # базовый риск
+            risk_usdt = bal * (BASE_RISK_PCT / 100) * LEVERAGE
 
         risk_usdt = min(risk_usdt, bal * 0.5 * LEVERAGE)
 
@@ -256,18 +259,14 @@ class Bot:
         qty = math.floor((risk_usdt / price) / step) * step
         return max(min_q, qty)
 
-    # ── SL / TP ДЛЯ ОБЫЧНОГО РЕЖИМА ──────────────
     def calc_sl(self, side: str, price: float) -> float:
         pct = INITIAL_SL_PCT / 100
         return price * (1 - pct) if side == "long" else price * (1 + pct)
 
-    # ── TP ДЛЯ RECOVERY (безубыток) ────────────
     def calc_recovery_tp(self, side: str, price: float) -> float:
-        """TP с небольшим запасом, чтобы перекрыть комиссии и получить нулевой/слабоположительный результат"""
         pct = RECOVERY_TP_PCT / 100
         return price * (1 + pct) if side == "long" else price * (1 - pct)
 
-    # ── СИГНАЛ ─────────────────────────────────
     def get_signal(self, symbol: str) -> Optional[str]:
         df = self.ex.klines(symbol)
         if df.empty:
@@ -276,17 +275,15 @@ class Bot:
         if trend is None:
             return None
 
-        # В обычном режиме: переворот после убытка (догон)
         if not self.recovery_mode and self.loss_streak > 0 and self.last_side:
             flip = "short" if self.last_side == "long" else "long"
             log.info(f"  🔄 Догон: переворачиваем {self.last_side} → {flip}")
             return flip
 
-        # В recovery или при отсутствии догона — просто тренд
         return trend
 
-    # ── ОТКРЫТИЕ СДЕЛКИ (ОБЫЧНЫЙ РЕЖИМ) ────────
     def open_trade(self, symbol: str, side: str) -> Optional[Dict]:
+        """Открытие сделки в обычном режиме с ожиданием появления позиции"""
         price = self.ex.price(symbol)
         if not price:
             return None
@@ -301,22 +298,30 @@ class Bot:
         if not oid:
             return None
 
-        time.sleep(1)
-        # Трейлинг-стоп (только в обычном режиме)
+        # Ждём появления позиции (максимум 5 секунд)
+        for attempt in range(10):
+            time.sleep(0.5)
+            pos = self.ex.position(symbol)
+            if pos and pos["side"] == side:
+                break
+        else:
+            log.warning("  Не удалось обнаружить позицию после открытия ордера")
+            return None
+
+        # Устанавливаем трейлинг-стоп
         trailing_delta = price * TRAILING_PCT / 100
         self.ex.set_trailing_stop(symbol, trailing_delta)
 
         self.last_side = side
         log.info(
             f"🟢 ОТКРЫТО (обычный): {side.upper()} {symbol} | "
-            f"qty={qty} | price={price:.8f} | SL={sl:.8f} | "
-            f"mart={self.mart_step}"
+            f"qty={qty} | price={price:.8f} | SL={sl:.8f} | mart={self.mart_step}"
         )
         return {"symbol": symbol, "side": side, "entry": price,
                 "qty": qty, "sl": sl, "t0": time.time()}
 
-    # ── ОТКРЫТИЕ СДЕЛКИ В RECOVERY РЕЖИМЕ ───────
     def open_recovery_trade(self, symbol: str, side: str) -> Optional[Dict]:
+        """Открытие сделки в recovery-режиме с ожиданием позиции"""
         price = self.ex.price(symbol)
         if not price:
             return None
@@ -332,6 +337,16 @@ class Bot:
         if not oid:
             return None
 
+        # Ждём появления позиции
+        for attempt in range(10):
+            time.sleep(0.5)
+            pos = self.ex.position(symbol)
+            if pos and pos["side"] == side:
+                break
+        else:
+            log.warning("  Recovery: не удалось обнаружить позицию")
+            return None
+
         log.info(
             f"🔄 RECOVERY: открыта {side.upper()} {symbol} | "
             f"qty={qty} | price={price:.8f} | SL={sl:.8f} | TP={tp:.8f}"
@@ -339,21 +354,27 @@ class Bot:
         return {"symbol": symbol, "side": side, "entry": price,
                 "qty": qty, "sl": sl, "tp": tp, "t0": time.time()}
 
-    # ── МОНИТОРИНГ ОБЫЧНОЙ СДЕЛКИ ──────────────
     def monitor(self, trade: Dict) -> Tuple[float, str]:
+        """Мониторинг обычной сделки с повторными проверками"""
         symbol = trade["symbol"]
         side   = trade["side"]
         entry  = trade["entry"]
         qty    = trade["qty"]
         t0     = trade["t0"]
 
+        time.sleep(1)  # дополнительная пауза перед циклом
+
         while time.time() - t0 < TRADE_DURATION:
             try:
                 pos = self.ex.position(symbol)
                 if pos is None or pos["side"] != side:
-                    pnl = pos["pnl"] if pos else 0.0
-                    log.info(f"  Позиция закрыта биржей | PnL≈{pnl:.4f}")
-                    return pnl, "sl" if pnl <= 0 else "tp"
+                    # Перепроверим через секунду
+                    time.sleep(1)
+                    pos = self.ex.position(symbol)
+                    if pos is None or pos["side"] != side:
+                        pnl = pos["pnl"] if pos else 0.0
+                        log.info(f"  Позиция закрыта биржей | PnL≈{pnl:.4f}")
+                        return pnl, "closed"
 
                 elapsed = int(time.time() - t0)
                 log.info(
@@ -377,8 +398,8 @@ class Bot:
         pnl -= entry * qty * FEE_RATE * 2
         return pnl, "timeout"
 
-    # ── МОНИТОРИНГ RECOVERY СДЕЛКИ (до 15 мин) ──
     def monitor_recovery(self, trade: Dict) -> Tuple[float, str]:
+        """Мониторинг recovery-сделки"""
         symbol = trade["symbol"]
         side   = trade["side"]
         entry  = trade["entry"]
@@ -387,15 +408,18 @@ class Bot:
         tp_price = trade["tp"]
 
         log.info(f"  Recovery мониторинг: ждём TP={tp_price:.8f} или таймаут {RECOVERY_MAX_DURATION//60} мин")
+        time.sleep(1)
 
         while time.time() - t0 < RECOVERY_MAX_DURATION:
             try:
                 pos = self.ex.position(symbol)
-                # Позиция закрыта (сработал TP или SL)
                 if pos is None or pos["side"] != side:
-                    pnl = pos["pnl"] if pos else 0.0
-                    log.info(f"  Recovery: позиция закрыта | PnL={pnl:.4f}")
-                    return pnl, "tp_closed" if pnl > 0 else "sl_closed"
+                    time.sleep(1)
+                    pos = self.ex.position(symbol)
+                    if pos is None or pos["side"] != side:
+                        pnl = pos["pnl"] if pos else 0.0
+                        log.info(f"  Recovery: позиция закрыта | PnL={pnl:.4f}")
+                        return pnl, "tp_closed" if pnl > 0 else "sl_closed"
 
                 elapsed = int(time.time() - t0)
                 cur_price = self.ex.price(symbol)
@@ -408,10 +432,10 @@ class Bot:
                 log.error(f"monitor_recovery: {e}")
                 time.sleep(5)
 
-        # Таймаут — принудительное закрытие
+        # Таймаут
         log.info("  ⏰ Recovery: время истекло, закрываем по рынку")
         cur = self.ex.price(symbol)
-        self.ex.cancel_all_orders(symbol)          # убираем TP/SL ордера
+        self.ex.cancel_all_orders(symbol)
         self.ex.close_order(symbol, side, qty)
 
         if side == "long":
@@ -421,16 +445,13 @@ class Bot:
         pnl -= entry * qty * FEE_RATE * 2
         return pnl, "timeout"
 
-    # ── ВХОД В RECOVERY РЕЖИМ ──────────────────
     def enter_recovery_mode(self):
         log.warning(f"⚠️  Активирован RECOVERY РЕЖИМ (серия убытков = {self.loss_streak})")
         self.recovery_mode = True
-        # Сбрасываем счётчики мартингейла, они не нужны в recovery
         self.mart_step = 0
         self.loss_streak = 0
         self.last_side = None
 
-    # ── ВЫХОД ИЗ RECOVERY РЕЖИМА ───────────────
     def exit_recovery_mode(self):
         log.info("✅ Выход из RECOVERY режима — общий PnL стал неотрицательным, возвращаемся к мартингейлу")
         self.recovery_mode = False
@@ -438,9 +459,7 @@ class Bot:
         self.loss_streak = 0
         self.last_side = None
 
-    # ── ЦИКЛ RECOVERY (повторяем, пока PnL не ≥0) ─
     def run_recovery_cycle(self):
-        """Выполняет сделки в recovery-режиме до восстановления общего PnL >= 0"""
         log.info("🔄 Запуск recovery-цикла, цель: вывести total_pnl в ноль или плюс")
         while self.recovery_mode:
             try:
@@ -450,7 +469,6 @@ class Bot:
                     time.sleep(60)
                     continue
 
-                # Проверяем открытые позиции
                 busy = False
                 for sym in SYMBOLS:
                     if self.ex.position(sym):
@@ -461,12 +479,11 @@ class Bot:
                     time.sleep(10)
                     continue
 
-                # Выбираем символ по кругу
                 symbol = SYMBOLS[self.trade_n % len(SYMBOLS)]
                 self.trade_n += 1
 
                 log.info(f"\n─── Recovery сделка #{self.trade_n} | {symbol} ───")
-                signal = self.get_signal(symbol)   # в recovery переворот не работает, только тренд
+                signal = self.get_signal(symbol)
                 if not signal:
                     log.info("Recovery: нет чёткого тренда — пропуск")
                     time.sleep(30)
@@ -482,7 +499,6 @@ class Bot:
                 self.total_pnl += pnl
                 log.info(f"Recovery сделка завершена | PnL={pnl:.4f} | Общий PnL={self.total_pnl:.4f}")
 
-                # Проверяем, вышли ли в плюс/ноль
                 if self.total_pnl >= 0:
                     self.exit_recovery_mode()
                     break
@@ -497,7 +513,6 @@ class Bot:
                 log.error(f"Ошибка в recovery-цикле: {e}")
                 time.sleep(30)
 
-    # ── ГЛАВНЫЙ ЦИКЛ ───────────────────────────
     def run(self):
         log.info(f"Символы: {SYMBOLS}")
         log.info(f"Плечо: {LEVERAGE}x | Обычный таймаут: {TRADE_DURATION}s | Мартингейл: до {MAX_MART_STEPS} шагов")
@@ -505,20 +520,17 @@ class Bot:
 
         while True:
             try:
-                # Если мы в recovery-режиме — выполняем recovery-цикл
                 if self.recovery_mode:
                     self.run_recovery_cycle()
-                    # После выхода из recovery продолжаем обычную работу
                     continue
 
-                # --- Обычный режим (мартингейл + трейлинг) ---
+                # --- Обычный режим ---
                 bal = self.ex.balance()
                 if bal < MIN_BALANCE:
                     log.warning(f"Баланс {bal:.2f} < {MIN_BALANCE} USDT — ожидание")
                     time.sleep(60)
                     continue
 
-                # Проверяем открытые позиции
                 busy = False
                 for sym in SYMBOLS:
                     p = self.ex.position(sym)
@@ -530,7 +542,6 @@ class Bot:
                     time.sleep(10)
                     continue
 
-                # Выбираем символ
                 symbol = SYMBOLS[self.trade_n % len(SYMBOLS)]
                 self.trade_n += 1
 
@@ -551,18 +562,16 @@ class Bot:
                 pnl, result = self.monitor(trade)
                 self.total_pnl += pnl
 
-                # Обновляем счётчики мартингейла и убытков
-                if result in ("sl", "timeout") and pnl < 0:
+                if result in ("sl", "timeout", "closed") and pnl < 0:
                     self.loss_streak += 1
                     self.mart_step = min(self.mart_step + 1, MAX_MART_STEPS)
                     log.warning(
                         f"❌ Убыток | PnL={pnl:.4f} USDT | "
                         f"Loss streak={self.loss_streak} | Mart step={self.mart_step}"
                     )
-                    # Проверяем, не пора ли перейти в recovery
                     if self.loss_streak >= RECOVERY_TRIGGER:
                         self.enter_recovery_mode()
-                        continue   # сразу уходим в recovery на следующей итерации
+                        continue
                 else:
                     self.loss_streak = 0
                     self.mart_step = max(0, self.mart_step - 1)
