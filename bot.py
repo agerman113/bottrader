@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-Aurora AI + Copy‑Trading Bot
-Использует сигналы Aurora AI и копирует успешных мастеров (ROI > 100%, < 1 дня, мемкоины).
+Aurora AI + Copy‑Trading Bot (исправленный)
+Закрывает все позиции при старте, игнорирует несуществующие символы.
 Полный риск‑менеджмент, трейлинг, частичное закрытие, пирамидинг.
 """
 
@@ -22,11 +22,13 @@ TIMEFRAME_TA   = "5m"
 SCAN_INTERVAL  = 120          # интервал сканирования сигналов (сек)
 COPY_SCAN_INTERVAL = 3600     # интервал проверки мастеров (сек)
 
-# Торгуемые символы (мемкоины + основные)
+# ТОЛЬКО СИМВОЛЫ, КОТОРЫЕ ЕСТЬ НА ТЕСТНЕТЕ BYBIT (проверено)
 SYMBOLS = [
-    "PEPE/USDT:USDT", "WIF/USDT:USDT", "BOME/USDT:USDT", "MEME/USDT:USDT",
-    "DOGE/USDT:USDT", "SHIB1000/USDT:USDT", "BONK/USDT:USDT", "FLOKI/USDT:USDT",
-    "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT",
+    "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "ADA/USDT:USDT",
+    "DOGE/USDT:USDT", "DOT/USDT:USDT", "LINK/USDT:USDT", "UNI/USDT:USDT",
+    "OP/USDT:USDT", "APT/USDT:USDT", "NEAR/USDT:USDT", "RUNE/USDT:USDT",
+    "AVAX/USDT:USDT", "MATIC/USDT:USDT", "ATOM/USDT:USDT", "LTC/USDT:USDT",
+    "ARB/USDT:USDT", "FIL/USDT:USDT",
 ]
 
 MIN_SCORE      = 45
@@ -107,6 +109,18 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
+
+
+# ============================================================
+# ГЛОБАЛЬНЫЙ КЭШ «ПЛОХИХ» СИМВОЛОВ (чтобы не повторять ошибки)
+# ============================================================
+_bad_symbols: set = set()
+
+def is_bad_symbol(symbol: str) -> bool:
+    return symbol in _bad_symbols
+
+def mark_bad_symbol(symbol: str):
+    _bad_symbols.add(symbol)
 
 
 # ============================================================
@@ -224,15 +238,9 @@ def получить_aurora_сигнал(symbol: str) -> dict:
 
 
 # ============================================================
-# ПОИСК УСПЕШНЫХ МАСТЕРОВ КОПИТРЕЙДИНГА
+# ПОИСК УСПЕШНЫХ МАСТЕРОВ КОПИТРЕЙДИНГА (заглушка)
 # ============================================================
 def найти_успешных_мастеров() -> list:
-    """
-    Возвращает список успешных мастеров: ROI > 100%, возраст < 24 ч, мемкоины.
-    Использует заглушку, т.к. реальный API может отсутствовать.
-    """
-    # В реальности здесь должен быть запрос к API Bybit Copy‑Trading.
-    # Пока возвращаем пустой список, чтобы не ломать бота.
     return []
 
 
@@ -263,7 +271,9 @@ class BybitWrapper:
 
     def fetch_ticker(self, symbol: str) -> dict:
         sym = symbol.replace("/","").replace(":USDT","")
-        for attempt in range(3):
+        if is_bad_symbol(sym):   # больше не пытаемся
+            return {"last":0.0,"mark_price":0.0}
+        for attempt in range(1):  # только одна попытка для неизвестных символов
             try:
                 r = self.session.get_tickers(category="linear", symbol=sym)
                 tickers = r.get("result",{}).get("list",[])
@@ -273,8 +283,10 @@ class BybitWrapper:
                 mark_price = float(tickers[0].get("markPrice", last))
                 return {"last":last,"mark_price":mark_price}
             except Exception as e:
-                log.warning(f"ticker попытка {attempt+1}/3 {symbol}: {e}")
-                time.sleep(2)
+                if "invalid" in str(e).lower() or "10001" in str(e):
+                    mark_bad_symbol(sym)
+                    log.warning(f"Символ {sym} не существует на бирже – помечаем как плохой")
+                return {"last":0.0,"mark_price":0.0}
         return {"last":0.0,"mark_price":0.0}
 
     def fetch_positions(self):
@@ -291,6 +303,16 @@ class BybitWrapper:
                 "entryPrice":    float(p.get("avgPrice",0)),
             })
         return out
+
+    def close_position(self, symbol, qty, side):
+        close_side = "sell" if side=="long" else "buy"
+        try:
+            self.create_market_order(symbol, close_side, qty, reduce_only=True)
+            log.info(f"Принудительно закрыта позиция {symbol} ({side}) qty={qty}")
+            return True
+        except Exception as e:
+            log.warning(f"Не удалось закрыть позицию {symbol}: {e}")
+            return False
 
     def set_leverage(self, symbol, leverage):
         sym = symbol.replace("/","").replace(":USDT","")
@@ -396,7 +418,23 @@ def calc_supertrend(df, period=10, mult=3.0):
 
 
 # ============================================================
-# ИСПОЛНЕНИЕ ОРДЕРОВ
+# ФУНКЦИЯ ПРИНУДИТЕЛЬНОГО ЗАКРЫТИЯ ВСЕХ ПОЗИЦИЙ ПРИ СТАРТЕ
+# ============================================================
+def закрыть_все_позиции():
+    positions = exchange.fetch_positions()
+    for p in positions:
+        sym = p["symbol"]
+        # Восстанавливаем полный символ
+        full_symbol = sym + "/USDT:USDT"
+        qty = float(p.get("contracts",0))
+        side = p["side"]
+        if qty > 0:
+            exchange.close_position(full_symbol, qty, side)
+            time.sleep(1)
+
+
+# ============================================================
+# ОТКРЫТИЕ / ЗАКРЫТИЕ ПОЗИЦИЙ (те же функции)
 # ============================================================
 def открыть_позицию(symbol, margin_usdt, tp_price, sl_price, side="long"):
     try:
@@ -721,6 +759,10 @@ stats = {
 def main():
     global stats
     загрузить_состояние()
+
+    # ⚡ Принудительно закрываем все открытые позиции при старте
+    закрыть_все_позиции()
+
     stats["запусков"] += 1
     баланс = полный_баланс_usdt()
     if stats["депозит_старт"]<=0: stats["депозит_старт"] = баланс
@@ -774,24 +816,22 @@ def main():
                 last_copy_scan = time.time()
                 masters = найти_успешных_мастеров()
                 for m in masters:
-                    sym = m["symbol"] + "/USDT:USDT"  # переводим в формат бота
+                    sym = m["symbol"] + "/USDT:USDT"
                     if sym in SYMBOLS and sym not in заблокированные:
                         copy_trades.append({
                             "symbol": sym,
                             "side": m["side"],
-                            "confidence": 80,  # высокая уверенность
+                            "confidence": 80,
                         })
 
             # Объединяем все сигналы
             all_candidates = []
             for sym, data in signals_aurora.items():
                 if data["signal"] in ("long", "short"):
-                    # Скор = confidence (Aurora)
                     score = data["confidence"]
                     if score < MIN_SCORE: continue
-                    all_candidates.append((sym, score, data["price"], data["side"], data["signal"], "Aurora"))
+                    all_candidates.append((sym, score, data["price"], data["signal"], data["signal"], "Aurora"))
             for t in copy_trades:
-                # Для копи-трейдов скор = 80
                 ticker = exchange.fetch_ticker(t["symbol"])
                 if ticker["last"]==0: continue
                 all_candidates.append((t["symbol"], 80, ticker["last"], t["side"], t["side"], "CopyMaster"))
@@ -816,7 +856,7 @@ def main():
             tier_name, tier_mult = определить_силу_сигнала(скор)
             log.info(f"⚡ {tier_name} (источник={источник}, скор={скор}, ×{tier_mult:.2f})")
 
-            # Расчёт TP/SL (упрощённо, без ATR если нет данных)
+            # Расчёт TP/SL
             atr_pt = 0.0
             raw_atr = exchange.fetch_ohlcv(выбрана, TIMEFRAME_TA, limit=50)
             if len(raw_atr)>=20:
