@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Bybit Мем-Коин Бот v2.0
-Торгует 3 мем-коинами на фьючерсах (Testnet) с:
-- Мартингейлом (макс. 10 шагов)
-- Переворотом позиции после убытка
-- Трейлинг-стопом на базе ATR
-- Пирамидингом
-- Стратегией догон
-- Учетом комиссий
-- Лимитом риска 50% от депозита
-- Временным лимитом сделки (3 минуты)
+Bybit Мем-Коин Бот v3.0 — Testnet
+- Тренд с Bybit (EMA 9/21 на 3m свечах)
+- После убытка: переворот направления
+- Мартингейл до 10 шагов (x1.5 за шаг)
+- Трейлинг-стоп через Bybit API
+- Учёт комиссий при расчёте ставки
+- Лимит сделки 3 минуты, без тейк-профита
+- Плечо 5x (риск до ~50% депозита)
 """
 
-import os
-import time
-import logging
-import math
+import os, time, math, logging
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -25,34 +20,31 @@ from pybit.unified_trading import HTTP
 
 load_dotenv()
 
-# ============================================================
-# 📌 КОНФИГУРАЦИЯ
-# ============================================================
-TESTNET_MODE       = True
-SYMBOLS            = ["PEPEUSDT", "WIFUSDT", "BONKUSDT"]   # Bybit linear symbols
-LEVERAGE           = 5          # Плечо (риск до 50 % от депозита)
-TIMEFRAME          = "3"        # Таймфрейм в минутах (Bybit interval)
-TRADE_DURATION     = 180        # Максимальная длительность сделки (сек)
-MAX_MARTINGALE_STEPS = 10       # Максимум шагов мартингейла
-BASE_RISK_PCT      = 1.0        # Базовый риск на сделку (% от баланса)
-BYBIT_FEE          = 0.00055    # Комиссия Bybit (тейкер)
-MIN_BALANCE_USDT   = 10.0       # Минимальный баланс для торговли
+# ───────────────────────────────────────────────
+# КОНФИГ
+# ───────────────────────────────────────────────
+# На Bybit Testnet мем-коины с маленькой ценой
+# торгуются с префиксом 1000 или 10000
+SYMBOLS = ["1000PEPEUSDT", "WIFUSDT", "1000BONKUSDT"]
 
-# Параметры стопов
-INITIAL_SL_PCT     = 1.5        # Начальный стоп-лосс (%)
-TRAILING_ATR_MULT  = 2.0        # Множитель ATR для трейлинга
-MIN_TRAILING_PCT   = 0.3        # Минимальный шаг трейлинга (%)
+LEVERAGE         = 5        # плечо
+TRADE_DURATION   = 180      # секунд на сделку
+MAX_MART_STEPS   = 10       # макс шагов мартингейла
+BASE_RISK_PCT    = 2.0      # % баланса на базовую ставку
+MART_MULT        = 1.5      # множитель за шаг мартингейла
+FEE_RATE         = 0.00055  # тейкер комиссия Bybit
+MIN_BALANCE      = 5.0      # мин. баланс для торговли
+INITIAL_SL_PCT   = 2.0      # базовый SL %
+TRAILING_PCT     = 1.0      # трейлинг дельта %
+TIMEFRAME        = "3"      # 3-минутные свечи
 
-# Параметры пирамидинга / мартингейла
-PYRAMIDING_MULT    = 1.5        # Множитель размера позиции за шаг
-
-# ============================================================
-# 📋 ЛОГИРОВАНИЕ
-# ============================================================
+# ───────────────────────────────────────────────
+# ЛОГГЕР
+# ───────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%d.%m.%Y %H:%M:%S",
+    datefmt="%H:%M:%S",
     handlers=[
         logging.StreamHandler(),
         logging.FileHandler("meme_bot.log", encoding="utf-8"),
@@ -61,121 +53,110 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ============================================================
-# 🤖 BYBIT API WRAPPER
-# ============================================================
-class BybitWrapper:
+# ───────────────────────────────────────────────
+# BYBIT WRAPPER
+# ───────────────────────────────────────────────
+class Bybit:
     def __init__(self):
-        self.session = HTTP(
-            testnet=TESTNET_MODE,
+        self.s = HTTP(
+            testnet=True,
             api_key=os.getenv("BYBIT_TESTNET_API_KEY", ""),
             api_secret=os.getenv("BYBIT_TESTNET_API_SECRET", ""),
         )
 
-    # ----------------------------------------------------------
-    def fetch_ticker(self, symbol: str) -> Dict:
+    def balance(self) -> float:
         try:
-            r = self.session.get_tickers(category="linear", symbol=symbol)
-            item = r["result"]["list"][0]
-            return {
-                "last": float(item["lastPrice"]),
-                "mark_price": float(item.get("markPrice", item["lastPrice"])),
-            }
-        except Exception as e:
-            log.error(f"fetch_ticker error: {e}")
-            return {"last": 0.0, "mark_price": 0.0}
-
-    # ----------------------------------------------------------
-    def fetch_ohlcv(self, symbol: str, interval: str, limit: int = 100) -> pd.DataFrame:
-        try:
-            r = self.session.get_kline(
-                category="linear", symbol=symbol, interval=interval, limit=limit
-            )
-            rows = [
-                [int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])]
-                for x in reversed(r["result"]["list"])
-            ]
-            df = pd.DataFrame(rows, columns=["ts", "o", "h", "l", "c", "v"])
-            return df
-        except Exception as e:
-            log.error(f"fetch_ohlcv error: {e}")
-            return pd.DataFrame()
-
-    # ----------------------------------------------------------
-    def fetch_balance(self) -> float:
-        try:
-            r = self.session.get_wallet_balance(accountType="UNIFIED")
+            r = self.s.get_wallet_balance(accountType="UNIFIED")
             return float(r["result"]["list"][0].get("totalAvailableBalance", 0))
         except Exception as e:
-            log.error(f"fetch_balance error: {e}")
+            log.error(f"balance: {e}")
             return 0.0
 
-    # ----------------------------------------------------------
-    def set_leverage(self, symbol: str, leverage: int) -> bool:
+    def price(self, symbol: str) -> float:
         try:
-            self.session.set_leverage(
+            r = self.s.get_tickers(category="linear", symbol=symbol)
+            return float(r["result"]["list"][0]["lastPrice"])
+        except Exception as e:
+            log.error(f"price({symbol}): {e}")
+            return 0.0
+
+    def klines(self, symbol: str, limit: int = 60) -> pd.DataFrame:
+        try:
+            r = self.s.get_kline(
+                category="linear", symbol=symbol,
+                interval=TIMEFRAME, limit=limit
+            )
+            rows = [
+                [int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4])]
+                for x in reversed(r["result"]["list"])
+            ]
+            return pd.DataFrame(rows, columns=["ts", "o", "h", "l", "c"])
+        except Exception as e:
+            log.error(f"klines({symbol}): {e}")
+            return pd.DataFrame()
+
+    def set_leverage(self, symbol: str, lev: int):
+        try:
+            self.s.set_leverage(
+                category="linear", symbol=symbol,
+                buyLeverage=str(lev), sellLeverage=str(lev)
+            )
+            log.info(f"  Плечо {lev}x → {symbol} ✅")
+        except Exception as e:
+            # Если уже установлено — ошибка нормальная
+            log.warning(f"  set_leverage {symbol}: {e}")
+
+    def min_qty(self, symbol: str) -> Tuple[float, float]:
+        """Возвращает (min_qty, qty_step)"""
+        try:
+            r = self.s.get_instruments_info(category="linear", symbol=symbol)
+            f = r["result"]["list"][0]["lotSizeFilter"]
+            return float(f["minOrderQty"]), float(f["qtyStep"])
+        except Exception as e:
+            log.error(f"min_qty({symbol}): {e}")
+            return 1.0, 1.0
+
+    def open_order(self, symbol: str, side: str, qty: float, sl: float) -> Optional[str]:
+        """Открывает рыночный ордер со стоп-лоссом. Возвращает orderId или None."""
+        try:
+            r = self.s.place_order(
                 category="linear",
                 symbol=symbol,
-                buyLeverage=str(leverage),
-                sellLeverage=str(leverage),
+                side="Buy" if side == "long" else "Sell",
+                orderType="Market",
+                qty=str(qty),
+                stopLoss=str(round(sl, 8)),
+                slTriggerBy="MarkPrice",
+                timeInForce="GTC",
+                reduceOnly=False,
+            )
+            oid = r["result"]["orderId"]
+            log.info(f"  Ордер открыт: {oid}")
+            return oid
+        except Exception as e:
+            log.error(f"open_order({symbol}): {e}")
+            return None
+
+    def close_order(self, symbol: str, side: str, qty: float) -> bool:
+        """Закрывает позицию рыночным ордером."""
+        try:
+            self.s.place_order(
+                category="linear",
+                symbol=symbol,
+                side="Sell" if side == "long" else "Buy",
+                orderType="Market",
+                qty=str(qty),
+                reduceOnly=True,
+                timeInForce="GTC",
             )
             return True
         except Exception as e:
-            log.error(f"set_leverage error [{symbol}]: {e}")
+            log.error(f"close_order({symbol}): {e}")
             return False
 
-    # ----------------------------------------------------------
-    def get_instrument_info(self, symbol: str) -> Dict:
-        """Возвращает параметры инструмента (шаг цены, мин. объём и т.д.)"""
+    def set_trailing_stop(self, symbol: str, trailing_delta: float) -> bool:
         try:
-            r = self.session.get_instruments_info(category="linear", symbol=symbol)
-            info = r["result"]["list"][0]
-            lot = info["lotSizeFilter"]
-            price = info["priceFilter"]
-            return {
-                "qty_step": float(lot.get("qtyStep", 1)),
-                "min_qty":  float(lot.get("minOrderQty", 1)),
-                "price_tick": float(price.get("tickSize", 0.0001)),
-            }
-        except Exception as e:
-            log.error(f"get_instrument_info error: {e}")
-            return {"qty_step": 1.0, "min_qty": 1.0, "price_tick": 0.0001}
-
-    # ----------------------------------------------------------
-    def create_market_order(
-        self,
-        symbol: str,
-        side: str,          # "long" | "short"
-        qty: float,
-        sl_price: Optional[float] = None,
-        reduce_only: bool = False,
-    ) -> Optional[Dict]:
-        order_side = "Buy" if side == "long" else "Sell"
-        params: Dict = {
-            "category": "linear",
-            "symbol": symbol,
-            "side": order_side,
-            "orderType": "Market",
-            "qty": str(qty),
-            "timeInForce": "GTC",
-            "reduceOnly": reduce_only,
-        }
-        if sl_price and not reduce_only:
-            params["stopLoss"] = str(round(sl_price, 8))
-        try:
-            r = self.session.place_order(**params)
-            result = r["result"]
-            avg = float(result.get("avgPrice", 0) or 0)
-            return {"order_id": result["orderId"], "avg_price": avg}
-        except Exception as e:
-            log.error(f"create_market_order error: {e}")
-            return None
-
-    # ----------------------------------------------------------
-    def set_trailing_stop(self, symbol: str, side: str, trailing_delta: float) -> bool:
-        """Устанавливает трейлинг-стоп через Trading Stop API Bybit."""
-        try:
-            self.session.set_trading_stop(
+            self.s.set_trading_stop(
                 category="linear",
                 symbol=symbol,
                 trailingStop=str(round(trailing_delta, 8)),
@@ -183,410 +164,246 @@ class BybitWrapper:
             )
             return True
         except Exception as e:
-            log.error(f"set_trailing_stop error: {e}")
+            log.warning(f"set_trailing_stop({symbol}): {e}")
             return False
 
-    # ----------------------------------------------------------
-    def close_position(self, symbol: str, side: str) -> bool:
-        close_side = "Sell" if side == "long" else "Buy"
+    def position(self, symbol: str) -> Optional[Dict]:
         try:
-            positions = self.session.get_positions(category="linear", symbol=symbol)
-            for p in positions["result"]["list"]:
-                size = float(p.get("size", 0))
-                pos_side = p.get("side", "")
-                if size > 0 and pos_side == ("Buy" if side == "long" else "Sell"):
-                    self.session.place_order(
-                        category="linear",
-                        symbol=symbol,
-                        side=close_side,
-                        orderType="Market",
-                        qty=str(size),
-                        reduceOnly=True,
-                    )
-                    return True
-        except Exception as e:
-            log.error(f"close_position error: {e}")
-        return False
-
-    # ----------------------------------------------------------
-    def get_position(self, symbol: str) -> Optional[Dict]:
-        try:
-            r = self.session.get_positions(category="linear", symbol=symbol)
+            r = self.s.get_positions(category="linear", symbol=symbol)
             for p in r["result"]["list"]:
-                size = float(p.get("size", 0))
-                if size > 0:
+                sz = float(p.get("size", 0))
+                if sz > 0:
                     return {
-                        "symbol": p["symbol"],
-                        "side": "long" if p["side"] == "Buy" else "short",
-                        "size": size,
-                        "entry_price": float(p.get("avgPrice", 0)),
-                        "pnl": float(p.get("unrealisedPnl", 0)),
+                        "side":  "long" if p["side"] == "Buy" else "short",
+                        "size":  sz,
+                        "entry": float(p.get("avgPrice", 0)),
+                        "pnl":   float(p.get("unrealisedPnl", 0)),
+                        "sl":    float(p.get("stopLoss", 0)),
                     }
         except Exception as e:
-            log.error(f"get_position error: {e}")
+            log.error(f"position({symbol}): {e}")
         return None
 
 
-# ============================================================
-# 📊 ТЕХНИЧЕСКИЕ ИНДИКАТОРЫ
-# ============================================================
-def calc_atr(df: pd.DataFrame, period: int = 14) -> float:
-    if len(df) < period + 1:
-        return 0.0
-    hi, lo, pc = df["h"], df["l"], df["c"].shift(1)
-    tr = pd.concat([hi - lo, (hi - pc).abs(), (lo - pc).abs()], axis=1).max(axis=1)
-    atr = tr.ewm(alpha=1 / period, adjust=False).mean().iloc[-1]
-    return float(atr)
+# ───────────────────────────────────────────────
+# ИНДИКАТОРЫ
+# ───────────────────────────────────────────────
+def ema(series: pd.Series, n: int) -> float:
+    return float(series.ewm(span=n, adjust=False).mean().iloc[-1])
+
+def get_trend(df: pd.DataFrame) -> Optional[str]:
+    """EMA9 vs EMA21 → 'long' | 'short' | None"""
+    if len(df) < 22:
+        return None
+    e9  = ema(df["c"], 9)
+    e21 = ema(df["c"], 21)
+    if e9 > e21 * 1.0005:   # небольшой фильтр шума
+        return "long"
+    if e9 < e21 * 0.9995:
+        return "short"
+    return None
 
 
-def calc_ema(series: pd.Series, span: int) -> float:
-    return float(series.ewm(span=span, adjust=False).mean().iloc[-1])
-
-
-# ============================================================
-# 🎯 ОСНОВНОЙ БОТ
-# ============================================================
-class MemeCoinBot:
+# ───────────────────────────────────────────────
+# БОТ
+# ───────────────────────────────────────────────
+class Bot:
     def __init__(self):
-        self.exchange = BybitWrapper()
-        self.martingale_step = 0
-        self.trade_count = 0
-        self.win_streak = 0
-        self.loss_streak = 0
-        self.total_pnl = 0.0
-        self.last_signal: Optional[str] = None   # последний сигнал (для догона)
+        self.ex           = Bybit()
+        self.mart_step    = 0
+        self.loss_streak  = 0
+        self.last_side: Optional[str] = None
+        self.total_pnl    = 0.0
+        self.trade_n      = 0
 
-        # Кэш параметров инструментов
-        self._instrument_cache: Dict[str, Dict] = {}
+        log.info("=== Bybit Meme Bot v3.0 (Testnet) ===")
+        for sym in SYMBOLS:
+            self.ex.set_leverage(sym, LEVERAGE)
 
-        # Устанавливаем плечо
-        for symbol in SYMBOLS:
-            ok = self.exchange.set_leverage(symbol, LEVERAGE)
-            log.info(f"Плечо {LEVERAGE}x для {symbol}: {'✅' if ok else '⚠️ ошибка'}")
-
-    # ----------------------------------------------------------
-    def _instrument(self, symbol: str) -> Dict:
-        if symbol not in self._instrument_cache:
-            self._instrument_cache[symbol] = self.exchange.get_instrument_info(symbol)
-        return self._instrument_cache[symbol]
-
-    # ----------------------------------------------------------
-    def get_balance(self) -> float:
-        return self.exchange.fetch_balance()
-
-    # ----------------------------------------------------------
-    def calculate_position_size(self, symbol: str) -> float:
-        """Размер позиции с учётом мартингейла и лимита риска 50 % от депозита."""
-        balance = self.get_balance()
-        if balance < MIN_BALANCE_USDT:
+    # ── РАЗМЕР СТАВКИ ──────────────────────────
+    def calc_qty(self, symbol: str, price: float) -> float:
+        bal = self.ex.balance()
+        if bal < MIN_BALANCE:
             return 0.0
 
-        # Масштабируем ставку по шагу мартингейла
-        risk_pct = BASE_RISK_PCT * (PYRAMIDING_MULT ** self.martingale_step)
+        # Базовая ставка → масштабируем на шаг мартингейла
+        risk_usdt = bal * (BASE_RISK_PCT / 100) * (MART_MULT ** self.mart_step) * LEVERAGE
         # Не более 50 % баланса с плечом
-        max_risk_usdt = balance * 0.50
-        bet_usdt = min(balance * risk_pct / 100 * LEVERAGE, max_risk_usdt)
+        risk_usdt = min(risk_usdt, bal * 0.5 * LEVERAGE)
 
-        ticker = self.exchange.fetch_ticker(symbol)
-        price = ticker["last"]
-        if price == 0:
-            return 0.0
+        # Добавляем запас на двойную комиссию (вход + выход)
+        commission = price * (risk_usdt / price) * FEE_RATE * 2
+        # Ставка уже с учётом комиссии — просто информативно
+        log.info(f"  Ставка: {risk_usdt:.2f} USDT | Комиссия ≈ {commission:.4f} USDT")
 
-        info = self._instrument(symbol)
-        qty_step = info["qty_step"]
-        min_qty  = info["min_qty"]
+        min_q, step = self.ex.min_qty(symbol)
+        qty = math.floor((risk_usdt / price) / step) * step
+        return max(min_q, qty)
 
-        qty = math.floor((bet_usdt / price) / qty_step) * qty_step
-        return max(min_qty, qty)
+    # ── SL ─────────────────────────────────────
+    def calc_sl(self, side: str, price: float) -> float:
+        pct = INITIAL_SL_PCT / 100
+        return price * (1 - pct) if side == "long" else price * (1 + pct)
 
-    # ----------------------------------------------------------
-    def get_trend_signal(self, symbol: str) -> Optional[str]:
-        """EMA 9 vs EMA 21 на 3m свечах."""
-        df = self.exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=50)
-        if df.empty or len(df) < 22:
+    # ── СИГНАЛ ─────────────────────────────────
+    def get_signal(self, symbol: str) -> Optional[str]:
+        df = self.ex.klines(symbol)
+        if df.empty:
             return None
-        ema9  = calc_ema(df["c"], 9)
-        ema21 = calc_ema(df["c"], 21)
-        if ema9 > ema21:
-            return "long"
-        if ema9 < ema21:
-            return "short"
-        return None
-
-    # ----------------------------------------------------------
-    def get_entry_signal(self, symbol: str) -> Optional[str]:
-        """
-        Сигнал входа:
-        - При убытке: переворачиваем последний сигнал (стратегия догон).
-        - Иначе: следуем тренду.
-        """
-        trend = self.get_trend_signal(symbol)
+        trend = get_trend(df)
         if trend is None:
             return None
 
-        if self.loss_streak > 0 and self.last_signal:
-            # Разворот против предыдущего направления
-            return "short" if self.last_signal == "long" else "long"
+        # После убытка — разворот (стратегия догон)
+        if self.loss_streak > 0 and self.last_side:
+            flip = "short" if self.last_side == "long" else "long"
+            log.info(f"  🔄 Догон: переворачиваем {self.last_side} → {flip}")
+            return flip
 
         return trend
 
-    # ----------------------------------------------------------
-    def calculate_sl(self, symbol: str, side: str, entry_price: float) -> float:
-        df = self.exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=50)
-        if df.empty or len(df) < 15:
-            pct = INITIAL_SL_PCT / 100
-            return entry_price * (1 - pct) if side == "long" else entry_price * (1 + pct)
-
-        atr = calc_atr(df)
-        atr_pct = (atr / entry_price) * 100
-        sl_pct = max(INITIAL_SL_PCT, atr_pct * TRAILING_ATR_MULT)
-
-        if side == "long":
-            return entry_price * (1 - sl_pct / 100)
-        else:
-            return entry_price * (1 + sl_pct / 100)
-
-    # ----------------------------------------------------------
-    def update_trailing_stop(
-        self, symbol: str, side: str, current_sl: float, current_price: float
-    ) -> float:
-        """Возвращает новый уровень SL (или тот же, если сдвиг не нужен)."""
-        df = self.exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=50)
-        if df.empty or len(df) < 15:
-            return current_sl
-
-        atr = calc_atr(df)
-        atr_pct = (atr / current_price) * 100
-        trailing_pct = max(MIN_TRAILING_PCT, atr_pct * 0.5)
-
-        if side == "long":
-            candidate = current_price * (1 - trailing_pct / 100)
-            if candidate > current_sl:
-                return candidate
-        else:
-            candidate = current_price * (1 + trailing_pct / 100)
-            if candidate < current_sl:
-                return candidate
-
-        return current_sl
-
-    # ----------------------------------------------------------
-    def _commission_usdt(self, qty: float, price: float) -> float:
-        """Суммарная комиссия за открытие + закрытие."""
-        return price * qty * BYBIT_FEE * 2
-
-    # ----------------------------------------------------------
+    # ── ОТКРЫТИЕ СДЕЛКИ ────────────────────────
     def open_trade(self, symbol: str, side: str) -> Optional[Dict]:
-        balance = self.get_balance()
-        if balance < MIN_BALANCE_USDT:
-            log.warning(f"❌ Недостаточно средств: {balance:.2f} USDT")
+        price = self.ex.price(symbol)
+        if not price:
             return None
 
-        qty = self.calculate_position_size(symbol)
+        qty = self.calc_qty(symbol, price)
         if qty <= 0:
-            log.warning(f"❌ Нулевой объём позиции для {symbol}")
+            log.warning("  Объём = 0, пропуск")
             return None
 
-        ticker = self.exchange.fetch_ticker(symbol)
-        current_price = ticker["last"]
-        if current_price == 0:
+        sl = self.calc_sl(side, price)
+        oid = self.ex.open_order(symbol, side, qty, sl)
+        if not oid:
             return None
 
-        # Проверяем, что минимальная прибыль перекрывает комиссию
-        commission = self._commission_usdt(qty, current_price)
-        min_profit_move_pct = (commission / (qty * current_price)) * 100 * 1.5  # буфер 1.5x
+        # Даём бирже 1 сек оформить позицию
+        time.sleep(1)
+
+        # Устанавливаем трейлинг-стоп
+        trailing_delta = price * TRAILING_PCT / 100
+        self.ex.set_trailing_stop(symbol, trailing_delta)
+
+        self.last_side = side
         log.info(
-            f"💸 Комиссия: {commission:.4f} USDT | "
-            f"Минимальный ход для покрытия: {min_profit_move_pct:.3f}%"
+            f"🟢 ОТКРЫТО: {side.upper()} {symbol} | "
+            f"qty={qty} | price={price:.8f} | SL={sl:.8f} | "
+            f"mart={self.mart_step}"
         )
+        return {"symbol": symbol, "side": side, "entry": price,
+                "qty": qty, "sl": sl, "t0": time.time()}
 
-        sl_price = self.calculate_sl(symbol, side, current_price)
-        order = self.exchange.create_market_order(symbol, side, qty, sl_price=sl_price)
-        if not order:
-            return None
+    # ── МОНИТОРИНГ ─────────────────────────────
+    def monitor(self, trade: Dict) -> Tuple[float, str]:
+        symbol = trade["symbol"]
+        side   = trade["side"]
+        entry  = trade["entry"]
+        qty    = trade["qty"]
+        t0     = trade["t0"]
 
-        entry_price = order["avg_price"] or current_price
-        log.info(
-            f"🔹 Открыта позиция: {side.upper()} {symbol} | "
-            f"Qty={qty} | Entry={entry_price:.8f} | SL={sl_price:.8f} | "
-            f"Мартингейл шаг={self.martingale_step}"
-        )
-        self.last_signal = side
-        return {
-            "symbol": symbol,
-            "side": side,
-            "entry_price": entry_price,
-            "sl_price": sl_price,
-            "qty": qty,
-            "open_time": time.time(),
-            "order_id": order["order_id"],
-        }
-
-    # ----------------------------------------------------------
-    def close_trade(
-        self, symbol: str, side: str, entry_price: float, qty: float
-    ) -> Tuple[float, str]:
-        ticker = self.exchange.fetch_ticker(symbol)
-        current_price = ticker["last"]
-
-        success = self.exchange.close_position(symbol, side)
-        if not success:
-            return 0.0, "error"
-
-        if side == "long":
-            gross_pnl = (current_price - entry_price) * qty * LEVERAGE
-        else:
-            gross_pnl = (entry_price - current_price) * qty * LEVERAGE
-
-        commission = self._commission_usdt(qty, entry_price)
-        net_pnl = gross_pnl - commission
-
-        result = "tp" if net_pnl >= 0 else "sl"
-        return net_pnl, result
-
-    # ----------------------------------------------------------
-    def monitor_trade(self, trade: Dict) -> Tuple[float, str]:
-        symbol     = trade["symbol"]
-        side       = trade["side"]
-        entry_price = trade["entry_price"]
-        qty        = trade["qty"]
-        start_time = trade["open_time"]
-        current_sl = trade["sl_price"]
-
-        # Устанавливаем трейлинг-стоп на бирже через Bybit API
-        df = self.exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=50)
-        if not df.empty and len(df) >= 15:
-            atr = calc_atr(df)
-            trailing_delta = max(entry_price * MIN_TRAILING_PCT / 100, atr * 0.5)
-            self.exchange.set_trailing_stop(symbol, side, trailing_delta)
-
-        while time.time() - start_time < TRADE_DURATION:
+        while time.time() - t0 < TRADE_DURATION:
             try:
-                ticker = self.exchange.fetch_ticker(symbol)
-                current_price = ticker["last"]
-                position = self.exchange.get_position(symbol)
+                pos = self.ex.position(symbol)
 
-                # Позиция уже закрыта биржей (по SL)
-                if not position or position["side"] != side:
-                    # Пытаемся узнать реальный PnL
-                    pnl_est = position["pnl"] if position else 0.0
-                    return pnl_est, "sl" if pnl_est < 0 else "tp"
+                # Позиция закрылась сама (по SL или другой причине)
+                if pos is None or pos["side"] != side:
+                    pnl = pos["pnl"] if pos else 0.0
+                    log.info(f"  Позиция закрыта биржей | PnL≈{pnl:.4f}")
+                    return pnl, "sl" if pnl <= 0 else "tp"
 
-                # Обновляем программный трейлинг-стоп
-                new_sl = self.update_trailing_stop(symbol, side, current_sl, current_price)
-                if new_sl != current_sl:
-                    current_sl = new_sl
-                    log.info(f"🔄 Трейлинг-стоп обновлён: {current_sl:.8f}")
-
-                # Программная проверка SL (на случай проскальзывания)
-                if side == "long" and current_price <= current_sl:
-                    pnl, result = self.close_trade(symbol, side, entry_price, qty)
-                    return pnl, result
-                if side == "short" and current_price >= current_sl:
-                    pnl, result = self.close_trade(symbol, side, entry_price, qty)
-                    return pnl, result
-
+                elapsed = int(time.time() - t0)
+                log.info(
+                    f"  [{elapsed}s] {side.upper()} {symbol} | "
+                    f"PnL={pos['pnl']:.4f} USDT | SL={pos['sl']:.8f}"
+                )
                 time.sleep(5)
 
             except Exception as e:
-                log.error(f"Ошибка мониторинга: {e}")
+                log.error(f"monitor: {e}")
                 time.sleep(5)
 
-        # Время вышло — принудительно закрываем
-        log.info(f"⏰ Время сделки истекло ({TRADE_DURATION}с) — закрываем позицию")
-        pnl, result = self.close_trade(symbol, side, entry_price, qty)
-        return pnl, result
+        # Время вышло — закрываем
+        log.info("  ⏰ Время вышло — закрываем")
+        cur = self.ex.price(symbol)
+        self.ex.close_order(symbol, side, qty)
 
-    # ----------------------------------------------------------
+        if side == "long":
+            pnl = (cur - entry) * qty * LEVERAGE
+        else:
+            pnl = (entry - cur) * qty * LEVERAGE
+        pnl -= entry * qty * FEE_RATE * 2  # вычитаем комиссии
+
+        return pnl, "timeout"
+
+    # ── ГЛАВНЫЙ ЦИКЛ ───────────────────────────
     def run(self):
-        log.info("🚀 Запуск MemeCoin Bot (Testnet)")
-        log.info(f"📌 Символы: {SYMBOLS}")
-        log.info(f"💰 Плечо: {LEVERAGE}x | Риск: до 50% от депозита")
-        log.info(f"⏱️  Время сделки: {TRADE_DURATION // 60} мин")
-        log.info(f"🔄 Мартингейл: до {MAX_MARTINGALE_STEPS} шагов")
+        log.info(f"Символы: {SYMBOLS}")
+        log.info(f"Плечо: {LEVERAGE}x | Длительность: {TRADE_DURATION}s | Мартингейл: до {MAX_MART_STEPS} шагов")
 
         while True:
             try:
-                balance = self.get_balance()
-                if balance < MIN_BALANCE_USDT:
-                    log.warning(
-                        f"❌ Баланс {balance:.2f} USDT < {MIN_BALANCE_USDT} USDT — ожидание"
-                    )
+                bal = self.ex.balance()
+                if bal < MIN_BALANCE:
+                    log.warning(f"Баланс {bal:.2f} < {MIN_BALANCE} USDT — ожидание")
                     time.sleep(60)
                     continue
 
                 # Проверяем открытые позиции
-                has_position = False
+                busy = False
                 for sym in SYMBOLS:
-                    pos = self.exchange.get_position(sym)
-                    if pos:
-                        has_position = True
-                        log.info(
-                            f"⏳ Открыта позиция: {pos['side'].upper()} {sym} | "
-                            f"PnL={pos['pnl']:.4f} USDT"
-                        )
+                    p = self.ex.position(sym)
+                    if p:
+                        log.info(f"⏳ Уже открыта: {p['side'].upper()} {sym} | PnL={p['pnl']:.4f}")
+                        busy = True
                         break
-
-                if has_position:
+                if busy:
                     time.sleep(10)
                     continue
 
-                # Выбираем символ по очереди
-                symbol = SYMBOLS[self.trade_count % len(SYMBOLS)]
-                self.trade_count += 1
+                # Выбираем символ
+                symbol = SYMBOLS[self.trade_n % len(SYMBOLS)]
+                self.trade_n += 1
 
-                signal = self.get_entry_signal(symbol)
+                log.info(f"\n─── Сделка #{self.trade_n} | {symbol} | mart={self.mart_step} ───")
+
+                signal = self.get_signal(symbol)
                 if not signal:
-                    log.info(f"⏭️  Нет сигнала для {symbol} — пропуск")
+                    log.info("Нет чёткого тренда — пропуск")
                     time.sleep(30)
                     continue
 
+                log.info(f"  Сигнал: {signal.upper()}")
                 trade = self.open_trade(symbol, signal)
                 if not trade:
                     time.sleep(30)
                     continue
 
-                pnl, result = self.monitor_trade(trade)
+                pnl, result = self.monitor(trade)
+                self.total_pnl += pnl
 
-                # Обрабатываем результат
-                if result in ("sl", "commission"):
+                if result in ("sl", "timeout") and pnl < 0:
                     self.loss_streak += 1
-                    self.win_streak = 0
-                    self.martingale_step = min(
-                        self.martingale_step + 1, MAX_MARTINGALE_STEPS
-                    )
+                    self.mart_step = min(self.mart_step + 1, MAX_MART_STEPS)
                     log.warning(
-                        f"❌ {result.upper()}: {symbol} | {signal.upper()} | "
-                        f"PnL={pnl:.4f} USDT | Убытков подряд: {self.loss_streak} | "
-                        f"Мартингейл шаг: {self.martingale_step}"
-                    )
-                elif result in ("tp", "closed"):
-                    self.win_streak += 1
-                    self.loss_streak = 0
-                    self.martingale_step = max(0, self.martingale_step - 1)
-                    log.info(
-                        f"✅ {result.upper()}: {symbol} | {signal.upper()} | "
-                        f"PnL={pnl:.4f} USDT | Выигрышей подряд: {self.win_streak}"
+                        f"❌ Убыток | PnL={pnl:.4f} USDT | "
+                        f"Loss streak={self.loss_streak} | Mart step={self.mart_step}"
                     )
                 else:
-                    log.info(f"⚠️  {result}: {symbol} | PnL={pnl:.4f} USDT")
+                    self.loss_streak = 0
+                    self.mart_step = max(0, self.mart_step - 1)
+                    log.info(f"✅ Прибыль | PnL={pnl:.4f} USDT")
 
-                self.total_pnl += pnl
-                log.info(f"📊 Общий PnL: {self.total_pnl:.4f} USDT | Баланс: {self.get_balance():.2f} USDT")
-
-                time.sleep(15)
+                log.info(f"📊 Итого PnL: {self.total_pnl:.4f} USDT | Баланс: {self.ex.balance():.2f} USDT")
+                time.sleep(10)
 
             except KeyboardInterrupt:
-                log.info("🛑 Бот остановлен пользователем")
+                log.info("🛑 Остановлен")
                 break
             except Exception as e:
-                log.error(f"💥 Ошибка в главном цикле: {e}")
+                log.error(f"Главный цикл: {e}")
                 time.sleep(30)
 
 
-# ============================================================
-# 🏁 ЗАПУСК
-# ============================================================
 if __name__ == "__main__":
-    bot = MemeCoinBot()
-    bot.run()
+    Bot().run()
