@@ -82,8 +82,8 @@ TIMEFRAME_4H = "4h"
 SCAN_INTERVAL = 300
 
 # --- ПОРОГИ СКОРА ---
-MIN_SCORE = 75  # Повышен с 65
-ENTRY_CONFIRM_MIN_SCORE = 70  # Повышен с 60/65
+MIN_SCORE = 70  # Повышен с 65
+ENTRY_CONFIRM_MIN_SCORE = 65  # Повышен с 60/65
 
 # --- TP / SL ---
 TP_PERCENT = 2.0  # Уменьшен с 3.0
