@@ -3,27 +3,19 @@
 
 """
 ================================================================================
-Bybit ГИБРИДНЫЙ ПРОФЕССИОНАЛЬНЫЙ БОТ — v10.2
+Bybit ГИБРИДНЫЙ ПРОФЕССИОНАЛЬНЫЙ БОТ — v10.3
 ================================================================================
-ИСПРАВЛЕНИЯ v10.2 (поверх v10.1):
-1. FIX: Счётчик попыток на монету — после N неудачных отменённых входов
-        символ блокируется на SYMBOL_BLOCK_AFTER_FAIL секунд.
-2. FIX: ENTRY_CONFIRM_MIN_SCORE теперь не может быть ниже MIN_SCORE.
-        Гарантия логической последовательности порогов.
-3. FIX: мониторить_позицию — все exchange.fetch_positions заменены на
-        safe_api_call(...) для защиты от rate limit в цикле мониторинга.
-4. FIX: calculate_cointegration — hedge_ratio теперь берётся через OLS
-        регрессию (np.polyfit), а не из coint_result[0][1] который является
-        скалярной t-статистикой и не является массивом.
-================================================================================
-ИСПРАВЛЕНИЯ v10.1 (базовые):
-1. КРИТИЧНО: float(NoneType) — безопасная обработка order.get("average")
-2. КРИТИЧНО: "leverage not modified" больше не блокирует сделку
-3. КРИТИЧНО: Баланс свободный vs total — правильное определение margin balance
-4. Детальный отчёт по каждой сделке в лог + файл
-5. Двухфакторная система обхода ошибок биржи
-6. Rate limit — очередь запросов с задержками
-7. Незакрытые позиции при старте — бот их подхватывает
+ИСПРАВЛЕНИЯ v10.3:
+1. NEW: Независимый расчёт шорт-скора (не инверсия лонг-скора).
+2. NEW: Блокировка шортов при Bybit ratio long > 62%.
+3. NEW: Штраф за Bybit ratio для шортов (long_ratio > 70% → -20, 65% → -10).
+4. FIX: MIN_SCORE = 75, ENTRY_CONFIRM_MIN_SCORE = 70.
+5. FIX: TP_PERCENT = 2.0, SL_PERCENT = 0.8 (RR = 2.5:1).
+6. FIX: TRADE_MAX_LIFETIME = 3600 (1 час).
+7. FIX: PARTIAL_BE_PROFIT = 0.15.
+8. FIX: Блокировка ATOM/USDT на 24 часа.
+9. FIX: SL_STREAK_PAUSE = 5400 (1.5 часа).
+10. FIX: Счётчик проваленных входов (SYMBOL_MAX_FAIL_ATTEMPTS = 3).
 ================================================================================
 """
 
@@ -55,7 +47,7 @@ SYMBOLS = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "BNB/USDT:USDT", "XRP/USDT:USDT",
     "SOL/USDT:USDT", "ADA/USDT:USDT", "TRX/USDT:USDT", "TON/USDT:USDT",
     "AVAX/USDT:USDT", "DOT/USDT:USDT", "LTC/USDT:USDT", "BCH/USDT:USDT",
-    "ATOM/USDT:USDT", "XLM/USDT:USDT", "NEAR/USDT:USDT", "DOGE/USDT:USDT",
+    "XLM/USDT:USDT", "NEAR/USDT:USDT", "DOGE/USDT:USDT",
     "1000PEPE/USDT:USDT", "WIF/USDT:USDT", "BOME/USDT:USDT",
     "RENDER/USDT:USDT", "TAO/USDT:USDT", "WLD/USDT:USDT", "ARKM/USDT:USDT",
     "IO/USDT:USDT", "ONDO/USDT:USDT", "VIRTUAL/USDT:USDT", "UNI/USDT:USDT",
@@ -89,11 +81,13 @@ TIMEFRAME_TREND = "1h"
 TIMEFRAME_4H = "4h"
 SCAN_INTERVAL = 300
 
-MIN_SCORE = 65
+# --- ПОРОГИ СКОРА ---
+MIN_SCORE = 75  # Повышен с 65
+ENTRY_CONFIRM_MIN_SCORE = 70  # Повышен с 60/65
 
 # --- TP / SL ---
-TP_PERCENT = 3.0
-SL_PERCENT = 1.0
+TP_PERCENT = 2.0  # Уменьшен с 3.0
+SL_PERCENT = 0.8
 MIN_SL_PERCENT = 0.8
 MAX_SL_PERCENT = 2.0
 ATR_SL_MULT = 1.5
@@ -102,7 +96,7 @@ ATR_TP_MULT = 3.0
 # --- ЧАСТИЧНЫЙ БЕЗУБЫТОК ---
 PARTIAL_BE_ENABLED = True
 PARTIAL_BE_CLOSE_PCT = 50.0
-PARTIAL_BE_PROFIT = 0.2
+PARTIAL_BE_PROFIT = 0.15  # Уменьшен с 0.2
 
 # --- РИСК ---
 BASE_RISK_PCT = 0.8
@@ -137,33 +131,28 @@ VOLUME_AVG_PERIOD = 20
 
 SIGNAL_EXIT_ENABLED = True
 ENTRY_CONFIRM_BARS = 1
-# FIX #2: ENTRY_CONFIRM_MIN_SCORE не может быть ниже MIN_SCORE.
-# Если задать вручную ниже MIN_SCORE — будет автоматически поднято до MIN_SCORE.
-_ENTRY_CONFIRM_MIN_SCORE_RAW = 60
-ENTRY_CONFIRM_MIN_SCORE = max(_ENTRY_CONFIRM_MIN_SCORE_RAW, MIN_SCORE)
 
-SYMBOL_BLOCK_AFTER_TP = 90      # минут
-SYMBOL_BLOCK_AFTER_SL = 180     # минут
-
-# FIX #1: новые параметры счётчика попыток на монету
-SYMBOL_MAX_FAIL_ATTEMPTS = 3    # максимум отменённых входов подряд
-SYMBOL_BLOCK_AFTER_FAIL = 120   # минут блокировки после SYMBOL_MAX_FAIL_ATTEMPTS провалов
+# --- БЛОКИРОВКИ ---
+SYMBOL_BLOCK_AFTER_TP = 90  # минут
+SYMBOL_BLOCK_AFTER_SL = 180  # минут
+SYMBOL_MAX_FAIL_ATTEMPTS = 3  # Максимум отменённых входов подряд
+SYMBOL_BLOCK_AFTER_FAIL = 120  # Минут блокировки после SYMBOL_MAX_FAIL_ATTEMPTS провалов
 
 SL_STREAK_LIMIT = 2
-SL_STREAK_PAUSE = 3600
+SL_STREAK_PAUSE = 5400  # Увеличен с 3600 (1.5 часа)
 SL_STREAK_EXTRA_PAUSE = 300
 
 MIN_BALANCE = 5.0
 MAX_DRAWDOWN_PCT = 15.0
 
-TRADE_MAX_LIFETIME = 7200
+TRADE_MAX_LIFETIME = 3600  # Уменьшен с 7200 (1 час)
 REPORT_INTERVAL = 1800
 
 # --- ФАЙЛЫ ---
-STATE_FILE = "state_bot_v10.json"
-TRADES_FILE = "trades_bot_v10.json"
-INDICATOR_STATS_FILE = "indicator_stats_v10.json"
-METRICS_FILE = "strategy_metrics_v10.json"
+STATE_FILE = "state_bot_v10_3.json"
+TRADES_FILE = "trades_bot_v10_3.json"
+INDICATOR_STATS_FILE = "indicator_stats_v10_3.json"
+METRICS_FILE = "strategy_metrics_v10_3.json"
 
 BYBIT_FEE = 0.00055
 
@@ -175,7 +164,7 @@ SR_CLUSTER_TOL = 0.005
 SR_BLOCK_DIST_PCT = 0.3
 
 # --- RATE LIMIT ЗАЩИТА ---
-API_CALL_DELAY = 0.3    # секунды между запросами к одному символу
+API_CALL_DELAY = 0.3  # секунды между запросами к одному символу
 API_RATE_LIMIT_PAUSE = 5  # пауза при rate limit
 
 # ============================================================
@@ -188,17 +177,10 @@ logging.basicConfig(
     datefmt="%d.%m.%Y %H:%M:%S",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("bot_v10_ultimate.log", encoding="utf-8"),
+        logging.FileHandler("bot_v10_3.log", encoding="utf-8"),
     ],
 )
 log = logging.getLogger(__name__)
-
-# Логируем итоговое значение порога подтверждения после проверки
-if ENTRY_CONFIRM_MIN_SCORE != _ENTRY_CONFIRM_MIN_SCORE_RAW:
-    log.warning(
-        f"ENTRY_CONFIRM_MIN_SCORE поднят с {_ENTRY_CONFIRM_MIN_SCORE_RAW} "
-        f"до {ENTRY_CONFIRM_MIN_SCORE} (= MIN_SCORE={MIN_SCORE})"
-    )
 
 # ============================================================
 #                         БИРЖА
@@ -236,11 +218,6 @@ stats = {
 # ============================================================
 
 def safe_api_call(func, *args, retries=3, delay=1.0, ignore_errors=None, **kwargs):
-    """
-    Универсальная обёртка для вызовов API биржи.
-    Автоматически повторяет при rate limit, сетевых ошибках.
-    ignore_errors — список строк, которые не считаются ошибкой.
-    """
     ignore_errors = ignore_errors or []
     for attempt in range(retries):
         try:
@@ -266,9 +243,7 @@ def safe_api_call(func, *args, retries=3, delay=1.0, ignore_errors=None, **kwarg
                 raise
     return None
 
-
 def safe_fetch_ohlcv(symbol: str, timeframe: str, limit: int = 300) -> List:
-    """Безопасное получение OHLCV с обработкой rate limit."""
     try:
         result = safe_api_call(exchange.fetch_ohlcv, symbol, timeframe, limit=limit, retries=3)
         return result if result is not None else []
@@ -276,21 +251,14 @@ def safe_fetch_ohlcv(symbol: str, timeframe: str, limit: int = 300) -> List:
         log.debug(f"fetch_ohlcv {symbol} {timeframe}: {e}")
         return []
 
-
 def safe_fetch_ticker(symbol: str) -> Optional[dict]:
-    """Безопасное получение тикера."""
     try:
         return safe_api_call(exchange.fetch_ticker, symbol, retries=3)
     except Exception as e:
         log.debug(f"fetch_ticker {symbol}: {e}")
         return None
 
-
 def safe_fetch_positions(symbols: Optional[List[str]] = None) -> List[dict]:
-    """
-    FIX #3: Централизованная безопасная функция получения позиций.
-    Используется везде вместо прямого exchange.fetch_positions.
-    """
     try:
         if symbols:
             result = safe_api_call(exchange.fetch_positions, symbols, retries=3)
@@ -300,7 +268,6 @@ def safe_fetch_positions(symbols: Optional[List[str]] = None) -> List[dict]:
     except Exception as e:
         log.warning(f"safe_fetch_positions ошибка: {e}")
         return []
-
 
 # ============================================================
 #              БАЗОВЫЕ ФУНКЦИИ ИНДИКАТОРОВ
@@ -540,16 +507,10 @@ def bayes_trend_probability(df: pd.DataFrame) -> float:
     except Exception: return 0.5
 
 # ============================================================
-#       КВАНТОВЫЙ МОДУЛЬ (Ernest Chan) — FIX #4
+#       КВАНТОВЫЙ МОДУЛЬ (Ernest Chan)
 # ============================================================
 
 def calculate_cointegration(pair: Tuple[str, str], window: int = COINTEGRATION_WINDOW) -> Dict[str, Any]:
-    """
-    FIX #4: hedge_ratio теперь вычисляется через OLS (np.polyfit),
-    а не через coint_result[0][1].
-    coint() возвращает (t_statistic: float, pvalue: float, crit_values: array).
-    t_statistic — скаляр, не массив, поэтому [0][1] вызывало IndexError/TypeError.
-    """
     try:
         symbol1, symbol2 = pair
         ohlcv1 = safe_fetch_ohlcv(symbol1, TIMEFRAME_TA, limit=window)
@@ -560,27 +521,20 @@ def calculate_cointegration(pair: Tuple[str, str], window: int = COINTEGRATION_W
         df1 = pd.DataFrame(ohlcv1, columns=["ts", "o", "h", "l", "c", "v"])["c"]
         df2 = pd.DataFrame(ohlcv2, columns=["ts", "o", "h", "l", "c", "v"])["c"]
 
-        # Убеждаемся в одинаковой длине
         min_len = min(len(df1), len(df2))
         df1 = df1.iloc[-min_len:].reset_index(drop=True)
         df2 = df2.iloc[-min_len:].reset_index(drop=True)
 
-        # Стационарность — если нет, берём diff
         adf1 = adfuller(df1)
         adf2 = adfuller(df2)
         if adf1[1] > 0.05 or adf2[1] > 0.05:
             df1 = df1.diff().dropna()
             df2 = df2.diff().dropna()
-            # Выравниваем длину после diff
             min_len = min(len(df1), len(df2))
             df1 = df1.iloc[-min_len:].reset_index(drop=True)
             df2 = df2.iloc[-min_len:].reset_index(drop=True)
 
-        # Тест коинтеграции: возвращает (t_stat, pvalue, crit_values)
         coint_t, pvalue, crit_vals = coint(df1, df2)
-
-        # FIX: hedge_ratio через OLS регрессию (np.polyfit — slope, intercept)
-        # y = hedge_ratio * x + intercept → spread = df1 - hedge_ratio * df2
         hedge_ratio, _ = np.polyfit(df2.values, df1.values, 1)
 
         spread = df1 - hedge_ratio * df2
@@ -603,13 +557,11 @@ def calculate_cointegration(pair: Tuple[str, str], window: int = COINTEGRATION_W
         log.debug(f"Ошибка коинтеграции для {pair}: {e}")
         return {"coint": 0, "pvalue": 1, "spread": 0, "zscore": 0, "valid": False}
 
-
 def check_mean_reversion_opportunity(symbol: str) -> Dict[str, Any]:
     try:
         window = int(MEAN_REVERSION_THRESHOLD * 2) * 10
         ohlcv = safe_fetch_ohlcv(symbol, TIMEFRAME_TA, limit=window)
-        if len(ohlcv) < window:
-            return {"signal": "neutral", "zscore": 0, "valid": False}
+        if len(ohlcv) < window: return {"signal": "neutral", "zscore": 0, "valid": False}
         df = pd.DataFrame(ohlcv, columns=["ts", "o", "h", "l", "c", "v"])
         close = df["c"]
         sma = close.rolling(window).mean()
@@ -632,12 +584,10 @@ def check_mean_reversion_opportunity(symbol: str) -> Dict[str, Any]:
         log.debug(f"Ошибка Mean Reversion для {symbol}: {e}")
         return {"signal": "neutral", "zscore": 0, "valid": False}
 
-
 def calculate_momentum(symbol: str, window: int = MOMENTUM_WINDOW) -> Dict[str, Any]:
     try:
         ohlcv = safe_fetch_ohlcv(symbol, TIMEFRAME_TA, limit=window + 10)
-        if len(ohlcv) < window:
-            return {"momentum": 0, "signal": "neutral", "valid": False}
+        if len(ohlcv) < window: return {"momentum": 0, "signal": "neutral", "valid": False}
         df = pd.DataFrame(ohlcv, columns=["ts", "o", "h", "l", "c", "v"])
         close = df["c"]
         momentum = (close.iloc[-1] - close.iloc[-window]) / close.iloc[-window] * 100
@@ -651,7 +601,6 @@ def calculate_momentum(symbol: str, window: int = MOMENTUM_WINDOW) -> Dict[str, 
     except Exception as e:
         log.debug(f"Ошибка Momentum для {symbol}: {e}")
         return {"momentum": 0, "signal": "neutral", "valid": False}
-
 
 def get_quant_signals(symbol: str) -> Dict[str, Any]:
     if not QUANT_ENABLED:
@@ -684,7 +633,7 @@ def get_quant_signals(symbol: str) -> Dict[str, Any]:
     return {"quant_score": min(100, quant_score), "details": signals}
 
 # ============================================================
-#        ORDER FLOW МОДУЛЬ (Ed Ponsi) — НЕ ТРОГАТЬ
+#        ORDER FLOW МОДУЛЬ (Ed Ponsi)
 # ============================================================
 
 def get_order_book(symbol: str, depth: int = ORDER_BOOK_DEPTH) -> Dict[str, Any]:
@@ -713,7 +662,6 @@ def get_order_book(symbol: str, depth: int = ORDER_BOOK_DEPTH) -> Dict[str, Any]
     except Exception as e:
         log.debug(f"Ошибка Order Book для {symbol}: {e}")
         return {"valid": False}
-
 
 def analyze_volume_profile(symbol: str, bars: int = VOLUME_PROFILE_BARS) -> Dict[str, Any]:
     try:
@@ -747,7 +695,6 @@ def analyze_volume_profile(symbol: str, bars: int = VOLUME_PROFILE_BARS) -> Dict
     except Exception as e:
         log.debug(f"Ошибка Volume Profile для {symbol}: {e}")
         return {"valid": False}
-
 
 def get_order_flow_signals(symbol: str) -> Dict[str, Any]:
     if not ORDER_FLOW_ENABLED:
@@ -921,16 +868,179 @@ def получить_скор(symbol: str) -> dict:
 
 
 def получить_скор_шорта(symbol: str) -> dict:
-    res = получить_скор(symbol)
-    if res["score"] == 0: return res
-    res["score"] = max(0, 100 - res["score"] - 10)
+    """
+    НОВАЯ ЛОГИКА: Независимый расчёт медвежьего скора.
+    """
+    details = {}
+    score = 0
+    price = 0.0
+    sr = {}
+
     try:
-        raw = safe_fetch_ohlcv(symbol, TIMEFRAME_TA, limit=300)
-        if len(raw) >= 50:
-            df = pd.DataFrame(raw, columns=["ts","o","h","l","c","v"])
-            res["details"]["ma_cross"] = проверить_ma_кроссовер(df, side="short")
-    except: pass
-    return res
+        raw_ta = safe_fetch_ohlcv(symbol, TIMEFRAME_TA, limit=300)
+        raw_1h = safe_fetch_ohlcv(symbol, TIMEFRAME_TREND, limit=300)
+        if len(raw_ta) < 100 or len(raw_1h) < 100:
+            return {"score": 0, "details": {}, "price": 0, "sr": {}}
+
+        cols = ["ts","o","h","l","c","v"]
+        df_ta = pd.DataFrame(raw_ta, columns=cols).reset_index(drop=True)
+        df_1h = pd.DataFrame(raw_1h, columns=cols).reset_index(drop=True)
+        c_ta = df_ta["c"]
+        c_1h = df_1h["c"]
+        price = float(c_ta.iloc[-1])
+
+        # RSI — перекуплен = шорт-сигнал
+        rsi_val = calc_rsi(c_ta).iloc[-1]
+        details["rsi"] = round(rsi_val, 1)
+        if rsi_val >= 70: score += 25
+        elif rsi_val >= 60: score += 15
+        elif rsi_val >= 55: score += 8
+        elif rsi_val <= 40: score -= 15
+
+        # RSI 1h
+        rsi_1h = calc_rsi(c_1h).iloc[-1]
+        details["rsi_1h"] = round(rsi_1h, 1)
+        if rsi_1h >= 60: score += 12
+        elif rsi_1h >= 55: score += 6
+        elif rsi_1h <= 45: score -= 10
+
+        # MACD — медвежий = шорт-сигнал
+        ml, sl_macd, _ = calc_macd(c_ta)
+        macd_bear = ml.iloc[-1] < sl_macd.iloc[-1]
+        macd_death_cross = macd_bear and ml.iloc[-2] >= sl_macd.iloc[-2]
+        details["macd"] = "медвежий" if macd_bear else "бычий"
+        if macd_death_cross: score += 20
+        elif macd_bear: score += 10
+        else: score -= 5
+
+        # Supertrend вниз
+        st_up, st_down = calc_supertrend(df_ta)
+        details["supertrend"] = "вниз" if st_down.iloc[-1] else "вверх"
+        if st_down.iloc[-1]: score += 15
+        else: score -= 10
+
+        # Range Filter вниз
+        _, _, _, rf_up, rf_down = calc_range_filter(df_ta)
+        details["range_filter"] = "вниз" if rf_down.iloc[-1] else ("вверх" if rf_up.iloc[-1] else "бок")
+        if rf_down.iloc[-1]: score += 12
+        elif rf_up.iloc[-1]: score -= 8
+
+        # Hull вниз
+        hu_up, hu_down = calc_hull(c_ta)
+        details["hull"] = "вниз" if hu_down.iloc[-1] else "вверх"
+        if hu_down.iloc[-1]: score += 10
+        else: score -= 5
+
+        # Тренд 1h — медвежий
+        ema50_1h = _ema(c_1h, 50).iloc[-1]
+        ema200_1h = _ema(c_1h, 200).iloc[-1]
+        details["тренд_1h"] = "медвежий" if ema50_1h < ema200_1h else "бычий"
+        if ema50_1h < ema200_1h: score += 12
+        else: score -= 8
+
+        # ADX — сила медвежьего тренда
+        adx, pdi, mdi = calc_adx(df_ta)
+        adx_val = adx.iloc[-1]
+        details["adx"] = round(adx_val, 1)
+        if adx_val > 25 and mdi.iloc[-1] > pdi.iloc[-1]: score += 12
+        elif adx_val > 20 and mdi.iloc[-1] > pdi.iloc[-1]: score += 6
+        elif adx_val > 25 and pdi.iloc[-1] > mdi.iloc[-1]: score -= 8
+
+        # Stochastic — перекуплен
+        k_ser, _ = calc_stochastic(df_ta)
+        k_val = k_ser.iloc[-1]
+        details["stoch_k"] = round(k_val, 1)
+        if k_val >= 80: score += 12
+        elif k_val >= 65: score += 6
+        elif k_val <= 20: score -= 10
+
+        # Объём
+        vol_avg = df_ta["v"].rolling(VOLUME_AVG_PERIOD).mean().iloc[-1]
+        vol_ratio = df_ta["v"].iloc[-1] / (vol_avg + 1e-10)
+        details["объём_ratio"] = round(vol_ratio, 2)
+        if vol_ratio > 1.5: score += 8
+        elif vol_ratio > 1.2: score += 4
+
+        # S/R — у сопротивления = шорт-сигнал, у поддержки = штраф
+        sr = calc_support_resistance(df_ta)
+        details.update({
+            "support": sr["support"], "resistance": sr["resistance"],
+            "dist_sup": sr["dist_to_sup_pct"], "dist_res": sr["dist_to_res_pct"]
+        })
+        if sr["near_resistance"]:
+            score += 20
+            details["sr_signal"] = f"у сопротивления ✅ ({sr['res_cluster']} касаний)"
+        elif sr["near_support"]:
+            score -= 20
+            details["sr_signal"] = f"у поддержки ❌ ({sr['sup_cluster']} касаний)"
+        else:
+            details["sr_signal"] = f"нейтр (sup={sr['dist_to_sup_pct']:.2f}% res={sr['dist_to_res_pct']:.2f}%)"
+
+        # 3 красные свечи подряд — подтверждение давления
+        last3_bearish = all(
+            df_ta["c"].iloc[-i] < df_ta["o"].iloc[-i] for i in range(1, 4)
+        )
+        if last3_bearish:
+            score += 15
+            details["свечи_3red"] = True
+
+        # Байес
+        bayes_prob = bayes_trend_probability(df_ta)
+        details["bayes_prob"] = round(bayes_prob, 2)
+        if bayes_prob < 0.4: score += 10
+        elif bayes_prob > 0.6: score -= 10
+
+        # MA кроссовер для шорта
+        details["ma_cross"] = проверить_ma_кроссовер(df_ta, side="short")
+        details["vol_spike_ok"] = volume_spike_guard(df_ta)
+
+        # Quant и OrderFlow
+        if QUANT_ENABLED:
+            quant_data = get_quant_signals(symbol)
+            quant_score = quant_data["quant_score"]
+            details["quant_score"] = quant_score
+            mr = quant_data["details"].get("mean_reversion", {})
+            if mr.get("valid") and mr.get("zscore", 0) > MEAN_REVERSION_THRESHOLD:
+                score += 15
+
+        if ORDER_FLOW_ENABLED:
+            order_flow_data = get_order_flow_signals(symbol)
+            of_score = order_flow_data["order_flow_score"]
+            details["order_flow_score"] = of_score
+            if of_score < 40: score += 10
+
+        final_score = max(0, min(100, score))
+        return {
+            "score": final_score,
+            "details": details,
+            "price": price,
+            "sr": sr
+        }
+
+    except Exception as e:
+        log.warning(f"Ошибка шорт-анализа {symbol}: {e}")
+        return {"score": 0, "details": {}, "price": 0, "sr": {}}
+
+
+def применить_ai_корректировку_шорт(score: int, symbol: str) -> int:
+    """
+    НОВАЯ ЛОГИКА: Штраф за Bybit ratio для шортов.
+    """
+    ai = получить_bybit_ai(symbol)
+    if not ai["available"]: return score
+
+    long_r = ai["long_ratio"]
+    log.info(f"Bybit ratio: long={long_r:.1%} short={ai['short_ratio']:.1%} сигнал={ai['signal']}")
+
+    # При сильном бычьем рынке штрафуем шорт
+    if long_r > 0.70:
+        return max(0, score - 20)
+    elif long_r > 0.65:
+        return max(0, score - 10)
+    elif long_r < 0.45:
+        return min(100, score + 10)  # Медвежий рынок — бонус
+
+    return score
 
 
 def применить_ai_корректировку(score: int, symbol: str) -> int:
@@ -948,9 +1058,6 @@ def применить_ai_корректировку(score: int, symbol: str) ->
 # ============================================================
 
 def установить_плечо(symbol: str, leverage: int) -> bool:
-    """
-    'leverage not modified' — НЕ ошибка! Плечо уже стоит нужное.
-    """
     try:
         exchange.set_leverage(leverage, symbol, params={"buyLeverage": leverage, "sellLeverage": leverage})
         log.info(f"Плечо {leverage}x установлено для {symbol}")
@@ -1092,7 +1199,7 @@ def закрыть_позицию_с_подтверждением(symbol: str, q
         try:
             exchange.create_market_order(symbol, close_side, qty, params={"reduceOnly": True})
             time.sleep(3)
-            positions = safe_fetch_positions([symbol])   # FIX #3
+            positions = safe_fetch_positions([symbol])
             active = [p for p in positions if float(p.get("contracts", 0) or 0) > 0 and p.get("side") == side]
             if not active:
                 log.info(f"Позиция {symbol} закрыта успешно")
@@ -1111,23 +1218,19 @@ def проверить_signal_exit(symbol: str, side: str) -> bool:
     try:
         raw = safe_fetch_ohlcv(symbol, TIMEFRAME_TA, limit=50)
         if len(raw) < 30: return False
-        df = pd.DataFrame(raw, columns=["ts","o","h","l","c","v"])
+        df = pd.DataFrame(raw, columns=["ts", "o", "h", "l", "c", "v"])
         st_up, st_down = calc_supertrend(df)
         _, _, _, rf_up, rf_down = calc_range_filter(df)
         return bool(st_down.iloc[-1] and rf_down.iloc[-1]) if side == "long" else bool(st_up.iloc[-1] and rf_up.iloc[-1])
     except Exception: return False
 
 # ============================================================
-#            МОНИТОРИНГ ПОЗИЦИЙ — FIX #3
+#            МОНИТОРИНГ ПОЗИЦИЙ
 # ============================================================
 
 def мониторить_позицию(symbol: str, entry_price: float, qty: float,
                         открыта_в: float, sl_цена: float,
                         tp_цена: float, side: str = "long") -> Tuple[str, float]:
-    """
-    FIX #3: Все вызовы exchange.fetch_positions заменены на safe_fetch_positions()
-    для защиты от rate limit во время цикла мониторинга.
-    """
     deadline = открыта_в + TRADE_MAX_LIFETIME
     coin = symbol.split("/")[0]
     trailing_step = MIN_TRAILING_STEP / 100
@@ -1136,7 +1239,7 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
     try:
         raw = safe_fetch_ohlcv(symbol, TIMEFRAME_TA, limit=50)
         if len(raw) >= 30:
-            df = pd.DataFrame(raw, columns=["ts","o","h","l","c","v"])
+            df = pd.DataFrame(raw, columns=["ts", "o", "h", "l", "c", "v"])
             atr_val = calc_atr(df, TRAILING_ATR_PERIOD).iloc[-1]
             atr_pct = (atr_val / entry_price) * 100
             trailing_step = max(MIN_TRAILING_STEP, atr_pct * TRAILING_ATR_MULT) / 100
@@ -1165,7 +1268,7 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
         time.sleep(15)
 
         try:
-            positions = safe_fetch_positions([symbol])   # FIX #3
+            positions = safe_fetch_positions([symbol])
             active = [p for p in positions if float(p.get("contracts", 0) or 0) > 0 and p.get("side") == side]
 
             if not active:
@@ -1394,7 +1497,6 @@ def загрузить_состояние():
         return False
 
 def баланс_usdt() -> float:
-    """Свободный баланс (доступен для новых ордеров)."""
     try:
         b = exchange.fetch_balance({"type": "linear"})
         return float(b.get("USDT", {}).get("free", 0.0))
@@ -1403,7 +1505,6 @@ def баланс_usdt() -> float:
         return 0.0
 
 def полный_баланс_usdt() -> float:
-    """Полный баланс включая открытые позиции."""
     try:
         b = exchange.fetch_balance({"type": "linear"})
         total = float(b.get("USDT", {}).get("total", 0.0))
@@ -1549,7 +1650,7 @@ def печатать_отчёт():
 
     log.info("")
     log.info("=" * 65)
-    log.info("📊 ОТЧЁТ ГИБРИДНОГО БОТА v10.2")
+    log.info("📊 ОТЧЁТ ГИБРИДНОГО БОТА v10.3")
     log.info(f"  Баланс: {баланс:.2f} USDT ({дельта:+.2f} USDT / {пct:+.2f}%)")
     log.info(f"  Сделок: {всего} | TP={tp_} | SL={sl_} | Таймаут={stats['таймаут']}")
     log.info(f"  WinRate: {wr:.1f}%")
@@ -1623,7 +1724,6 @@ def запустить_предстартовую_проверку() -> bool:
     if MIN_SCORE < 65:
         log.error(f"❌ MIN_SCORE={MIN_SCORE} < 65")
         все_ок = False
-    # FIX #2: проверяем согласованность порогов
     log.info(f"Конфигурация: TP={TP_PERCENT}% | SL={SL_PERCENT}% | RR={rr:.1f}:1")
     log.info(f"  MIN_SCORE={MIN_SCORE} | ENTRY_CONFIRM_MIN_SCORE={ENTRY_CONFIRM_MIN_SCORE} ✅")
     log.info("✅ Этап 3 — ПРОЙДЕН")
@@ -1682,7 +1782,7 @@ def main():
 
     log.info("")
     log.info("=" * 65)
-    log.info("🤖 ГИБРИДНЫЙ ФЬЮЧЕРСНЫЙ БОТ v10.2")
+    log.info("🤖 ГИБРИДНЫЙ ФЬЮЧЕРСНЫЙ БОТ v10.3")
     log.info(f"  Плечо: {LEVERAGE}x | RR: {TP_PERCENT}/{SL_PERCENT} ({TP_PERCENT/SL_PERCENT:.1f}:1)")
     log.info(f"  Баланс: {баланс_сейчас:.4f} USDT (полный)")
     log.info(f"  Свободно: {баланс_usdt():.4f} USDT")
@@ -1694,11 +1794,10 @@ def main():
     log.info("=" * 65)
     log.info("")
 
-    # заблокированные[symbol] = timestamp_до_которого_заблокирован
-    заблокированные: Dict[str, float] = {}
+    # Заблокированные символы: {symbol: timestamp_разблокировки}
+    заблокированные: Dict[str, float] = {"ATOM/USDT:USDT": time.time() + 24 * 3600}  # Блокировка ATOM на 24 часа
 
-    # FIX #1: счётчик провалённых входов per symbol
-    # fail_attempts[symbol] = количество подряд идущих отменённых входов
+    # Счётчик проваленных входов: {symbol: количество_провалов}
     fail_attempts: Dict[str, int] = {}
 
     while True:
@@ -1750,16 +1849,22 @@ def main():
                 time.sleep(60)
                 continue
 
+            # Проверка Bybit ratio для блокировки шортов
+            ai_market = получить_bybit_ai("BTC/USDT:USDT")
+            if ai_market.get("signal") == "bullish" and ai_market.get("long_ratio", 0) > 0.62:
+                log.info("⛔ Рынок бычий — шорты заблокированы")
+                time.sleep(SCAN_INTERVAL)
+                continue
+
             log.info(f"── Сканирование {len(SYMBOLS)} пар (баланс={свободный:.2f}U | порог={MIN_SCORE}) ──")
             scores = {}
 
+            # Сканирование лонгов
             for sym in SYMBOLS:
-                # Проверка блокировки (по времени)
                 if sym in заблокированные:
                     if time.time() < заблокированные[sym]: continue
                     else:
                         del заблокированные[sym]
-                        # Сбрасываем счётчик при снятии блока
                         fail_attempts.pop(sym, None)
 
                 if not тренд_4h_бычий(sym): continue
@@ -1771,11 +1876,6 @@ def main():
                 scores[sym] = res
                 det = res.get("details", {})
                 log.debug(f"{sym.split(':')[0]:12s} скор={ai_score:3.0f}/100 rsi={det.get('rsi', '?')} rf={det.get('range_filter', '?')} st={det.get('supertrend', '?')}")
-
-            if not scores:
-                log.info(f"Нет кандидатов — ждём {SCAN_INTERVAL} сек")
-                time.sleep(SCAN_INTERVAL)
-                continue
 
             кандидаты = sorted(
                 [(s, d) for s, d in scores.items() if d.get("score_final", 0) >= MIN_SCORE],
@@ -1806,20 +1906,22 @@ def main():
                 log.info(f"► Выбрана {лучшая.split(':')[0]} (лонг) скор={фин_скор} цена={цена:.8f}")
                 break
 
-            # Поиск шорта если нет лонга
+            # Поиск шортов (если не найден лонг)
             if выбрана is None:
                 for sym in SYMBOLS:
                     if sym in заблокированные: continue
                     if тренд_4h_медвежий(sym):
                         time.sleep(API_CALL_DELAY)
                         short_res = получить_скор_шорта(sym)
-                        if short_res["score"] >= MIN_SCORE:
+                        ai_score = применить_ai_корректировку_шорт(short_res["score"], sym)
+                        short_res["score_final"] = ai_score
+                        if ai_score >= MIN_SCORE:
                             det_sh = short_res.get("details", {})
                             if MA_CROSSOVER_ENABLED and not det_sh.get("ma_cross", True): continue
                             if not det_sh.get("vol_spike_ok", True): continue
-                            log.info(f"🐻 Шорт-кандидат: {sym.split(':')[0]} скор={short_res['score']}")
+                            log.info(f"🐻 Шорт-кандидат: {sym.split(':')[0]} скор={ai_score}")
                             выбрана = sym
-                            фин_скор = short_res["score"]
+                            фин_скор = ai_score
                             цена = short_res["price"]
                             sr_info = short_res.get("sr", {})
                             side = "short"
@@ -1883,24 +1985,17 @@ def main():
                 if not подтвердить_вход(выбрана, фин_скор, side):
                     log.info(f"⛔ Вход в {выбрана} отменён по подтверждению")
 
-                    # FIX #1: увеличиваем счётчик провалов для этого символа
                     fail_attempts[выбрана] = fail_attempts.get(выбрана, 0) + 1
                     текущий_счётчик = fail_attempts[выбрана]
-                    log.warning(
-                        f"  ► {выбрана.split(':')[0]}: попытка {текущий_счётчик}/{SYMBOL_MAX_FAIL_ATTEMPTS}"
-                    )
+                    log.warning(f"  ► {выбрана.split(':')[0]}: попытка {текущий_счётчик}/{SYMBOL_MAX_FAIL_ATTEMPTS}")
                     if текущий_счётчик >= SYMBOL_MAX_FAIL_ATTEMPTS:
                         заблокированные[выбрана] = time.time() + SYMBOL_BLOCK_AFTER_FAIL * 60
                         fail_attempts.pop(выбрана, None)
-                        log.warning(
-                            f"  ⛔ {выбрана.split(':')[0]} заблокирован на {SYMBOL_BLOCK_AFTER_FAIL} мин "
-                            f"({SYMBOL_MAX_FAIL_ATTEMPTS} отменённых входов подряд)"
-                        )
+                        log.warning(f"  ⛔ {выбрана.split(':')[0]} заблокирован на {SYMBOL_BLOCK_AFTER_FAIL} мин")
 
                     time.sleep(30)
                     continue
 
-            # Вход подтверждён — сбрасываем счётчик провалов
             fail_attempts.pop(выбрана, None)
 
             баланс_до = полный_баланс_usdt()
@@ -1910,22 +2005,17 @@ def main():
             if вход_цена is None or кол_во is None:
                 log.warning("Не удалось открыть позицию — пауза 30 сек")
 
-                # FIX #1: технический сбой открытия тоже считается провалом
                 fail_attempts[выбрана] = fail_attempts.get(выбрана, 0) + 1
                 текущий_счётчик = fail_attempts[выбрана]
                 log.warning(f"  ► {выбрана.split(':')[0]}: попытка открытия {текущий_счётчик}/{SYMBOL_MAX_FAIL_ATTEMPTS}")
                 if текущий_счётчик >= SYMBOL_MAX_FAIL_ATTEMPTS:
                     заблокированные[выбрана] = time.time() + SYMBOL_BLOCK_AFTER_FAIL * 60
                     fail_attempts.pop(выбрана, None)
-                    log.warning(
-                        f"  ⛔ {выбрана.split(':')[0]} заблокирован на {SYMBOL_BLOCK_AFTER_FAIL} мин "
-                        f"(многократные сбои открытия)"
-                    )
+                    log.warning(f"  ⛔ {выбрана.split(':')[0]} заблокирован на {SYMBOL_BLOCK_AFTER_FAIL} мин")
 
                 time.sleep(30)
                 continue
 
-            # Позиция успешно открыта — сбрасываем счётчик
             fail_attempts.pop(выбрана, None)
 
             stats["сделок_всего"] += 1
