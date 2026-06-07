@@ -1401,7 +1401,8 @@ def детальный_отчёт_сделки(запись: dict):
     details = запись.get("details", {})
 
     знак = "✅ ТЕЙКПРОФИТ" if r == "tp" else ("❌ СТОПЛОСС" if r == "sl" else "⏰ ТАЙМАУТ")
-    pnl_знак = "+" if pnl >=
+    pnl_знак = "+" if pnl >= 0 else ""
+
     log.info("")
     log.info("━" * 65)
     log.info(f"📋 ДЕТАЛЬНЫЙ ОТЧЁТ СДЕЛКИ #{запись.get('id', '?')}")
