@@ -3,19 +3,16 @@
 
 """
 ================================================================================
-Bybit ГИБРИДНЫЙ ПРОФЕССИОНАЛЬНЫЙ БОТ — v10.4
-Оптимизирован для более частого входа в сделки
+Bybit ГИБРИДНЫЙ БОТ v11.0 — УЛУЧШЕННАЯ ВЕРСИЯ
 ================================================================================
-ИЗМЕНЕНИЯ v10.4:
-1. Снижены пороги: MIN_SCORE=60, ENTRY_CONFIRM_MIN_SCORE=55
-2. Отключено подтверждение входа (ENTRY_CONFIRM_BARS=0)
-3. Увеличен VOLUME_SPIKE_MULT=10.0 (меньше блокировок по объёму)
-4. Убрана блокировка шортов по Bybit ratio (остался только штраф)
-5. Убрана проверка тренд_4h_бычий для лонгов
-6. Уменьшен SCAN_INTERVAL=60 (сканирование каждую минуту)
-7. Уменьшены TP_PERCENT=1.5, SL_PERCENT=0.6 (RR=2.5:1)
-8. Сокращено TRADE_MAX_LIFETIME=1800 (30 минут)
-9. Ранний частичный безубыток: PARTIAL_BE_PROFIT=0.10
+🔹 НОВОВВЕДЕНИЯ:
+1. Отдельный модуль поиска сигналов на выход (Exit Signals)
+2. Постоянный мониторинг точки выхода (каждые 5 секунд)
+3. Более строгие фильтры входа (MIN_SCORE=75, RR>=2:1)
+4. Исправленный трейлинг и частичный безубыток
+5. Улучшенная корректировка по Bybit ratio
+6. Фильтры на ADX, объём, боковик, противоречие индикаторов
+7. Динамический расчёт SL/TP на основе ATR
 ================================================================================
 """
 
@@ -49,12 +46,7 @@ SYMBOLS = [
     "AVAX/USDT:USDT", "DOT/USDT:USDT", "LTC/USDT:USDT", "BCH/USDT:USDT",
     "XLM/USDT:USDT", "NEAR/USDT:USDT", "DOGE/USDT:USDT",
     "1000PEPE/USDT:USDT", "WIF/USDT:USDT", "BOME/USDT:USDT",
-    "RENDER/USDT:USDT", "TAO/USDT:USDT", "WLD/USDT:USDT", "ARKM/USDT:USDT",
-    "IO/USDT:USDT", "ONDO/USDT:USDT", "VIRTUAL/USDT:USDT", "UNI/USDT:USDT",
-    "AAVE/USDT:USDT", "ARB/USDT:USDT", "OP/USDT:USDT", "LINK/USDT:USDT",
-    "GRT/USDT:USDT", "INJ/USDT:USDT", "SUI/USDT:USDT", "APT/USDT:USDT",
-    "TIA/USDT:USDT", "JTO/USDT:USDT", "EIGEN/USDT:USDT", "HBAR/USDT:USDT",
-    "VET/USDT:USDT", "NOT/USDT:USDT", "CATI/USDT:USDT",
+    "RENDER/USDT:USDT", "TAO/USDT:USDT", "WLD/USDT:USDT", "CATI/USDT:USDT",
 ]
 
 # --- ПАРАМЕТРЫ КВАНТОВОГО АНАЛИЗА ---
@@ -79,29 +71,29 @@ LEVERAGE = 3
 TIMEFRAME_TA = "5m"
 TIMEFRAME_TREND = "1h"
 TIMEFRAME_4H = "4h"
-SCAN_INTERVAL = 60  # Уменьшено с 300 до 60
+SCAN_INTERVAL = 60
 
 # --- ПОРОГИ СКОРА ---
-MIN_SCORE = 60  # Снижено с 70
-ENTRY_CONFIRM_MIN_SCORE = 55  # Снижено с 65
-ENTRY_CONFIRM_BARS = 0  # Отключено подтверждение входа
+MIN_SCORE = 75  # Повышено с 60
+ENTRY_CONFIRM_MIN_SCORE = 70  # Повышено с 55
+ENTRY_CONFIRM_BARS = 0
 
 # --- TP / SL ---
-TP_PERCENT = 1.5  # Уменьшено с 2.0
-SL_PERCENT = 0.6  # Уменьшено с 0.8
-MIN_SL_PERCENT = 0.5
-MAX_SL_PERCENT = 1.5
-ATR_SL_MULT = 1.2
+TP_PERCENT = 2.0  # Увеличено с 1.5
+SL_PERCENT = 1.0  # Увеличено с 0.6
+MIN_SL_PERCENT = 0.8
+MAX_SL_PERCENT = 2.0
+ATR_SL_MULT = 1.0  # Уменьшено с 1.2
 ATR_TP_MULT = 2.0
 
 # --- ЧАСТИЧНЫЙ БЕЗУБЫТОК ---
 PARTIAL_BE_ENABLED = True
 PARTIAL_BE_CLOSE_PCT = 50.0
-PARTIAL_BE_PROFIT = 0.10  # Уменьшено с 0.15
+PARTIAL_BE_PROFIT = 0.05  # Уменьшено с 0.10
 
 # --- РИСК ---
 BASE_RISK_PCT = 0.8
-MAX_RISK_PCT = 1.5  # Увеличено с 1.2
+MAX_RISK_PCT = 1.2  # Уменьшено с 1.5
 
 # --- ТРЕЙЛИНГ ---
 TRAILING_ATR_PERIOD = 14
@@ -109,8 +101,8 @@ TRAILING_ATR_MULT = 1.5
 TRAILING_OFFSET_MULT = 1.0
 MIN_TRAILING_STEP = 0.3
 MIN_TRAILING_OFFSET = 0.4
-MIN_PROFIT_FOR_TRAIL = 0.5
-RR_EXIT_TRIGGER = 0.5
+MIN_PROFIT_FOR_TRAIL = 0.3  # Уменьшено с 0.5
+RR_EXIT_TRIGGER = 0.3  # Уменьшено с 0.5
 
 # --- MA КРОССОВЕР ---
 MA_CROSSOVER_ENABLED = True
@@ -125,47 +117,49 @@ SESSION_BLOCK_START = 0
 SESSION_BLOCK_END = 4
 
 DAILY_LOSS_LIMIT_PCT = 3.0
-DAILY_LOSS_PAUSE_SEC = 7200  # Уменьшено с 10800
+DAILY_LOSS_PAUSE_SEC = 7200
 
-VOLUME_SPIKE_MULT = 10.0  # Увеличено с 3.5
+VOLUME_SPIKE_MULT = 2.0  # Уменьшено с 10.0
 VOLUME_AVG_PERIOD = 20
+MIN_VOLUME_RATIO = 0.5  # Новый фильтр
 
 SIGNAL_EXIT_ENABLED = True
+EXIT_SIGNAL_CHECK_INTERVAL = 5  # Проверка сигналов выхода каждые 5 секунд
 
 # --- БЛОКИРОВКИ ---
-SYMBOL_BLOCK_AFTER_TP = 60  # Уменьшено с 90
-SYMBOL_BLOCK_AFTER_SL = 120  # Уменьшено с 180
-SYMBOL_MAX_FAIL_ATTEMPTS = 5  # Увеличено с 3
-SYMBOL_BLOCK_AFTER_FAIL = 60  # Уменьшено с 120
+SYMBOL_BLOCK_AFTER_TP = 60
+SYMBOL_BLOCK_AFTER_SL = 120
+SYMBOL_MAX_FAIL_ATTEMPTS = 3
+SYMBOL_BLOCK_AFTER_FAIL = 60
 
-SL_STREAK_LIMIT = 3  # Увеличено с 2
-SL_STREAK_PAUSE = 3600  # Уменьшено с 5400
+SL_STREAK_LIMIT = 3
+SL_STREAK_PAUSE = 3600
 SL_STREAK_EXTRA_PAUSE = 300
 
-MIN_BALANCE = 10.0  # Уменьшено с 20.0
-MAX_DRAWDOWN_PCT = 20.0  # Увеличено с 15.0
+MIN_BALANCE = 10.0
+MAX_DRAWDOWN_PCT = 15.0  # Уменьшено с 20.0
 
-TRADE_MAX_LIFETIME = 1800  # Уменьшено с 3600 (30 минут)
+TRADE_MAX_LIFETIME = 1800
 REPORT_INTERVAL = 1800
-
-# --- ФАЙЛЫ ---
-STATE_FILE = "state_bot_v10_4.json"
-TRADES_FILE = "trades_bot_v10_4.json"
-INDICATOR_STATS_FILE = "indicator_stats_v10_4.json"
-METRICS_FILE = "strategy_metrics_v10_4.json"
-
-BYBIT_FEE = 0.00055
 
 # --- S/R ---
 SR_PERIOD = 100
 SR_PROXIMITY_PCT = 0.5
-SR_MIN_TOUCHES = 2  # Уменьшено с 3
+SR_MIN_TOUCHES = 2
 SR_CLUSTER_TOL = 0.005
-SR_BLOCK_DIST_PCT = 0.5  # Увеличено с 0.3
+SR_BLOCK_DIST_PCT = 0.5
 
 # --- RATE LIMIT ЗАЩИТА ---
-API_CALL_DELAY = 0.2  # Уменьшено с 0.3
-API_RATE_LIMIT_PAUSE = 3  # Уменьшено с 5
+API_CALL_DELAY = 0.2
+API_RATE_LIMIT_PAUSE = 3
+
+# --- ФАЙЛЫ ---
+STATE_FILE = "state_bot_v11_0.json"
+TRADES_FILE = "trades_bot_v11_0.json"
+INDICATOR_STATS_FILE = "indicator_stats_v11_0.json"
+METRICS_FILE = "strategy_metrics_v11_0.json"
+
+BYBIT_FEE = 0.00055
 
 # ============================================================
 #                       ЛОГИРОВАНИЕ
@@ -173,11 +167,11 @@ API_RATE_LIMIT_PAUSE = 3  # Уменьшено с 5
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s]  %(message)s",
+    format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%d.%m.%Y %H:%M:%S",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("bot_v10_4.log", encoding="utf-8"),
+        logging.FileHandler("bot_v11_0.log", encoding="utf-8"),
     ],
 )
 log = logging.getLogger(__name__)
@@ -687,7 +681,6 @@ def получить_скор(symbol: str) -> dict:
         details["rsi_1h"] = round(rsi_1h, 1)
         if rsi_1h < 50: score += 10
         elif rsi_1h < 60: score += 5
-
         elif rsi_1h > 70: score -= 5
 
         # MACD
@@ -751,7 +744,7 @@ def получить_скор(symbol: str) -> dict:
             score += 15
             details["sr_signal"] = f"у поддержки ✅ ({sr['sup_cluster']} касаний)"
         elif sr["near_resistance"]:
-            score -= 10  # Уменьшен штраф с 25 до 10
+            score -= 10
             details["sr_signal"] = f"у сопротивления ⚠️ ({sr['res_cluster']} касаний)"
         else:
             details["sr_signal"] = f"нейтр (sup={sr['dist_to_sup_pct']:.2f}% res={sr['dist_to_res_pct']:.2f}%)"
@@ -926,9 +919,9 @@ def применить_ai_корректировку_шорт(score: int, symbol
     log.info(f"Bybit ratio: long={long_r:.1%} short={ai['short_ratio']:.1%} сигнал={ai['signal']}")
 
     # Штраф за бычий рынок
-    if long_r > 0.75: return max(0, score - 25)
-    elif long_r > 0.70: return max(0, score - 20)
-    elif long_r > 0.65: return max(0, score - 10)
+    if long_r > 0.75: return max(0, score - 40)  # Усилен штраф
+    elif long_r > 0.70: return max(0, score - 30)
+    elif long_r > 0.65: return max(0, score - 20)
     elif long_r < 0.40: return min(100, score + 10)
     return score
 
@@ -1090,26 +1083,84 @@ def закрыть_позицию_с_подтверждением(symbol: str, q
     log.error(f"Не удалось закрыть {symbol} после 3 попыток")
     return False
 
-def проверить_signal_exit(symbol: str, side: str) -> bool:
-    if not SIGNAL_EXIT_ENABLED: return False
-    try:
-        raw = safe_fetch_ohlcv(symbol, TIMEFRAME_TA, limit=50)
-        if len(raw) < 30: return False
-        df = pd.DataFrame(raw, columns=["ts", "o", "h", "l", "c", "v"])
-        st_up, st_down = calc_supertrend(df)
-        _, _, _, rf_up, rf_down = calc_range_filter(df)
-        return bool(st_down.iloc[-1] and rf_down.iloc[-1]) if side == "long" else bool(st_up.iloc[-1] and rf_up.iloc[-1])
-    except Exception: return False
+# ============================================================
+#            МОНИТОРИНГ ПОЗИЦИЙ (С УЛУЧШЕННЫМ ВЫХОДОМ)
+# ============================================================
 
-# ============================================================
-#            МОНИТОРИНГ ПОЗИЦИЙ
-# ============================================================
+def проверить_exit_signal(symbol: str, side: str, current_price: float, entry_price: float) -> bool:
+    """
+    Проверяет сигналы на выход из сделки (отдельный модуль).
+    Возвращает True, если нужно выходить.
+    """
+    try:
+        # 1. Проверка Supertrend + Range Filter (разворот)
+        raw = safe_fetch_ohlcv(symbol, TIMEFRAME_TA, limit=50)
+        if len(raw) >= 30:
+            df = pd.DataFrame(raw, columns=["ts", "o", "h", "l", "c", "v"])
+            st_up, st_down = calc_supertrend(df)
+            _, _, _, rf_up, rf_down = calc_range_filter(df)
+
+            if side == "long":
+                # Для лонга: выход если Supertrend вниз ИЛИ Range Filter вниз
+                if st_down.iloc[-1] or rf_down.iloc[-1]:
+                    log.info(f"🚨 Exit Signal: Supertrend={st_up.iloc[-1]} RangeFilter={rf_up.iloc[-1]} → ВЫХОД")
+                    return True
+            else:
+                # Для шорта: выход если Supertrend вверх ИЛИ Range Filter вверх
+                if st_up.iloc[-1] or rf_up.iloc[-1]:
+                    log.info(f"🚨 Exit Signal: Supertrend={st_down.iloc[-1]} RangeFilter={rf_down.iloc[-1]} → ВЫХОД")
+                    return True
+
+        # 2. Проверка MACD (разворот)
+        ml, sl_macd, _ = calc_macd(df["c"])
+        if side == "long":
+            if ml.iloc[-1] < sl_macd.iloc[-1]:  # MACD развернулся вниз
+                log.info(f"🚨 Exit Signal: MACD разворот вниз → ВЫХОД")
+                return True
+        else:
+            if ml.iloc[-1] > sl_macd.iloc[-1]:  # MACD развернулся вверх
+                log.info(f"🚨 Exit Signal: MACD разворот вверх → ВЫХОД")
+                return True
+
+        # 3. Проверка RSI (перекупленность/перепроданность)
+        rsi_val = calc_rsi(df["c"]).iloc[-1]
+        if side == "long" and rsi_val > 70:
+            log.info(f"🚨 Exit Signal: RSI={rsi_val:.1f} > 70 → ВЫХОД")
+            return True
+        elif side == "short" and rsi_val < 30:
+            log.info(f"🚨 Exit Signal: RSI={rsi_val:.1f} < 30 → ВЫХОД")
+            return True
+
+        # 4. Проверка S/R (достигли сопротивления/поддержки)
+        sr = calc_support_resistance(df)
+        if side == "long" and sr["near_resistance"]:
+            log.info(f"🚨 Exit Signal: У сопротивления ({sr['resistance']:.8f}) → ВЫХОД")
+            return True
+        elif side == "short" and sr["near_support"]:
+            log.info(f"🚨 Exit Signal: У поддержки ({sr['support']:.8f}) → ВЫХОД")
+            return True
+
+        # 5. Проверка Bybit ratio (изменение настроения рынка)
+        ai = получить_bybit_ai(symbol)
+        if ai["available"]:
+            if side == "long" and ai["long_ratio"] < 0.45:  # Рынок стал медвежий
+                log.info(f"🚨 Exit Signal: Bybit ratio {ai['long_ratio']:.1%} < 45% → ВЫХОД")
+                return True
+            elif side == "short" and ai["long_ratio"] > 0.55:  # Рынок стал бычий
+                log.info(f"🚨 Exit Signal: Bybit ratio {ai['long_ratio']:.1%} > 55% → ВЫХОД")
+                return True
+
+        return False
+    except Exception as e:
+        log.debug(f"Ошибка проверки exit signal: {e}")
+        return False
 
 def мониторить_позицию(symbol: str, entry_price: float, qty: float, открыта_в: float, sl_цена: float, tp_цена: float, side: str = "long") -> Tuple[str, float]:
     deadline = открыта_в + TRADE_MAX_LIFETIME
     coin = symbol.split("/")[0]
-    trailing_offset = MIN_TRAILING_OFFSET / 100
 
+    # Начальные параметры трейлинга
+    trailing_offset = MIN_TRAILING_OFFSET / 100
     try:
         raw = safe_fetch_ohlcv(symbol, TIMEFRAME_TA, limit=50)
         if len(raw) >= 30:
@@ -1117,28 +1168,33 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
             atr_val = calc_atr(df, TRAILING_ATR_PERIOD).iloc[-1]
             atr_pct = (atr_val / entry_price) * 100
             trailing_offset = max(MIN_TRAILING_OFFSET, atr_pct * TRAILING_OFFSET_MULT) / 100
-    except Exception: pass
+    except Exception:
+        pass
 
+    # Расчёт триггера для трейлинга (RR_EXIT_TRIGGER)
     if side == "long":
         rr_trigger_price = entry_price + (tp_цена - entry_price) * RR_EXIT_TRIGGER
     else:
         rr_trigger_price = entry_price - (entry_price - tp_цена) * RR_EXIT_TRIGGER
 
-    log.info(f"rrExit триггер={rr_trigger_price:.8f} (RR_EXIT={RR_EXIT_TRIGGER})")
-    фаза, текущий_sl, пиковая_цена = 1, sl_цена, entry_price
-    trailing_активен = (RR_EXIT_TRIGGER == 0.0)
+    log.info(f"🎯 RR Exit триггер: {rr_trigger_price:.8f} (RR_EXIT={RR_EXIT_TRIGGER})")
+    фаза = 1  # 1 = до безубытка, 2 = после безубытка
+    текущий_sl = sl_цена
+    пиковая_цена = entry_price
+    trailing_активен = False
     partial_done = False
     accumulated_pnl = 0.0
 
-    log.info(f"Мониторинг {coin} {side} вход={entry_price:.8f} SL={sl_цена:.8f} TP={tp_цена:.8f}")
+    log.info(f"📊 Мониторинг {coin} {side} | Вход={entry_price:.8f} | SL={sl_цена:.8f} | TP={tp_цена:.8f}")
 
     while True:
         сейчас = time.time()
         if сейчас >= deadline:
-            log.warning("Дедлайн — принудительное закрытие")
+            log.warning("⏰ Дедлайн — принудительное закрытие")
             закрыть_позицию_с_подтверждением(symbol, qty, side)
             return "таймаут", accumulated_pnl
-        time.sleep(10)
+
+        time.sleep(EXIT_SIGNAL_CHECK_INTERVAL)  # Проверка каждые 5 секунд
 
         try:
             positions = safe_fetch_positions([symbol])
@@ -1147,8 +1203,8 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
             if not active:
                 ticker = safe_fetch_ticker(symbol)
                 cur_price = float(ticker["last"]) if ticker else entry_price
-                hit_tp = (cur_price >= entry_price * (1 + TP_PERCENT / 100 * 0.7)) if side == "long" else (cur_price <= entry_price * (1 - TP_PERCENT / 100 * 0.7))
-                result = "tp" if (hit_tp or фаза >= 2) else "sl"
+                hit_tp = (cur_price >= tp_цена) if side == "long" else (cur_price <= tp_цена)
+                result = "tp" if hit_tp else "sl"
                 return result, accumulated_pnl
 
             pos = active[0]
@@ -1159,7 +1215,14 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
             pnl_pct = ((cur_price - entry_price) / entry_price * 100) if side == "long" else ((entry_price - cur_price) / entry_price * 100)
             до_дед = int(deadline - сейчас)
 
-            # Частичный безубыток
+            # --- ПРОВЕРКА СИГНАЛОВ НА ВЫХОД ---
+            if SIGNAL_EXIT_ENABLED and фаза >= 1:
+                if проверить_exit_signal(symbol, side, cur_price, entry_price):
+                    log.info(f"🚨 СИГНАЛ НА ВЫХОД: Закрываем {symbol} по exit signal")
+                    закрыть_позицию_с_подтверждением(symbol, qty_actual, side)
+                    return "tp" if pnl_pct > 0 else "sl", accumulated_pnl + pnl_real
+
+            # --- ЧАСТИЧНЫЙ БЕЗУБЫТОК ---
             if PARTIAL_BE_ENABLED and not partial_done and pnl_pct >= PARTIAL_BE_PROFIT:
                 close_qty = qty_actual * (PARTIAL_BE_CLOSE_PCT / 100)
                 if close_qty > 0:
@@ -1168,54 +1231,76 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
                         exchange.create_market_order(symbol, close_side, close_qty, params={"reduceOnly": True})
                         partial_pnl = (cur_price - entry_price) * close_qty if side == "long" else (entry_price - cur_price) * close_qty
                         accumulated_pnl += partial_pnl
-                        log.info(f"Частичный безубыток: закрыто {close_qty:.4f} ({PARTIAL_BE_CLOSE_PCT:.0f}%) @ ~{cur_price:.8f} PnL≈{partial_pnl:+.4f}U")
-                        qty_actual -= close_qty
-                        new_sl = entry_price * (1 + BYBIT_FEE * 2 + 0.0003) if side == "long" else entry_price * (1 - BYBIT_FEE * 2 - 0.0003)
+                        log.info(f"✅ Частичный безубыток: закрыто {close_qty:.4f} ({PARTIAL_BE_CLOSE_PCT:.0f}%) @ ~{cur_price:.8f} PnL≈{partial_pnl:+.4f}U")
+
+                        # Исправленный расчёт нового SL (учитываем комиссию)
+                        if side == "long":
+                            new_sl = entry_price * (1 + BYBIT_FEE * 4)  # Комиссия за открытие + закрытие
+                            if new_sl >= cur_price:  # Если SL выше текущей цены — ставим чуть ниже
+                                new_sl = cur_price * (1 - 0.001)
+                        else:
+                            new_sl = entry_price * (1 - BYBIT_FEE * 4)
+                            if new_sl <= cur_price:
+                                new_sl = cur_price * (1 + 0.001)
+
                         if обновить_sl_на_бирже(symbol, new_sl, side):
                             текущий_sl = new_sl
+                            log.info(f"🔄 SL перемещён в безубыток: {new_sl:.8f}")
                         partial_done = True
+                        фаза = 2  # Переходим в фазу после безубытка
                     except Exception as e:
-                        log.warning(f"Не удалось частично закрыть: {e}")
+                        log.warning(f"❌ Не удалось частично закрыть: {e}")
 
-            # Signal Exit
-            if SIGNAL_EXIT_ENABLED and фаза >= 2 and проверить_signal_exit(symbol, side):
-                log.info("Signal Exit: разворот — закрываем")
-                закрыть_позицию_с_подтверждением(symbol, qty_actual, side)
-                result_type = "tp" if pnl_pct > 0 else "sl"
-                return result_type, accumulated_pnl + pnl_real
-
-            # Полный безубыток
+            # --- ПОЛНЫЙ БЕЗУБЫТОК (если не было частичного) ---
             if not partial_done and фаза == 1 and pnl_pct >= 0.2:
-                new_sl_be = entry_price * (1 + BYBIT_FEE * 2 + 0.0003) if side == "long" else entry_price * (1 - BYBIT_FEE * 2 - 0.0003)
+                if side == "long":
+                    new_sl_be = entry_price * (1 + BYBIT_FEE * 4)
+                    if new_sl_be >= cur_price:
+                        new_sl_be = cur_price * (1 - 0.001)
+                else:
+                    new_sl_be = entry_price * (1 - BYBIT_FEE * 4)
+                    if new_sl_be <= cur_price:
+                        new_sl_be = cur_price * (1 + 0.001)
+
                 if обновить_sl_на_бирже(symbol, new_sl_be, side):
-                    фаза, текущий_sl, пиковая_цена = 2, new_sl_be, cur_price
-                    log.info(f"БЕЗУБЫТОК! SL → {new_sl_be:.8f}")
+                    фаза = 2
+                    текущий_sl = new_sl_be
+                    log.info(f"🎯 БЕЗУБЫТОК! SL → {new_sl_be:.8f}")
 
-            # Активация трейлинга
+            # --- АКТИВАЦИЯ ТРЕЙЛИНГА ---
             if not trailing_активен and фаза >= 2:
-                trailing_активен = (cur_price >= rr_trigger_price) if side == "long" else (cur_price <= rr_trigger_price)
-                if trailing_активен:
-                    log.info(f"Трейлинг активирован @ {cur_price:.8f}")
+                if side == "long":
+                    trailing_активен = (cur_price >= rr_trigger_price)
+                else:
+                    trailing_активен = (cur_price <= rr_trigger_price)
 
-            # Трейлинг
+                if trailing_активен:
+                    log.info(f"🚀 ТРЕЙЛИНГ АКТИВИРОВАН @ {cur_price:.8f}")
+
+            # --- ТРЕЙЛИНГ ---
             if trailing_активен and фаза >= 2 and pnl_pct >= MIN_PROFIT_FOR_TRAIL:
                 if side == "long":
-                    if cur_price > пиковая_цена: пиковая_цена = cur_price
+                    if cur_price > пиковая_цена:
+                        пиковая_цена = cur_price
                     new_sl_trail = пиковая_цена * (1 - trailing_offset)
-                    if new_sl_trail > текущий_sl and обновить_sl_на_бирже(symbol, new_sl_trail, side):
-                        текущий_sl = new_sl_trail
-                        log.info(f"ТРЕЙЛИНГ: пик={пиковая_цена:.8f} → SL={new_sl_trail:.8f}")
+                    if new_sl_trail > текущий_sl and new_sl_trail < cur_price:  # Проверяем, что SL ниже текущей цены
+                        if обновить_sl_на_бирже(symbol, new_sl_trail, side):
+                            текущий_sl = new_sl_trail
+                            log.info(f"🔄 ТРЕЙЛИНГ: пик={пиковая_цена:.8f} → SL={new_sl_trail:.8f}")
                 else:
-                    if cur_price < пиковая_цена: пиковая_цена = cur_price
+                    if cur_price < пиковая_цена:
+                        пиковая_цена = cur_price
                     new_sl_trail = пиковая_цена * (1 + trailing_offset)
-                    if new_sl_trail < текущий_sl and обновить_sl_на_бирже(symbol, new_sl_trail, side):
-                        текущий_sl = new_sl_trail
-                        log.info(f"ТРЕЙЛИНГ: пик={пиковая_цена:.8f} → SL={new_sl_trail:.8f}")
+                    if new_sl_trail < текущий_sl and new_sl_trail > cur_price:  # Проверяем, что SL выше текущей цены
+                        if обновить_sl_на_бирже(symbol, new_sl_trail, side):
+                            текущий_sl = new_sl_trail
+                            log.info(f"🔄 ТРЕЙЛИНГ: пик={пиковая_цена:.8f} → SL={new_sl_trail:.8f}")
 
-            log.info(f"[{coin}] {cur_price:.8f} P&L={pnl_pct:+.2f}% ({pnl_real:+.4f}U) SL={текущий_sl:.8f} фаза={фаза} дед={до_дед}с {'[частично]' if partial_done else ''}")
+            # Логируем текущее состояние
+            log.info(f"[{coin}] Цена={cur_price:.8f} P&L={pnl_pct:+.2f}% ({pnl_real:+.4f}U) SL={текущий_sl:.8f} Фаза={фаза} Дедлайн={до_дед}с {'[Частично]' if partial_done else ''}")
 
         except Exception as e:
-            log.warning(f"Ошибка в цикле мониторинга: {e}")
+            log.warning(f"⚠️ Ошибка в цикле мониторинга: {e}")
 
     return "sl", accumulated_pnl
 
@@ -1228,7 +1313,7 @@ def проверить_и_подхватить_позиции() -> List[dict]:
         positions = safe_fetch_positions()
         active = [p for p in positions if float(p.get("contracts", 0) or 0) > 0]
         if not active:
-            log.info("Открытых позиций нет — готов к торговле")
+            log.info("✅ Открытых позиций нет — готов к торговле")
             return []
         log.info(f"⚠️ ОБНАРУЖЕНЫ ОТКРЫТЫЕ ПОЗИЦИИ ({len(active)} шт):")
         for pos in active:
@@ -1238,11 +1323,11 @@ def проверить_и_подхватить_позиции() -> List[dict]:
             pnl = float(pos.get("unrealizedPnl", 0) or 0)
             entry = float(pos.get("entryPrice", 0) or pos.get("avgCost", 0) or 0)
             lev = pos.get("leverage", "?")
-            log.info(f"  • {sym} {s} qty={qty} entry={entry:.6f} leverage={lev}x unrealizedPnL={pnl:+.4f}U")
-        log.info("Бот будет ждать закрытия этих позиций перед открытием новых")
+            log.info(f"  • {sym} {s} qty={qty} entry={entry:.6f} leverage={lev}x PnL={pnl:+.4f}U")
+        log.info("⏳ Бот будет ждать закрытия этих позиций перед открытием новых")
         return active
     except Exception as e:
-        log.warning(f"Не удалось проверить позиции: {e}")
+        log.warning(f"❌ Не удалось проверить позиции: {e}")
         return []
 
 # ============================================================
@@ -1260,7 +1345,7 @@ def сохранить_статистику_индикаторов(stats_data: d
         with open(INDICATOR_STATS_FILE, "w", encoding="utf-8") as f:
             json.dump(stats_data, f, ensure_ascii=False, indent=2, default=str)
     except Exception as e:
-        log.warning(f"Не удалось сохранить статистику индикаторов: {e}")
+        log.warning(f"❌ Не удалось сохранить статистику индикаторов: {e}")
 
 def обновить_статистику_индикаторов(запись_сделки: dict):
     stats_data = загрузить_статистику_индикаторов()
@@ -1314,16 +1399,16 @@ def сохранить_сделку(запись: dict):
     try:
         with open(TRADES_FILE, "w", encoding="utf-8") as f:
             json.dump(история, f, ensure_ascii=False, indent=2, default=str)
-        log.info(f"Сделка #{запись['id']} сохранена в {TRADES_FILE}")
+        log.info(f"📝 Сделка #{запись['id']} сохранена в {TRADES_FILE}")
     except Exception as e:
-        log.warning(f"Не удалось сохранить сделку: {e}")
+        log.warning(f"❌ Не удалось сохранить сделку: {e}")
 
 def сохранить_состояние():
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(stats, f, ensure_ascii=False, indent=2, default=str)
     except Exception as e:
-        log.warning(f"Не удалось сохранить состояние: {e}")
+        log.warning(f"❌ Не удалось сохранить состояние: {e}")
 
 def загрузить_состояние():
     global stats
@@ -1333,10 +1418,10 @@ def загрузить_состояние():
             saved = json.load(f)
         for key in stats:
             if key in saved: stats[key] = saved[key]
-        log.info(f"Состояние восстановлено из {STATE_FILE}")
+        log.info(f"📥 Состояние восстановлено из {STATE_FILE}")
         return True
     except Exception as e:
-        log.warning(f"Не удалось загрузить состояние: {e}")
+        log.warning(f"❌ Не удалось загрузить состояние: {e}")
         return False
 
 def баланс_usdt() -> float:
@@ -1344,7 +1429,7 @@ def баланс_usdt() -> float:
         b = exchange.fetch_balance({"type": "linear"})
         return float(b.get("USDT", {}).get("free", 0.0))
     except Exception as e:
-        log.warning(f"Ошибка получения баланса: {e}")
+        log.warning(f"❌ Ошибка получения баланса: {e}")
         return 0.0
 
 def полный_баланс_usdt() -> float:
@@ -1356,7 +1441,7 @@ def полный_баланс_usdt() -> float:
         if equity > 0: return equity
         return баланс_usdt()
     except Exception as e:
-        log.warning(f"Ошибка получения полного баланса: {e}")
+        log.warning(f"❌ Ошибка получения полного баланса: {e}")
         return баланс_usdt()
 
 def получить_позиции() -> List[dict]:
@@ -1368,7 +1453,7 @@ def обновить_начало_дня(баланс: float):
     if stats["дата_дня"] != сегодня:
         stats["дата_дня"] = сегодня
         stats["баланс_начало_дня"] = баланс
-        log.info(f"Новый торговый день. Баланс: {баланс:.2f} USDT")
+        log.info(f"🌅 Новый торговый день. Баланс: {баланс:.2f} USDT")
         сохранить_состояние()
 
 def превышен_дневной_лимит() -> bool:
@@ -1377,7 +1462,7 @@ def превышен_дневной_лимит() -> bool:
     текущий = полный_баланс_usdt()
     потеря_pct = (нач - текущий) / нач * 100
     if потеря_pct >= DAILY_LOSS_LIMIT_PCT:
-        log.warning(f"Дневной лимит убытков: -{потеря_pct:.1f}% (лимит {DAILY_LOSS_LIMIT_PCT}%)")
+        log.warning(f"⚠️ Дневной лимит убытков: -{потеря_pct:.1f}% (лимит {DAILY_LOSS_LIMIT_PCT}%)")
         return True
     return False
 
@@ -1404,9 +1489,9 @@ def детальный_отчёт_сделки(запись: dict):
     pnl_знак = "+" if pnl >= 0 else ""
 
     log.info("")
-    log.info("━" * 65)
+    log.info("━" * 70)
     log.info(f"📋 ДЕТАЛЬНЫЙ ОТЧЁТ СДЕЛКИ #{запись.get('id', '?')}")
-    log.info("━" * 65)
+    log.info("━" * 70)
     log.info(f"  Символ:      {sym} ({side.upper()})")
     log.info(f"  Результат:   {знак}")
     log.info(f"  P&L:         {pnl_знак}{pnl:.4f} USDT")
@@ -1431,8 +1516,12 @@ def детальный_отчёт_сделки(запись: dict):
     log.info(f"  Байес:       {details.get('bayes_prob', '?')}")
     log.info(f"  Quant score: {details.get('quant_score', '?')}")
     log.info(f"  OrderFlow:   {details.get('order_flow_score', '?')}")
-    log.info("━" * 65)
+    log.info("━" * 70)
     log.info("")
+
+# ============================================================
+#              ОТЧЁТЫ
+# ============================================================
 
 def печатать_отчёт():
     баланс = полный_баланс_usdt()
@@ -1446,15 +1535,15 @@ def печатать_отчёт():
     wr = (tp_ / всего * 100) if всего > 0 else 0.0
 
     log.info("")
-    log.info("=" * 65)
-    log.info("📊 ОТЧЁТ ГИБРИДНОГО БОТА v10.4")
+    log.info("=" * 70)
+    log.info("📊 ОТЧЁТ ГИБРИДНОГО БОТА v11.0")
     log.info(f"  Баланс: {баланс:.2f} USDT ({дельта:+.2f} USDT / {пct:+.2f}%)")
     log.info(f"  Сделок: {всего} | TP={tp_} | SL={sl_} | Таймаут={stats['таймаут']}")
     log.info(f"  WinRate: {wr:.1f}%")
     log.info(f"  Прибыль: {stats['прибыль_usdt']:.4f} USDT")
     log.info(f"  Убыток:  {stats['убыток_usdt']:.4f} USDT")
     log.info(f"  Чистый P&L: {чистый:+.4f} USDT")
-    log.info("=" * 65)
+    log.info("=" * 70)
     log.info("")
 
     stats["последний_отчёт"] = time.time()
@@ -1477,7 +1566,7 @@ def печатать_отчёт():
         profit_factor = round(sum(p for p in pnls if p > 0) / abs(sum(p for p in pnls if p < 0)), 2) if losses > 0 and sum(p for p in pnls if p > 0) > 0 else 0
 
         log.info("📉 МЕТРИКИ:")
-        log.info(f"  Sharpe: {sharpe:.2f}")
+        log.info(f"  Sharpe Ratio: {sharpe:.2f}")
         log.info(f"  Max Drawdown: {max_dd:.2f} USDT")
         log.info(f"  Profit Factor: {profit_factor:.2f}")
         log.info(f"  Avg Win: {avg_win:.4f} USDT | Avg Loss: {avg_loss:.4f} USDT")
@@ -1497,13 +1586,13 @@ def печатать_отчёт():
 def отчёт_по_индикаторам():
     stats_data = загрузить_статистику_индикаторов()
     if not stats_data:
-        log.info("Статистика индикаторов пуста (нет завершённых сделок)")
+        log.info("📊 Статистика индикаторов пуста (нет завершённых сделок)")
         return
     log.info("")
-    log.info("=" * 70)
+    log.info("=" * 75)
     log.info("📈 ЭФФЕКТИВНОСТЬ ИНДИКАТОРОВ")
     log.info(f"{'Индикатор':<18} {'🟢Бычий WR%':>11}  {'n':>4}  {'🔴Медвежий WR%':>14}  {'n':>4}  {'Разница':>8}")
-    log.info(" " + "─" * 70)
+    log.info(" " + "─" * 75)
     for инд, данные in stats_data.items():
         b_total, b_wins = данные["bullish"]["total"], данные["bullish"]["wins"]
         be_total, be_wins = данные["bearish"]["total"], данные["bearish"]["wins"]
@@ -1512,7 +1601,7 @@ def отчёт_по_индикаторам():
         diff = b_wr - be_wr
         знак = "▲" if diff > 5 else ("▼" if diff < -5 else "≈")
         log.info(f"{инд:<18}  {b_wr:>9.1f}%  {b_total:>4}  {be_wr:>12.1f}%  {be_total:>4}  {знак}{diff:>+7.1f}%")
-    log.info("=" * 70)
+    log.info("=" * 75)
     log.info("")
 
 # ============================================================
@@ -1521,12 +1610,13 @@ def отчёт_по_индикаторам():
 
 def запустить_предстартовую_проверку() -> bool:
     log.info("")
-    log.info("=" * 65)
-    log.info("🔍 ПРЕДСТАРТОВАЯ ПРОВЕРКА (5 ЭТАПОВ)")
-    log.info("=" * 65)
+    log.info("=" * 70)
+    log.info("🔍 ПРЕДСТАРТОВАЯ ПРОВЕРКА (v11.0)")
+    log.info("=" * 70)
 
     все_ок = True
 
+    # Этап 1: Окружение и API ключи
     log.info("\n▶ Этап 1: Окружение и API ключи...")
     api_key = os.getenv("BYBIT_API_KEY", "")
     api_secret = os.getenv("BYBIT_API_SECRET", "")
@@ -1540,31 +1630,32 @@ def запустить_предстартовую_проверку() -> bool:
         log.warning("⚠️ .env файл не найден (используем переменные окружения)")
     if все_ок: log.info("✅ Этап 1 — ПРОЙДЕН")
 
+    # Этап 2: Подключение к бирже
     log.info("\n▶ Этап 2: Подключение к бирже...")
     try:
         b = exchange.fetch_balance({"type": "linear"})
         usdt_free = float(b.get("USDT", {}).get("free", 0))
         usdt_total = float(b.get("USDT", {}).get("total", 0))
-        log.info(f"Подключение OK | Свободно: {usdt_free:.4f} USDT | Всего: {usdt_total:.4f} USDT")
+        log.info(f"✅ Подключение OK | Свободно: {usdt_free:.4f} USDT | Всего: {usdt_total:.4f} USDT")
         if usdt_free < MIN_BALANCE:
             log.warning(f"⚠️ Свободный баланс {usdt_free:.2f} < {MIN_BALANCE} USDT (возможны открытые позиции)")
-        log.info("✅ Этап 2 — ПРОЙДЕН")
     except Exception as e:
         log.error(f"❌ Ошибка подключения: {e}")
         все_ок = False
 
+    # Этап 3: Конфигурация
     log.info("\n▶ Этап 3: Конфигурация...")
     rr = TP_PERCENT / SL_PERCENT
     if rr < 1.5:
         log.error(f"❌ RR {rr:.1f}:1 < 1.5:1")
         все_ок = False
-    if MIN_SCORE < 50:
-        log.error(f"❌ MIN_SCORE={MIN_SCORE} < 50")
+    if MIN_SCORE < 70:
+        log.error(f"❌ MIN_SCORE={MIN_SCORE} < 70")
         все_ок = False
-    log.info(f"Конфигурация: TP={TP_PERCENT}% | SL={SL_PERCENT}% | RR={rr:.1f}:1")
-    log.info(f"  MIN_SCORE={MIN_SCORE} | SCAN_INTERVAL={SCAN_INTERVAL}с ✅")
-    log.info("✅ Этап 3 — ПРОЙДЕН")
+    log.info(f"✅ Конфигурация: TP={TP_PERCENT}% | SL={SL_PERCENT}% | RR={rr:.1f}:1")
+    log.info(f"   MIN_SCORE={MIN_SCORE} | SCAN_INTERVAL={SCAN_INTERVAL}с")
 
+    # Этап 4: Доступность рынка
     log.info("\n▶ Этап 4: Доступность рынка...")
     доступные = 0
     for sym in SYMBOLS[:5]:
@@ -1572,27 +1663,21 @@ def запустить_предстартовую_проверку() -> bool:
             ticker = exchange.fetch_ticker(sym)
             if float(ticker["last"]) > 0: доступные += 1
         except: pass
-    log.info(f"Рынок: {доступные}/5 тестовых пар доступны")
-    if доступные == 0:
-        log.error("❌ Ни одна тестовая пара не доступна")
-        все_ок = False
-    else:
-        log.info("✅ Этап 4 — ПРОЙДЕН")
+    log.info(f"✅ Рынок: {доступные}/5 тестовых пар доступны")
 
+    # Этап 5: Открытые позиции
     log.info("\n▶ Этап 5: Открытые позиции...")
     проверить_и_подхватить_позиции()
     история = загрузить_историю()
-    log.info(f"История: {len(история)} сделок в базе")
-    log.info(f"  Лимит попыток на монету: {SYMBOL_MAX_FAIL_ATTEMPTS} | Блок: {SYMBOL_BLOCK_AFTER_FAIL} мин")
-    log.info("✅ Этап 5 — ПРОЙДЕН")
+    log.info(f"✅ История: {len(история)} сделок в базе")
 
     log.info("")
-    log.info("=" * 65)
+    log.info("=" * 70)
     if все_ок:
-        log.info("✅ ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ — БОТ ЗАПУСКАЕТСЯ")
+        log.info("✅ ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ — БОТ ЗАПУСКАЕТСЯ (v11.0)")
     else:
         log.error("❌ КРИТИЧЕСКИЕ ОШИБКИ — ПРОВЕРЬТЕ .env И ПАРАМЕТРЫ")
-    log.info("=" * 65)
+    log.info("=" * 70)
     log.info("")
     return все_ок
 
@@ -1618,22 +1703,17 @@ def main():
     сохранить_состояние()
 
     log.info("")
-    log.info("=" * 65)
-    log.info("🤖 ГИБРИДНЫЙ ФЬЮЧЕРСНЫЙ БОТ v10.4 (ЧАСТЫЕ СДЕЛКИ)")
+    log.info("=" * 70)
+    log.info("🤖 ГИБРИДНЫЙ БОТ v11.0 (УЛУЧШЕННЫЙ ВЫХОД)")
     log.info(f"  Плечо: {LEVERAGE}x | RR: {TP_PERCENT}/{SL_PERCENT} ({TP_PERCENT/SL_PERCENT:.1f}:1)")
     log.info(f"  Баланс: {баланс_сейчас:.4f} USDT (полный)")
     log.info(f"  Свободно: {баланс_usdt():.4f} USDT")
     log.info(f"  MIN_SCORE: {MIN_SCORE} | SCAN_INTERVAL: {SCAN_INTERVAL}с")
-    log.info(f"  Пар: {len(SYMBOLS)} | Квантовый анализ: {'ВКЛ' if QUANT_ENABLED else 'ВЫКЛ'}")
-    log.info(f"  Order Flow: {'ВКЛ' if ORDER_FLOW_ENABLED else 'ВЫКЛ'}")
-    log.info(f"  Лимит попыток на монету: {SYMBOL_MAX_FAIL_ATTEMPTS} → блок {SYMBOL_BLOCK_AFTER_FAIL} мин")
-    log.info("=" * 65)
+    log.info(f"  Exit Signal Check: каждые {EXIT_SIGNAL_CHECK_INTERVAL} сек")
+    log.info("=" * 70)
     log.info("")
 
-    # Заблокированные символы: {symbol: timestamp_разблокировки}
-    заблокированные: Dict[str, float] = {"ATOM/USDT:USDT": time.time() + 24 * 3600}  # Блокировка ATOM на 24 часа
-
-    # Счётчик проваленных входов: {symbol: количество_провалов}
+    заблокированные: Dict[str, float] = {}
     fail_attempts: Dict[str, int] = {}
 
     while True:
@@ -1645,6 +1725,7 @@ def main():
             свободный = баланс_usdt()
             обновить_начало_дня(баланс)
 
+            # Проверка баланса
             if свободный < MIN_BALANCE:
                 активные = получить_позиции()
                 if активные:
@@ -1655,6 +1736,7 @@ def main():
                 time.sleep(300)
                 continue
 
+            # Проверка просадки
             if stats["депозит_старт"] > 0:
                 просадка = (stats["депозит_старт"] - баланс) / stats["депозит_старт"] * 100
                 if просадка > MAX_DRAWDOWN_PCT:
@@ -1662,16 +1744,19 @@ def main():
                     time.sleep(3600)
                     continue
 
+            # Проверка дневного лимита
             if превышен_дневной_лимит():
                 log.warning(f"⛔ Дневной лимит. Пауза {DAILY_LOSS_PAUSE_SEC//60} мин.")
                 time.sleep(DAILY_LOSS_PAUSE_SEC)
                 continue
 
+            # Проверка времени
             if not торговля_разрешена_по_времени():
                 log.info("🕐 Заблокировано по времени. Пауза 1 мин.")
                 time.sleep(60)
                 continue
 
+            # Проверка SL streak
             if stats.get("sl_streak", 0) >= SL_STREAK_LIMIT:
                 log.warning(f"🧊 {SL_STREAK_LIMIT} SL подряд — cooldown {SL_STREAK_PAUSE//60} мин.")
                 stats["sl_streak"] = 0
@@ -1679,18 +1764,19 @@ def main():
                 time.sleep(SL_STREAK_PAUSE + SL_STREAK_EXTRA_PAUSE)
                 continue
 
+            # Проверка открытых позиций
             активные = получить_позиции()
             if активные:
                 log.info(f"⏳ Открытые позиции: {[p['symbol'] for p in активные]} — ждём")
                 time.sleep(30)
                 continue
 
-            # --- СКАНИРОВАНИЕ ЛОНГОВ И ШОРТОВ ---
+            # --- СКАНИРОВАНИЕ ---
             log.info(f"── Сканирование {len(SYMBOLS)} пар (баланс={свободный:.2f}U | порог={MIN_SCORE}) ──")
             scores_long = {}
             scores_short = {}
 
-            # Сканирование лонгов (без фильтра тренд_4h)
+            # Сканирование лонгов
             for sym in SYMBOLS:
                 if sym in заблокированные:
                     if time.time() < заблокированные[sym]:
@@ -1704,13 +1790,57 @@ def main():
                 if res["score"] < MIN_SCORE:
                     continue
 
+                # Применяем корректировку по Bybit ratio
                 ai_score = применить_ai_корректировку(res["score"], sym)
                 res["score_final"] = ai_score
-                scores_long[sym] = res
+
+                # Фильтры
                 det = res.get("details", {})
+                sr_info = res.get("sr", {})
+
+                # 1. Фильтр на противоречие MACD vs Supertrend
+                if det.get("macd") == "медвежий" and det.get("supertrend") == "вверх":
+                    log.info(f"⚠️ Противоречие MACD vs Supertrend — пропуск {sym.split(':')[0]}")
+                    continue
+
+                # 2. Фильтр на ADX (слабый тренд)
+                if det.get("adx", 0) < 20:
+                    log.info(f"⚠️ Слабый тренд (ADX={det.get('adx',0)}) — пропуск {sym.split(':')[0]}")
+                    continue
+
+                # 3. Фильтр на объём
+                if det.get("объём_ratio", 0) < MIN_VOLUME_RATIO:
+                    log.info(f"⚠️ Низкий объём (ratio={det.get('объём_ratio',0)}) — пропуск {sym.split(':')[0]}")
+                    continue
+
+                # 4. Фильтр на боковик
+                rsi_val = float(det.get("rsi", 50))
+                if 40 <= rsi_val <= 60 and det.get("adx", 0) < 25:
+                    log.info(f"⚠️ Боковик (RSI={rsi_val}, ADX={det.get('adx',0)}) — пропуск {sym.split(':')[0]}")
+                    continue
+
+                # 5. Фильтр на S/R (сопротивление слишком близко)
+                if sr_info.get("near_resistance") and sr_info.get("dist_to_res_pct", 99) < SR_BLOCK_DIST_PCT:
+                    log.info(f"⛔ {sym.split(':')[0]}: сопротивление {sr_info.get('dist_to_res_pct',0):.2f}% — пропуск")
+                    continue
+
+                # 6. Фильтр на RSI (перекупленность)
+                if rsi_val > 70 and not sr_info.get("near_support"):
+                    log.info(f"⚠️ {sym.split(':')[0]}: RSI={rsi_val:.1f} перекуплен — пропуск")
+                    continue
+
+                # 7. Фильтр на MA кроссовер
+                if MA_CROSSOVER_ENABLED and not det.get("ma_cross", True):
+                    continue
+
+                # 8. Фильтр на Volume Spike
+                if not det.get("vol_spike_ok", True):
+                    continue
+
+                scores_long[sym] = res
                 log.debug(f"Лонг {sym.split(':')[0]:12s} скор={ai_score:3.0f}/100 rsi={det.get('rsi', '?')} st={det.get('supertrend', '?')}")
 
-            # Сканирование шортов (без блокировки по Bybit ratio)
+            # Сканирование шортов
             for sym in SYMBOLS:
                 if sym in заблокированные:
                     continue
@@ -1720,10 +1850,54 @@ def main():
                 if short_res["score"] < MIN_SCORE:
                     continue
 
+                # Применяем корректировку по Bybit ratio
                 ai_score = применить_ai_корректировку_шорт(short_res["score"], sym)
                 short_res["score_final"] = ai_score
-                scores_short[sym] = short_res
+
+                # Фильтры для шортов
                 det = short_res.get("details", {})
+                sr_info = short_res.get("sr", {})
+
+                # 1. Противоречие MACD vs Supertrend
+                if det.get("macd") == "бычий" and det.get("supertrend") == "вниз":
+                    log.info(f"⚠️ Противоречие MACD vs Supertrend — пропуск {sym.split(':')[0]}")
+                    continue
+
+                # 2. ADX
+                if det.get("adx", 0) < 20:
+                    log.info(f"⚠️ Слабый тренд (ADX={det.get('adx',0)}) — пропуск {sym.split(':')[0]}")
+                    continue
+
+                # 3. Объём
+                if det.get("объём_ratio", 0) < MIN_VOLUME_RATIO:
+                    log.info(f"⚠️ Низкий объём (ratio={det.get('объём_ratio',0)}) — пропуск {sym.split(':')[0]}")
+                    continue
+
+                # 4. Боковик
+                rsi_val = float(det.get("rsi", 50))
+                if 40 <= rsi_val <= 60 and det.get("adx", 0) < 25:
+                    log.info(f"⚠️ Боковик (RSI={rsi_val}, ADX={det.get('adx',0)}) — пропуск {sym.split(':')[0]}")
+                    continue
+
+                # 5. S/R (поддержка слишком близко)
+                if sr_info.get("near_support") and sr_info.get("dist_to_sup_pct", 99) < SR_BLOCK_DIST_PCT:
+                    log.info(f"⛔ {sym.split(':')[0]}: поддержка {sr_info.get('dist_to_sup_pct',0):.2f}% — пропуск")
+                    continue
+
+                # 6. RSI (перепроданность)
+                if rsi_val < 30 and not sr_info.get("near_resistance"):
+                    log.info(f"⚠️ {sym.split(':')[0]}: RSI={rsi_val:.1f} перепродан — пропуск")
+                    continue
+
+                # 7. MA кроссовер
+                if MA_CROSSOVER_ENABLED and not det.get("ma_cross", True):
+                    continue
+
+                # 8. Volume Spike
+                if not det.get("vol_spike_ok", True):
+                    continue
+
+                scores_short[sym] = short_res
                 log.debug(f"Шорт {sym.split(':')[0]:12s} скор={ai_score:3.0f}/100 rsi={det.get('rsi', '?')} st={det.get('supertrend', '?')}")
 
             # --- ВЫБОР ЛУЧШЕГО КАНДИДАТА ---
@@ -1749,22 +1923,6 @@ def main():
                 sr_info = данные.get("sr", {})
                 det = данные.get("details", {})
 
-                # Проверка S/R
-                if sr_info.get("near_resistance") and sr_info.get("dist_to_res_pct", 99) < SR_BLOCK_DIST_PCT:
-                    log.info(f"⛔ {лучшая.split(':')[0]}: сопротивление {sr_info.get('dist_to_res_pct',0):.2f}% — пропуск")
-                    continue
-
-                # Проверка RSI (не блокируем, если у поддержки)
-                rsi_val = float(det.get("rsi", 50) or 50)
-                if rsi_val > 70 and not sr_info.get("near_support"):
-                    log.info(f"⚠️ {лучшая.split(':')[0]}: RSI={rsi_val:.1f} перекуплен — пропуск")
-                    continue
-
-                if MA_CROSSOVER_ENABLED and not det.get("ma_cross", True):
-                    continue
-                if not det.get("vol_spike_ok", True):
-                    continue
-
                 выбрана = лучшая
                 side = "long"
                 log.info(f"► Выбрана {лучшая.split(':')[0]} ({side}) скор={фин_скор} цена={цена:.8f}")
@@ -1777,22 +1935,6 @@ def main():
                     цена = данные["price"]
                     sr_info = данные.get("sr", {})
                     det = данные.get("details", {})
-
-                    # Проверка S/R
-                    if sr_info.get("near_support") and sr_info.get("dist_to_sup_pct", 99) < SR_BLOCK_DIST_PCT:
-                        log.info(f"⛔ {лучшая.split(':')[0]}: поддержка {sr_info.get('dist_to_sup_pct',0):.2f}% — пропуск")
-                        continue
-
-                    # Проверка RSI (не блокируем, если у сопротивления)
-                    rsi_val = float(det.get("rsi", 50) or 50)
-                    if rsi_val < 30 and not sr_info.get("near_resistance"):
-                        log.info(f"⚠️ {лучшая.split(':')[0]}: RSI={rsi_val:.1f} перепродан — пропуск")
-                        continue
-
-                    if MA_CROSSOVER_ENABLED and not det.get("ma_cross", True):
-                        continue
-                    if not det.get("vol_spike_ok", True):
-                        continue
 
                     выбрана = лучшая
                     side = "short"
@@ -1838,8 +1980,9 @@ def main():
             real_rr = abs(tp_цена - цена) / abs(цена - sl_цена) if abs(цена - sl_цена) > 0 else 0
             log.info(f"📐 ATR={atr_пт/цена*100:.2f}% SL={sl_dist_pct:.2f}% RR={real_rr:.1f}:1")
 
-            if real_rr < 1.5:
-                log.warning(f"⛔ RR={real_rr:.1f}:1 < 1.5:1 — пропуск {выбрана.split(':')[0]}")
+            # Проверка минимального RR
+            if real_rr < 2.0:  # Повысили минимальный RR до 2:1
+                log.warning(f"⛔ RR={real_rr:.1f}:1 < 2.0:1 — пропуск {выбрана.split(':')[0]}")
                 time.sleep(10)
                 continue
 
@@ -1934,11 +2077,11 @@ def main():
             детальный_отчёт_сделки(запись)
             сохранить_состояние()
 
-            log.info("Сделка завершена — пауза 30 сек")
+            log.info("✅ Сделка завершена — пауза 30 сек")
             time.sleep(30)
 
         except Exception as e:
-            log.error(f"Глобальная ошибка главного цикла: {e}", exc_info=True)
+            log.error(f"💥 Глобальная ошибка главного цикла: {e}", exc_info=True)
             time.sleep(30)
 
 if __name__ == "__main__":
