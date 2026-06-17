@@ -58,8 +58,8 @@ TIMEFRAME_4H      = "4h"
 SCAN_INTERVAL     = 300
 
 # --- ПОРОГИ ---
-MIN_SCORE                 = 78
-ENTRY_CONFIRM_MIN_SCORE   = 72
+MIN_SCORE                 = 58
+ENTRY_CONFIRM_MIN_SCORE   = 52
 SIMULATOR_MIN_WIN_RATE    = 0.55   # симулятор: мин. исторический WR для входа
 SIMULATOR_LOOKBACK        = 30     # свечей для бэктеста симулятора
 
