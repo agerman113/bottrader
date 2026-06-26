@@ -9,6 +9,7 @@
 import os
 import time
 import logging
+import threading
 import ccxt
 import pandas as pd
 from dotenv import load_dotenv
@@ -27,6 +28,8 @@ STOP_LOSS_PERCENT   = 0.25             # SL в %
 TAKE_PROFIT_PERCENT = 1.0              # TP в %
 LEVERAGE            = 1                # Плечо (1x = без плеча)
 CHECK_INTERVAL      = 60               # Пауза между проверками (сек)
+
+RSI_MONITOR_INTERVAL = 10              # Мониторинг RSI каждые 10 сек
 
 # Параметры адаптивного периода
 PERIODS_TO_TEST     = [7, 10, 14, 21, 30]
@@ -258,6 +261,60 @@ def find_best_rsi_period(
         return default
 
 # ============================================================
+#              ФОНОВЫЙ МОНИТОРИНГ RSI (каждые 10 сек)
+# ============================================================
+
+# Разделяемое состояние между потоками
+_monitor_state = {
+    "period": 14,
+    "active": True,
+}
+
+def rsi_monitor() -> None:
+    """
+    Фоновый поток: каждые 10 секунд получает текущую цену и RSI
+    (включая незакрытую свечу) и выводит наглядный статус.
+    """
+    def bar(value: float, width: int = 20) -> str:
+        """Текстовая шкала 0–100."""
+        filled = int(value / 100 * width)
+        return "[" + "█" * filled + "░" * (width - filled) + "]"
+
+    while _monitor_state["active"]:
+        try:
+            period = _monitor_state["period"]
+
+            # Берём свежие свечи БЕЗ отбрасывания последней (нужна текущая цена)
+            raw = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=period + 10)
+            df  = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+            rsi     = calculate_rsi(df["close"], period)
+            rsi_val = rsi.iloc[-1]
+            price   = df["close"].iloc[-1]
+
+            if rsi_val <= RSI_OVERSOLD:
+                zone = "🔵 ПЕРЕПРОДАННОСТЬ — жди сигнал ЛОНГ"
+            elif rsi_val >= RSI_OVERBOUGHT:
+                zone = "🔴 ПЕРЕКУПЛЕННОСТЬ — жди сигнал ШОРТ"
+            elif rsi_val < 40:
+                zone = "🟡 Зона слабости"
+            elif rsi_val > 60:
+                zone = "🟠 Зона силы"
+            else:
+                zone = "⚪ Нейтральная зона"
+
+            log.info(
+                f"📊 RSI={rsi_val:5.1f} {bar(rsi_val)}  "
+                f"Цена={price:.2f}  {zone}  (период={period})"
+            )
+
+        except Exception as e:
+            log.debug(f"Монитор RSI: {e}")
+
+        time.sleep(RSI_MONITOR_INTERVAL)
+
+
+# ============================================================
 #                        ОСНОВНАЯ ЛОГИКА
 # ============================================================
 
@@ -271,6 +328,11 @@ def main() -> None:
 
     # Устанавливаем плечо один раз при старте
     set_leverage_once(SYMBOL, LEVERAGE)
+
+    # Запускаем фоновый мониторинг RSI
+    monitor_thread = threading.Thread(target=rsi_monitor, daemon=True)
+    monitor_thread.start()
+    log.info(f"👁 Мониторинг RSI запущен (каждые {RSI_MONITOR_INTERVAL} сек)")
 
     current_period = 14
     last_optimize  = 0.0
@@ -291,6 +353,7 @@ def main() -> None:
                 )
                 last_optimize = time.time()
                 log.info(f"✅ Используемый период RSI: {current_period}")
+                _monitor_state["period"] = current_period  # синхронизируем с монитором
 
             # ── 2. Проверяем открытую позицию (источник правды — биржа) ────
             # FIX: нет локального флага in_position, всегда спрашиваем биржу
