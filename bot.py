@@ -2,12 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-АВТОНОМНЫЙ БОТ: СКАНЕР МОНЕТ + RSI + НЕЙРОСЕТЬ + БАЛЛЫ
-- Реальная торговля (LIVE_TRADING = True)
-- Сканирует топ-30 монет по объёму, отбирает с ATR ≥ 0.5%
-- Нейросеть с адаптивным порогом уверенности
-- Динамические TP/SL (соотношение 1:4 относительно волатильности)
-- Торгует на весь свободный баланс
+ГИБРИДНЫЙ БОТ: SuperTrend + RSI + НЕЙРОСЕТЬ + БАЛЛЫ
+- Первые 10 минут: гарантированная сделка для обучения (макс. риск)
+- Последующие сделки: уменьшаемый риск, трендовый фильтр, адаптивная нейросеть
+- Сканер волатильных монет
+- Динамические TP/SL
 """
 
 import os
@@ -24,13 +23,13 @@ load_dotenv()
 # ============================================================
 #                 КОНФИГУРАЦИЯ
 # ============================================================
-FIXED_SYMBOL        = ""               # Оставьте пустым для авто-сканирования
-TIMEFRAME           = "1m"             # Таймфрейм торговли
-SCAN_TIMEFRAME      = "5m"             # ТФ для сканера
+FIXED_SYMBOL        = ""
+TIMEFRAME           = "1m"
+SCAN_TIMEFRAME      = "5m"
 LEVERAGE            = 1
-STOP_LOSS_PERCENT   = 0.25             # Базовый SL (будет масштабирован ATR)
-TAKE_PROFIT_PERCENT = 1.0              # Базовый TP (будет масштабирован ATR)
-LIVE_TRADING        = True             # Реальная торговля
+STOP_LOSS_PERCENT   = 0.25
+TAKE_PROFIT_PERCENT = 1.0
+LIVE_TRADING        = True
 
 # Система баллов
 SCORE_WIN           = 2
@@ -53,16 +52,25 @@ NN_EPOCHS           = 30
 NN_BATCH_SIZE       = 16
 NN_RETRAIN_INTERVAL = 1800
 NN_LOOKBACK         = 500
-NN_CONFIDENCE_MIN   = 0.6              # Базовый порог уверенности (адаптивный)
+NN_CONFIDENCE_MIN   = 0.6
 
 # Сканер монет
 SCAN_TOP_N          = 30
 SCAN_INTERVAL       = 14400
 SCAN_BARS           = 60
 MIN_VOLUME_USDT     = 5_000_000
-MIN_ATR_PCT         = 0.5              # Минимальная волатильность для торговли
+MIN_ATR_PCT         = 0.5
 SCAN_RSI_OVERSOLD   = 20
 SCAN_RSI_OVERBOUGHT = 80
+
+# SuperTrend параметры
+SUPERTREND_ATR_PERIOD = 10
+SUPERTREND_MULTIPLIER = 3.0
+
+# Управление риском
+INITIAL_RISK_FRACTION = 1.0       # первая сделка на 100% депозита
+RISK_REDUCTION_STEP   = 0.2       # каждая следующая сделка уменьшает долю на 20%
+MIN_RISK_FRACTION     = 0.1       # минимальная доля депозита
 
 # ============================================================
 #                        ЛОГИРОВАНИЕ
@@ -73,10 +81,10 @@ logging.basicConfig(
     datefmt="%d.%m.%Y %H:%M:%S",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("neuro_rsi_live.log", encoding="utf-8"),
+        logging.FileHandler("hybrid_bot.log", encoding="utf-8"),
     ],
 )
-log = logging.getLogger("NeuroRSILive")
+log = logging.getLogger("HybridBot")
 
 # ============================================================
 #                    НЕЙРОСЕТЕВОЙ ПРЕДИКТОР
@@ -151,9 +159,9 @@ class NeuralPredictor:
         return self.forward(X)
 
 # ============================================================
-#             ОСНОВНОЙ КЛАСС БОТА
+#             ГИБРИДНЫЙ БОТ
 # ============================================================
-class LiveBot:
+class HybridBot:
     def __init__(self):
         self.symbol = None
         self.timeframe = TIMEFRAME
@@ -175,6 +183,9 @@ class LiveBot:
         self.adaptive_confidence = NN_CONFIDENCE_MIN
         self.last_signal_time = time.time()
 
+        # SuperTrend состояние
+        self.supertrend_direction = "neutral"  # "bullish", "bearish", "neutral"
+
         self.exchange = ccxt.bybit({
             "apiKey": os.getenv("BYBIT_API_KEY"),
             "secret": os.getenv("BYBIT_API_SECRET"),
@@ -187,6 +198,11 @@ class LiveBot:
         self._last_status_time = 0
         self._last_stat_time = 0
         self.active_trade = None
+
+        # Первая сделка / риск
+        self.start_time = time.time()
+        self.first_trade_done = False
+        self.risk_fraction = INITIAL_RISK_FRACTION
 
     # ---------- получение свечей ----------
     def fetch_ohlcv(self, symbol, timeframe, limit=150):
@@ -208,12 +224,47 @@ class LiveBot:
         rs = avg_gain / avg_loss.replace(0, float('nan'))
         return 100 - (100 / (1 + rs))
 
-    # ---------- обновление ATR ----------
+    # ---------- SuperTrend ----------
+    @staticmethod
+    def calculate_supertrend(df, period=10, multiplier=3.0):
+        """Возвращает последнее направление: 'bullish', 'bearish' или 'neutral'"""
+        if len(df) < period:
+            return "neutral"
+        high = df['high'].values
+        low = df['low'].values
+        close = df['close'].values
+
+        # ATR через EMA (как в Pine)
+        tr = np.maximum(high - low, np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1)))
+        tr[0] = high[0] - low[0]
+        atr = pd.Series(tr).ewm(alpha=1/period, adjust=False).mean().values
+
+        # Базовые линии
+        upper_band = (high + low) / 2 + multiplier * atr
+        lower_band = (high + low) / 2 - multiplier * atr
+
+        direction = np.zeros(len(close))
+        supertrend = np.zeros(len(close))
+        for i in range(1, len(close)):
+            if close[i] > supertrend[i-1]:
+                supertrend[i] = max(lower_band[i], supertrend[i-1])
+                direction[i] = 1  # bullish
+            else:
+                supertrend[i] = min(upper_band[i], supertrend[i-1])
+                direction[i] = -1  # bearish
+            if supertrend[i-1] == 0:
+                supertrend[i] = lower_band[i] if close[i] > lower_band[i] else upper_band[i]
+                direction[i] = 1 if close[i] > lower_band[i] else -1
+
+        # Обновляем последнее состояние
+        if len(direction) == 0:
+            return "neutral"
+        return "bullish" if direction[-1] == 1 else "bearish"
+
     def update_atr(self, df, window=20):
         if len(df) < window:
             return
-        atr_pct = ((df['high'] - df['low']) / df['close']).tail(window).mean()
-        self.current_atr = atr_pct
+        self.current_atr = ((df['high'] - df['low']) / df['close']).tail(window).mean()
 
     # ---------- сканер монет ----------
     def score_symbol(self, symbol, period=14):
@@ -315,7 +366,6 @@ class LiveBot:
             df[f'close_lag_{lag}'] = close.shift(lag)
         return df.dropna()
 
-    # ---------- обучение нейросети ----------
     def train_nn(self, df):
         if len(df) < 200:
             return False
@@ -339,7 +389,6 @@ class LiveBot:
         log.info(f"🧠 Нейросеть обучена на {len(X)} примерах")
         return True
 
-    # ---------- предсказание нейросети ----------
     def nn_predict(self, df):
         if not self.nn_trained or self.nn is None:
             return 0.5
@@ -355,21 +404,24 @@ class LiveBot:
             return 0.5
         return self.nn.predict_proba(last_scaled)[0][0]
 
-    # ---------- адаптивный порог уверенности ----------
     def update_adaptive_confidence(self):
-        """Снижает порог уверенности нейросети, если 15 минут нет сигналов."""
-        if time.time() - self.last_signal_time > 900:
-            if self.adaptive_confidence > 0.3:
-                self.adaptive_confidence = max(0.3, self.adaptive_confidence - 0.1)
-                log.info(f"⚠️ Нет сигналов 15 мин, порог NN снижен до {self.adaptive_confidence:.2f}")
-        else:
-            if self.adaptive_confidence < NN_CONFIDENCE_MIN:
-                self.adaptive_confidence = min(NN_CONFIDENCE_MIN, self.adaptive_confidence + 0.05)
+        if self.first_trade_done:
+            if time.time() - self.last_signal_time > 900:
+                if self.adaptive_confidence > 0.3:
+                    self.adaptive_confidence = max(0.3, self.adaptive_confidence - 0.1)
+                    log.info(f"⚠️ Нет сигналов 15 мин, порог NN снижен до {self.adaptive_confidence:.2f}")
+            else:
+                if self.adaptive_confidence < NN_CONFIDENCE_MIN:
+                    self.adaptive_confidence = min(NN_CONFIDENCE_MIN, self.adaptive_confidence + 0.05)
 
-    # ---------- сигнал RSI с фильтром нейросети ----------
-    def get_signal(self, df, mode):
+    # ---------- сигнал RSI с фильтром SuperTrend и нейросети ----------
+    def get_signal(self, df, mode, forced=False):
+        """
+        forced=True: игнорирует все фильтры (для первой сделки).
+        """
         if len(df) < mode["period"] + 2:
             return None, None
+
         close = df["close"]
         rsi_series = self.calculate_rsi(close, mode["period"])
         rsi_val = rsi_series.iloc[-1]
@@ -379,31 +431,45 @@ class LiveBot:
         elif rsi_series.iloc[-2] >= mode["overbought"] and rsi_series.iloc[-1] < mode["overbought"]:
             signal = "short"
 
-        proba = self.nn_predict(df) if signal else None
-        if signal:
-            if signal == "long" and proba is not None and proba < self.adaptive_confidence:
-                log.debug(f"Нейросеть против long (p={proba:.2f}, порог={self.adaptive_confidence:.2f})")
-                signal = None
-            elif signal == "short" and proba is not None and proba > (1 - self.adaptive_confidence):
-                log.debug(f"Нейросеть против short (p={proba:.2f}, порог={self.adaptive_confidence:.2f})")
-                signal = None
-            else:
-                self.last_signal_time = time.time()
+        if signal and not forced:
+            # Трендовый фильтр SuperTrend (после первой сделки)
+            if self.first_trade_done:
+                if signal == "long" and self.supertrend_direction == "bearish":
+                    log.debug("Long заблокирован: медвежий тренд по SuperTrend")
+                    signal = None
+                elif signal == "short" and self.supertrend_direction == "bullish":
+                    log.debug("Short заблокирован: бычий тренд по SuperTrend")
+                    signal = None
+
+            # Нейросетевой фильтр (если не принудительно)
+            if signal:
+                proba = self.nn_predict(df)
+                if signal == "long" and proba is not None and proba < self.adaptive_confidence:
+                    signal = None
+                elif signal == "short" and proba is not None and proba > (1 - self.adaptive_confidence):
+                    signal = None
+                else:
+                    self.last_signal_time = time.time()
+
         return signal, rsi_val
 
-    # ---------- открытие реальной позиции ----------
-    def open_real_position(self, signal, current_price):
+    def open_real_position(self, signal, current_price, risk_override=None):
+        """
+        risk_override: доля депозита (0..1). Если None, используется self.risk_fraction.
+        """
+        fraction = risk_override if risk_override is not None else self.risk_fraction
         try:
             free_balance = self.exchange.fetch_balance()["USDT"]["free"]
         except:
             log.error("Не удалось получить баланс")
             return False
 
-        if free_balance <= 0:
-            log.warning("Баланс нулевой")
+        available = free_balance * fraction
+        if available <= 0:
+            log.warning("Нулевой баланс для сделки")
             return False
 
-        raw_size = free_balance / current_price
+        raw_size = available / current_price
         market = self.exchange.market(self.symbol)
         min_amt = float((market.get("limits") or {}).get("amount", {}).get("min") or 0)
         min_cost = float((market.get("limits") or {}).get("cost", {}).get("min") or 0)
@@ -420,11 +486,10 @@ class LiveBot:
             log.warning("Объём после округления = 0")
             return False
 
-        # Динамические TP/SL (соотношение 1:4)
+        # Динамические TP/SL
         atr = self.current_atr if self.current_atr > 0 else 0.003
         tp_move = max(TAKE_PROFIT_PERCENT / 100, atr * 2)
         sl_move = max(STOP_LOSS_PERCENT / 100, atr * 0.5)
-        # соотношение = tp_move / sl_move ≈ 4 при любом atr
 
         if signal == "long":
             side = "buy"
@@ -446,14 +511,13 @@ class LiveBot:
                 amount=amount,
                 params={"takeProfit": tp_price, "stopLoss": sl_price}
             )
-            log.info(f"✅ Открыта позиция {signal.upper()} {amount} @ ~{current_price:.4f} TP={tp_price:.4f}({tp_move*100:.2f}%) SL={sl_price:.4f}({sl_move*100:.2f}%)")
+            log.info(f"✅ Открыта позиция {signal.upper()} {amount} @ ~{current_price:.4f} TP={tp_price:.4f} SL={sl_price:.4f} | риск {fraction*100:.0f}%")
             self.active_trade = {"side": signal, "entry_price": current_price}
             return True
         except Exception as e:
             log.error(f"Ошибка открытия позиции: {e}")
             return False
 
-    # ---------- проверка позиции ----------
     def check_position(self):
         try:
             positions = self.exchange.fetch_positions([self.symbol])
@@ -464,7 +528,6 @@ class LiveBot:
             log.error(f"Ошибка получения позиции: {e}")
         return None
 
-    # ---------- адаптация стиля ----------
     def adapt_mode(self):
         if self.total_trades < MIN_TRADES_FOR_ADAPT:
             return
@@ -478,7 +541,6 @@ class LiveBot:
             log.info(f"🔄 Смена стиля: {old} → {new} (средний балл: {self.mode_stats[best_idx]['avg']:.2f})")
             self.active_mode_idx = best_idx
 
-    # ---------- начисление баллов ----------
     def add_trade_result(self, exit_type, entry_price, exit_price, side):
         if side == "long":
             profit_pct = (exit_price - entry_price) / entry_price * 100
@@ -493,7 +555,7 @@ class LiveBot:
             self.losses += 1
         else:
             tp_move = max(TAKE_PROFIT_PERCENT / 100, self.current_atr * 2)
-            if profit_pct >= tp_move * 50:   # половина TP
+            if profit_pct >= tp_move * 50:
                 score_delta = SCORE_PARTIAL_MOVE
             else:
                 score_delta = SCORE_TIMEOUT
@@ -505,16 +567,27 @@ class LiveBot:
         self.mode_stats[idx]['trades'] += 1
         self.mode_stats[idx]['score'] += score_delta
         log.info(f"🏁 Сделка закрыта ({exit_type}) {side.upper()} вход {entry_price:.4f} выход {exit_price:.4f} | прибыль {profit_pct:.2f}% | баллы: {score_delta:+d} (всего: {self.score})")
+
+        # После первой сделки: обучение нейросети, снижение риска
+        if not self.first_trade_done:
+            self.first_trade_done = True
+            # Онлайн-дообучение на последнем исходе
+            df_recent = self.fetch_ohlcv(self.symbol, self.timeframe, limit=200)
+            if not df_recent.empty:
+                self.train_nn(df_recent)
+            # Уменьшаем риск для следующих сделок
+            self.risk_fraction = max(MIN_RISK_FRACTION, self.risk_fraction - RISK_REDUCTION_STEP)
+            log.info(f"🔻 Риск снижен до {self.risk_fraction*100:.0f}% депозита")
+
         self.active_trade = None
         self.adapt_mode()
 
-    # ---------- статистика ----------
     def print_stats(self):
         win_rate = (self.wins / self.total_trades * 100) if self.total_trades > 0 else 0
         mode_name = MODES[self.active_mode_idx]['name']
         log.info(f"📊 СТАТИСТИКА | Режим: {mode_name} | Баллы: {self.score} | "
                  f"Сделок: {self.total_trades} (W:{self.wins} L:{self.losses} T:{self.timeouts}) | "
-                 f"Винрейт: {win_rate:.1f}% | Порог NN: {self.adaptive_confidence:.2f}")
+                 f"Винрейт: {win_rate:.1f}% | Порог NN: {self.adaptive_confidence:.2f} | Риск: {self.risk_fraction*100:.0f}%")
         for i, m in enumerate(MODES):
             s = self.mode_stats[i]
             if s['trades'] > 0:
@@ -522,7 +595,7 @@ class LiveBot:
 
     # ---------- главный цикл ----------
     def run(self):
-        log.info("🚀 Бот запущен в РЕАЛЬНОМ режиме")
+        log.info("🚀 Гибридный бот запущен (SuperTrend + RSI + NN)")
         if FIXED_SYMBOL:
             self.symbol = FIXED_SYMBOL
         else:
@@ -539,9 +612,13 @@ class LiveBot:
         if not df_hist.empty:
             self.train_nn(df_hist)
             self.update_atr(df_hist)
+            self.supertrend_direction = self.calculate_supertrend(df_hist)
+            log.info(f"SuperTrend начальный: {self.supertrend_direction}")
 
         self._last_status_time = time.time()
         self._last_stat_time = time.time()
+
+        FORCED_FIRST_TRADE_TIMEOUT = 9.5 * 60  # 9.5 минут
 
         while True:
             try:
@@ -564,6 +641,7 @@ class LiveBot:
                             if not df_hist.empty:
                                 self.train_nn(df_hist)
                                 self.update_atr(df_hist)
+                                self.supertrend_direction = self.calculate_supertrend(df_hist)
                     self.last_scan_time = now
 
                 if now - self._last_stat_time > 120:
@@ -573,6 +651,7 @@ class LiveBot:
                 df = self.fetch_ohlcv(self.symbol, self.timeframe, limit=200)
                 if not df.empty:
                     self.update_atr(df)
+                    self.supertrend_direction = self.calculate_supertrend(df)
 
                 # Проверка позиции
                 pos = self.check_position()
@@ -586,12 +665,13 @@ class LiveBot:
                     time.sleep(5)
                     continue
 
-                # Если позиция только что закрылась
+                # Закрытие позиции
                 if self.active_trade:
                     exit_price = df['close'].iloc[-1]
                     entry_price = self.active_trade['entry_price']
                     side = self.active_trade['side']
                     profit_pct = (exit_price - entry_price) / entry_price * 100 if side == "long" else (entry_price - exit_price) / entry_price * 100
+                    # Определяем тип выхода
                     tp_move = max(TAKE_PROFIT_PERCENT / 100, self.current_atr * 2)
                     sl_move = max(STOP_LOSS_PERCENT / 100, self.current_atr * 0.5)
                     if profit_pct >= tp_move * 50:
@@ -601,28 +681,50 @@ class LiveBot:
                     else:
                         exit_type = "timeout"
                     self.add_trade_result(exit_type, entry_price, exit_price, side)
-                    self.active_trade = None
+                    continue  # на следующей итерации проверим позицию заново
 
-                # Адаптивный порог и поиск сигнала
-                self.update_adaptive_confidence()
-                mode = MODES[self.active_mode_idx]
-                signal, rsi_val = self.get_signal(df, mode)
-                current_price = df['close'].iloc[-1]
+                # Первая сделка: форсированный вход
+                if not self.first_trade_done and (now - self.start_time < 600):
+                    mode = MODES[self.active_mode_idx]
+                    # Пытаемся получить сигнал с forced=True (без фильтров)
+                    signal, rsi_val = self.get_signal(df, mode, forced=True)
+                    current_price = df['close'].iloc[-1]
 
+                    if signal:
+                        log.info(f"🚀 Первая сделка: сигнал {signal.upper()} (без фильтров)")
+                        if LIVE_TRADING:
+                            self.open_real_position(signal, current_price, risk_override=1.0)
+                    elif now - self.start_time > FORCED_FIRST_TRADE_TIMEOUT:
+                        # Форсируем по SuperTrend
+                        if self.supertrend_direction == "bullish":
+                            force_signal = "long"
+                        elif self.supertrend_direction == "bearish":
+                            force_signal = "short"
+                        else:
+                            force_signal = "long"  # по умолчанию
+                        log.info(f"⏰ 9.5 мин без сигнала: форсированный вход {force_signal.upper()} по тренду SuperTrend")
+                        if LIVE_TRADING:
+                            self.open_real_position(force_signal, current_price, risk_override=1.0)
+
+                else:
+                    # Обычная торговля
+                    self.update_adaptive_confidence()
+                    mode = MODES[self.active_mode_idx]
+                    signal, rsi_val = self.get_signal(df, mode)
+                    current_price = df['close'].iloc[-1]
+
+                    if signal:
+                        log.info(f"📈 Сигнал {signal.upper()} (SuperTrend: {self.supertrend_direction})")
+                        if LIVE_TRADING:
+                            self.open_real_position(signal, current_price)
+
+                # Мониторинг
                 if now - self._last_status_time > 30:
                     proba = self.nn_predict(df)
                     log.info(f"👁 Мониторинг [{self.symbol}] Цена: {current_price:.4f} | RSI({mode['period']}): {rsi_val:.1f} | "
-                             f"NN proba: {proba:.2f} | Режим: {mode['name']} | Баллы: {self.score} | ATR: {self.current_atr*100:.2f}%")
+                             f"NN proba: {proba:.2f} | Режим: {mode['name']} | Баллы: {self.score} | ATR: {self.current_atr*100:.2f}% | "
+                             f"ST: {self.supertrend_direction} | Первая сделка: {'ожидание' if not self.first_trade_done else 'выполнена'} | Риск: {self.risk_fraction*100:.0f}%")
                     self._last_status_time = now
-
-                if signal:
-                    log.info(f"📈 Сигнал {signal.upper()} на {self.symbol}")
-                    if LIVE_TRADING:
-                        success = self.open_real_position(signal, current_price)
-                        if not success:
-                            log.warning("Не удалось открыть позицию")
-                    else:
-                        log.info("Симуляция: сигнал получен")
 
                 # Переобучение нейросети
                 if now - self.last_nn_train_time > NN_RETRAIN_INTERVAL:
@@ -642,5 +744,5 @@ class LiveBot:
                 time.sleep(5)
 
 if __name__ == "__main__":
-    bot = LiveBot()
+    bot = HybridBot()
     bot.run()
