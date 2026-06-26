@@ -2,18 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-АВТОНОМНЫЙ ТОРГОВЫЙ БОТ: RSI + НЕЙРОСЕТЬ + БАЛЛЫ
-- Частая торговля (1m/5m)
-- Адаптивный выбор агрессивности по баллам
-- Самообучение нейросети каждые 30 минут
-- Реальная торговля на Bybit (или симуляция)
+АВТОНОМНЫЙ БОТ: СКАНЕР МОНЕТ + RSI + НЕЙРОСЕТЬ + БАЛЛЫ
+- Сканирует топ-30 монет по объёму, выбирает лучшую для RSI-торговли
+- Нейросеть фильтрует сигналы, обучается под каждую монету
+- Система баллов и адаптация стиля (агрессивный/умеренный/консервативный)
+- Постоянная обратная связь
 """
 
 import os
 import time
 import logging
 import threading
-import datetime
 import numpy as np
 import ccxt
 import pandas as pd
@@ -25,18 +24,19 @@ load_dotenv()
 # ============================================================
 #                 КОНФИГУРАЦИЯ
 # ============================================================
-SYMBOL              = "BTC/USDT:USDT"   # торгуемая пара
-TIMEFRAME           = "1m"              # 1 минута для частой торговли
-INITIAL_CAPITAL     = 100               # стартовый депозит USDT
-LEVERAGE            = 1                 # без плеча
+FIXED_SYMBOL        = ""               # Оставьте пустым для авто-сканирования
+TIMEFRAME           = "1m"             # Таймфрейм торговли
+SCAN_TIMEFRAME      = "5m"             # Таймфрейм для сканера монет (оценка волатильности)
 STOP_LOSS_PERCENT   = 0.25
 TAKE_PROFIT_PERCENT = 1.0
-MONITOR_INTERVAL    = 10                # секунд между проверками (для симуляции)
-LIVE_TRADING        = False             # False = симуляция, True = реальные ордера
-SCORE_WIN           = 2                 # баллы за тейк-профит
-SCORE_LOSS          = -2                # баллы за стоп-лосс
-SCORE_TIMEOUT       = 0                 # баллы за тайм-аут
-MIN_TRADES_FOR_ADAPT = 5               # после скольки сделок начинаем адаптацию
+LEVERAGE            = 1
+LIVE_TRADING        = False            # Пока только симуляция
+
+# Система баллов
+SCORE_WIN           = 2
+SCORE_LOSS          = -2
+SCORE_TIMEOUT       = 0
+MIN_TRADES_FOR_ADAPT = 5
 
 # Режимы агрессивности RSI (период, пороги)
 MODES = [
@@ -45,14 +45,22 @@ MODES = [
     {"name": "Консервативный","period": 7, "oversold": 20, "overbought": 80},
 ]
 
-# Параметры нейросети
+# Нейросеть
 NN_HIDDEN           = 32
 NN_LEARNING_RATE    = 0.01
 NN_EPOCHS           = 30
 NN_BATCH_SIZE       = 16
-NN_RETRAIN_INTERVAL = 1800              # переобучение каждые 30 минут
-NN_LOOKBACK         = 500               # свечей для обучения
-NN_CONFIDENCE_MIN   = 0.6               # порог уверенности для фильтра
+NN_RETRAIN_INTERVAL = 1800            # переобучение каждые 30 мин
+NN_LOOKBACK         = 500
+NN_CONFIDENCE_MIN   = 0.6
+
+# Сканер монет
+SCAN_TOP_N          = 30
+SCAN_INTERVAL       = 14400           # каждые 4 часа
+SCAN_BARS           = 60              # свечей для оценки волатильности
+MIN_VOLUME_USDT     = 5_000_000       # мин. суточный объём
+SCAN_RSI_OVERSOLD   = 20              # пороги для подсчёта пересечений в сканере
+SCAN_RSI_OVERBOUGHT = 80
 
 # ============================================================
 #                        ЛОГИРОВАНИЕ
@@ -63,23 +71,21 @@ logging.basicConfig(
     datefmt="%d.%m.%Y %H:%M:%S",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("neuro_rsi_bot.log", encoding="utf-8"),
+        logging.FileHandler("neuro_rsi_scanner_bot.log", encoding="utf-8"),
     ],
 )
-log = logging.getLogger("NeuroRSIBot")
+log = logging.getLogger("NeuroRSIScanner")
 
 # ============================================================
 #                    НЕЙРОСЕТЕВОЙ ПРЕДИКТОР
 # ============================================================
 class NeuralPredictor:
     def __init__(self, input_size=10, hidden_size=32, output_size=1, lr=0.01):
-        # Xavier init
         self.W1 = np.random.randn(input_size, hidden_size) * np.sqrt(2. / input_size)
         self.b1 = np.zeros(hidden_size)
         self.W2 = np.random.randn(hidden_size, output_size) * np.sqrt(2. / hidden_size)
         self.b2 = np.zeros(output_size)
 
-        # Adam state
         self.m_W1, self.v_W1 = np.zeros_like(self.W1), np.zeros_like(self.W1)
         self.m_b1, self.v_b1 = np.zeros_like(self.b1), np.zeros_like(self.b1)
         self.m_W2, self.v_W2 = np.zeros_like(self.W2), np.zeros_like(self.W2)
@@ -95,7 +101,7 @@ class NeuralPredictor:
 
     def forward(self, X):
         self.z1 = X @ self.W1 + self.b1
-        self.a1 = np.maximum(0, self.z1)  # ReLU
+        self.a1 = np.maximum(0, self.z1)
         self.z2 = self.a1 @ self.W2 + self.b2
         self.a2 = self.sigmoid(self.z2)
         return self.a2
@@ -147,25 +153,22 @@ class NeuralPredictor:
 # ============================================================
 class AdaptiveScoreBot:
     def __init__(self):
-        self.symbol = SYMBOL
+        self.symbol = None
         self.timeframe = TIMEFRAME
-        self.balance = INITIAL_CAPITAL
-        self.position = 0          # 1 = long, -1 = short, 0 = none
-        self.entry_price = 0.0
+        self.balance = 100  # виртуальный баланс
         self.total_trades = 0
         self.wins = 0
         self.losses = 0
-        self.score = 0             # накопленные баллы
-        self.active_mode_idx = 0   # индекс текущего режима
+        self.timeouts = 0
+        self.score = 0
+        self.active_mode_idx = 0
         self.mode_stats = [{'trades': 0, 'score': 0, 'avg': 0} for _ in MODES]
 
-        # Нейросеть
         self.nn = None
         self.scaler = MinMaxScaler()
         self.nn_trained = False
         self.last_nn_train_time = 0
 
-        # Подключение к бирже (только для получения данных и реальных ордеров)
         self.exchange = ccxt.bybit({
             "apiKey": os.getenv("BYBIT_API_KEY"),
             "secret": os.getenv("BYBIT_API_SECRET"),
@@ -174,22 +177,107 @@ class AdaptiveScoreBot:
             "options": {"defaultType": "linear"},
         })
 
-        if LIVE_TRADING:
-            try:
-                self.exchange.set_leverage(LEVERAGE, self.symbol)
-            except Exception as e:
-                log.warning(f"Не удалось установить плечо: {e}")
+        self.virtual_trade = None
+        self.last_scan_time = 0
+        self._last_status_time = 0
+        self._last_stat_time = 0
 
-    # ---------- получение свечей ----------
-    def fetch_ohlcv(self, limit=150):
+        # Параметры сканера
+        self.scan_top_n = SCAN_TOP_N
+        self.scan_interval = SCAN_INTERVAL
+        self.scan_bars = SCAN_BARS
+        self.min_volume_usdt = MIN_VOLUME_USDT
+        self.scan_tf = SCAN_TIMEFRAME
+
+    # ---------- Вспомогательные функции для RSI и свечей ----------
+    def fetch_ohlcv(self, symbol, timeframe, limit=150):
         try:
-            raw = self.exchange.fetch_ohlcv(self.symbol, self.timeframe, limit=limit)
+            raw = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
             df = pd.DataFrame(raw, columns=["timestamp","open","high","low","close","volume"])
-            df = df.iloc[:-1].reset_index(drop=True)  # убираем незакрытую
-            return df
+            return df.iloc[:-1].reset_index(drop=True)  # убираем незакрытую свечу
         except Exception as e:
-            log.error(f"Ошибка получения свечей: {e}")
+            log.error(f"Ошибка получения свечей {symbol}: {e}")
             return pd.DataFrame()
+
+    @staticmethod
+    def calculate_rsi(close, period):
+        delta = close.diff()
+        gain = delta.clip(lower=0)
+        loss = (-delta).clip(lower=0)
+        avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+        rs = avg_gain / avg_loss.replace(0, float('nan'))
+        return 100 - (100 / (1 + rs))
+
+    # ---------- СКАНЕР МОНЕТ (из первого бота) ----------
+    def score_symbol(self, symbol, period=14):
+        """Оценивает монету по количеству RSI-пересечений и волатильности."""
+        try:
+            df = self.fetch_ohlcv(symbol, self.scan_tf, limit=self.scan_bars + period + 5)
+            if df.empty or len(df) < self.scan_bars:
+                return None
+            close = df["close"]
+            high = df["high"]
+            low = df["low"]
+            atr_pct = ((high - low) / close).mean() * 100
+            rsi = self.calculate_rsi(close, period).dropna()
+            crosses = 0
+            for i in range(1, len(rsi) - 3):
+                prev, curr = rsi.iloc[i-1], rsi.iloc[i]
+                if prev <= SCAN_RSI_OVERSOLD < curr:
+                    if not any(rsi.iloc[i+j] <= SCAN_RSI_OVERSOLD for j in range(1,4) if i+j < len(rsi)):
+                        crosses += 1
+                if prev >= SCAN_RSI_OVERBOUGHT > curr:
+                    if not any(rsi.iloc[i+j] >= SCAN_RSI_OVERBOUGHT for j in range(1,4) if i+j < len(rsi)):
+                        crosses += 1
+            score = crosses * (1 + atr_pct / 10)
+            return {"symbol": symbol, "score": round(score,2), "crosses": crosses, "atr_pct": round(atr_pct,3)}
+        except Exception:
+            return None
+
+    def scan_best_symbol(self):
+        fallback = "BTC/USDT:USDT"
+        log.info(f"🔍 Сканирование топ-{self.scan_top_n} монет по объёму...")
+        try:
+            tickers = self.exchange.fetch_tickers()
+        except Exception as e:
+            log.error(f"Ошибка получения тикеров: {e}")
+            return fallback
+
+        candidates = []
+        for sym, t in tickers.items():
+            if not sym.endswith(":USDT"):
+                continue
+            vol = (t.get("quoteVolume") or 0)
+            if vol >= self.min_volume_usdt:
+                candidates.append((sym, vol))
+
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        top = [sym for sym, _ in candidates[:self.scan_top_n]]
+        log.info(f"  Отобрано {len(top)} монет для анализа RSI-активности")
+
+        results = []
+        for i, sym in enumerate(top, 1):
+            result = self.score_symbol(sym)
+            if result:
+                results.append(result)
+                log.info(f"  [{i:2d}/{len(top)}] {sym:<22} скор={result['score']:6.2f}  пересечений={result['crosses']}  ATR={result['atr_pct']:.2f}%")
+            time.sleep(0.2)
+
+        if not results:
+            log.warning("Сканер не нашёл подходящих монет, используем BTC")
+            return fallback
+
+        results.sort(key=lambda x: x["score"], reverse=True)
+        best = results[0]
+        log.info("─" * 55)
+        log.info(f"🏆 Лучшая монета: {best['symbol']}")
+        log.info(f"   Скор={best['score']}  Пересечений={best['crosses']}  ATR={best['atr_pct']}%")
+        log.info("─" * 55)
+        log.info("  Топ-5 монет по скору:")
+        for r in results[:5]:
+            log.info(f"    {r['symbol']:<22} скор={r['score']:6.2f}  пересечений={r['crosses']}")
+        return best["symbol"]
 
     # ---------- индикаторы для нейросети ----------
     @staticmethod
@@ -204,26 +292,19 @@ class AdaptiveScoreBot:
         avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
         rs = avg_gain / avg_loss.replace(0, float('nan'))
         df['rsi'] = 100 - (100 / (1 + rs))
-
-        # EMA
         df['ema_short'] = close.ewm(span=9).mean()
         df['ema_long'] = close.ewm(span=21).mean()
-
-        # MACD
         macd_line = close.ewm(span=12).mean() - close.ewm(span=26).mean()
         signal_line = macd_line.ewm(span=9).mean()
         df['macd'] = macd_line
         df['macd_signal'] = signal_line
         df['macd_hist'] = macd_line - signal_line
-
-        # Лаги цены
         for lag in [1, 2, 3]:
             df[f'close_lag_{lag}'] = close.shift(lag)
-
         return df.dropna()
 
     # ---------- обучение нейросети ----------
-    def train_nn(self, df):
+    def train_nn(self, df, symbol):
         if len(df) < 200:
             return False
         feats = self.add_features(df)
@@ -231,12 +312,10 @@ class AdaptiveScoreBot:
                         'close_lag_1', 'close_lag_2', 'close_lag_3']
         X = feats[feature_cols].values
         y = (df.loc[feats.index, 'close'].shift(-1) > df.loc[feats.index, 'close']).astype(int).values
-        # удаляем последний NaN
         valid = ~np.isnan(y)
         X, y = X[valid], y[valid]
         if len(X) < 100:
             return False
-
         self.scaler.fit(X)
         X_scaled = self.scaler.transform(X)
         input_size = X.shape[1]
@@ -245,13 +324,13 @@ class AdaptiveScoreBot:
         self.nn.fit(X_scaled, y, epochs=NN_EPOCHS, batch_size=NN_BATCH_SIZE)
         self.nn_trained = True
         self.last_nn_train_time = time.time()
-        log.info(f"Нейросеть обучена на {len(X)} примерах")
+        log.info(f"🧠 Нейросеть обучена для {symbol} на {len(X)} примерах")
         return True
 
     # ---------- предсказание нейросети ----------
     def nn_predict(self, df):
         if not self.nn_trained or self.nn is None:
-            return 0.5  # нейтрально
+            return 0.5
         feats = self.add_features(df)
         feature_cols = ['rsi', 'ema_short', 'ema_long', 'macd', 'macd_signal', 'macd_hist',
                         'close_lag_1', 'close_lag_2', 'close_lag_3']
@@ -262,114 +341,182 @@ class AdaptiveScoreBot:
             last_scaled = self.scaler.transform(last)
         except:
             return 0.5
-        proba = self.nn.predict_proba(last_scaled)[0][0]
-        return proba
+        return self.nn.predict_proba(last_scaled)[0][0]
 
-    # ---------- генерация сигнала по RSI + фильтр нейросети ----------
+    # ---------- сигнал RSI с фильтром нейросети ----------
     def get_signal(self, df, mode):
         if len(df) < mode["period"] + 2:
-            return None
+            return None, None
         close = df["close"]
-        delta = close.diff()
-        gain = delta.clip(lower=0)
-        loss = (-delta).clip(lower=0)
-        avg_gain = gain.ewm(alpha=1/mode["period"], min_periods=mode["period"], adjust=False).mean()
-        avg_loss = loss.ewm(alpha=1/mode["period"], min_periods=mode["period"], adjust=False).mean()
-        rs = avg_gain / avg_loss.replace(0, float('nan'))
-        rsi = 100 - (100 / (1 + rs))
-
-        rsi_prev = rsi.iloc[-2]
-        rsi_curr = rsi.iloc[-1]
+        rsi_series = self.calculate_rsi(close, mode["period"])
+        rsi_val = rsi_series.iloc[-1]
         signal = None
-        if rsi_prev <= mode["oversold"] and rsi_curr > mode["oversold"]:
+        if rsi_series.iloc[-2] <= mode["oversold"] and rsi_series.iloc[-1] > mode["oversold"]:
             signal = "long"
-        elif rsi_prev >= mode["overbought"] and rsi_curr < mode["overbought"]:
+        elif rsi_series.iloc[-2] >= mode["overbought"] and rsi_series.iloc[-1] < mode["overbought"]:
             signal = "short"
 
-        if signal is None:
-            return None
+        proba = self.nn_predict(df) if signal else None
+        if signal:
+            if signal == "long" and proba is not None and proba < NN_CONFIDENCE_MIN:
+                log.debug(f"Нейросеть против long (p={proba:.2f})")
+                signal = None
+            elif signal == "short" and proba is not None and proba > (1 - NN_CONFIDENCE_MIN):
+                log.debug(f"Нейросеть против short (p={proba:.2f})")
+                signal = None
+        return signal, rsi_val
 
-        # Нейросетевой фильтр: проверяем, что предсказание совпадает
-        proba = self.nn_predict(df)
-        if signal == "long" and proba < NN_CONFIDENCE_MIN:
-            log.debug(f"Нейросеть против long (p={proba:.2f})")
-            return None
-        if signal == "short" and proba > (1 - NN_CONFIDENCE_MIN):
-            log.debug(f"Нейросеть против short (p={proba:.2f})")
-            return None
-
-        return signal
-
-    # ---------- исполнение сделки (реальной или виртуальной) ----------
+    # ---------- открытие виртуальной сделки ----------
     def execute_trade(self, signal, price, mode_name):
-        """Возвращает результат: 'tp', 'sl', 'timeout' (для симуляции)"""
-        if LIVE_TRADING:
-            # Здесь логика открытия реального ордера, как в оригинальном боте
-            # (пока заглушка)
-            log.info(f"[LIVE] Сигнал {signal} @ {price:.4f}")
-            return "tp"  # заглушка
+        tp_price = price * (1 + TAKE_PROFIT_PERCENT/100) if signal == "long" else price * (1 - TAKE_PROFIT_PERCENT/100)
+        sl_price = price * (1 - STOP_LOSS_PERCENT/100) if signal == "long" else price * (1 + STOP_LOSS_PERCENT/100)
+        self.virtual_trade = {
+            "signal": signal,
+            "entry_price": price,
+            "mode": mode_name,
+            "tp": tp_price,
+            "sl": sl_price,
+            "bars_held": 0,
+            "start_time": time.time()
+        }
+        log.info(f"📈 ОТКРЫТА СДЕЛКА [{mode_name}] {signal.upper()} по {price:.4f} | TP={tp_price:.4f} SL={sl_price:.4f}")
+
+    # ---------- закрытие виртуальной сделки и начисление баллов ----------
+    def close_trade(self, result, current_price):
+        vt = self.virtual_trade
+        if vt is None:
+            return
+        if result == 'tp':
+            score_delta = SCORE_WIN
+            self.wins += 1
+        elif result == 'sl':
+            score_delta = SCORE_LOSS
+            self.losses += 1
         else:
-            # Виртуальная сделка: открываем и ждём закрытия по TP/SL на следующих свечах
-            # (будет обработано в цикле симуляции)
-            self.virtual_trade = {
-                "signal": signal,
-                "entry_price": price,
-                "mode": mode_name,
-                "tp": price * (1 + TAKE_PROFIT_PERCENT/100) if signal == "long" else price * (1 - TAKE_PROFIT_PERCENT/100),
-                "sl": price * (1 - STOP_LOSS_PERCENT/100) if signal == "long" else price * (1 + STOP_LOSS_PERCENT/100),
-                "bars_held": 0
-            }
-            return None
+            score_delta = SCORE_TIMEOUT
+            self.timeouts += 1
+        self.score += score_delta
+        self.total_trades += 1
+        idx = self.active_mode_idx
+        self.mode_stats[idx]['trades'] += 1
+        self.mode_stats[idx]['score'] += score_delta
+        log.info(f"🏁 ЗАКРЫТА [{vt['mode']}] {vt['signal'].upper()} ({result}) вход {vt['entry_price']:.4f} → выход {current_price:.4f} | баллы: {score_delta:+d} (всего: {self.score})")
+        self.virtual_trade = None
+        self.adapt_mode()
 
     # ---------- адаптация стиля по баллам ----------
     def adapt_mode(self):
         if self.total_trades < MIN_TRADES_FOR_ADAPT:
             return
-        # обновляем средний балл для каждого режима
         for i, stats in enumerate(self.mode_stats):
             if stats['trades'] > 0:
                 stats['avg'] = stats['score'] / stats['trades']
-        # выбираем режим с наивысшим средним баллом
         best_idx = max(range(len(self.mode_stats)), key=lambda i: self.mode_stats[i]['avg'])
         if best_idx != self.active_mode_idx:
             old = MODES[self.active_mode_idx]['name']
             new = MODES[best_idx]['name']
-            log.info(f"🔄 Смена стиля: {old} → {new} (баллы: {self.mode_stats[best_idx]['avg']:.2f})")
+            log.info(f"🔄 Смена стиля: {old} → {new} (средний балл: {self.mode_stats[best_idx]['avg']:.2f})")
             self.active_mode_idx = best_idx
 
-    # ---------- главный цикл симуляции ----------
-    def run_simulation(self):
-        log.info("Запуск симуляции с самообучением и баллами")
-        self.last_nn_train_time = time.time() - NN_RETRAIN_INTERVAL  # сразу обучим
-
-        # загружаем историю для первого обучения
-        df_hist = self.fetch_ohlcv(limit=1000)
-        if not df_hist.empty:
-            self.train_nn(df_hist)
+    # ---------- вывод информации об открытой сделке ----------
+    def print_trade_status(self, current_price):
+        if self.virtual_trade is None:
+            return
+        vt = self.virtual_trade
+        bars = vt['bars_held']
+        if vt['signal'] == 'long':
+            dist_tp = (vt['tp'] - current_price) / current_price * 100
+            dist_sl = (current_price - vt['sl']) / current_price * 100
         else:
-            log.warning("Не удалось загрузить историю для обучения")
+            dist_tp = (current_price - vt['tp']) / current_price * 100
+            dist_sl = (vt['sl'] - current_price) / current_price * 100
+        elapsed = time.time() - vt['start_time']
+        log.info(f"⚡ Сделка [{vt['mode']}] {vt['signal'].upper()} | Цена: {current_price:.4f} | Баров: {bars} | "
+                 f"До TP: {dist_tp:.3f}% | До SL: {dist_sl:.3f}% | Длится: {elapsed:.0f}с")
 
-        # инициализация виртуальной сделки
-        self.virtual_trade = None
+    # ---------- статистика ----------
+    def print_stats(self):
+        win_rate = (self.wins / self.total_trades * 100) if self.total_trades > 0 else 0
+        mode_name = MODES[self.active_mode_idx]['name']
+        log.info(f"📊 СТАТИСТИКА | Режим: {mode_name} | Баллы: {self.score} | "
+                 f"Сделок: {self.total_trades} (W:{self.wins} L:{self.losses} T:{self.timeouts}) | "
+                 f"Винрейт: {win_rate:.1f}%")
+        for i, m in enumerate(MODES):
+            s = self.mode_stats[i]
+            if s['trades'] > 0:
+                log.info(f"   {m['name']}: сделок {s['trades']}, средний балл {s['avg']:.2f}")
+
+    # ---------- ГЛАВНЫЙ ЦИКЛ ----------
+    def run(self):
+        log.info("🚀 Бот запущен")
+
+        # Определяем начальную монету
+        if FIXED_SYMBOL:
+            self.symbol = FIXED_SYMBOL
+            log.info(f"Торгуем фиксированную пару: {self.symbol}")
+        else:
+            log.info("Запускаю первичный скан монет...")
+            self.symbol = self.scan_best_symbol()
+            self.last_scan_time = time.time()
+
+        # Устанавливаем плечо (если нужно)
+        try:
+            self.exchange.set_leverage(LEVERAGE, self.symbol)
+        except:
+            pass
+
+        # Обучаем нейросеть
+        df_hist = self.fetch_ohlcv(self.symbol, self.timeframe, limit=NN_LOOKBACK)
+        if not df_hist.empty:
+            self.train_nn(df_hist, self.symbol)
+        else:
+            log.warning("Не удалось загрузить историю для обучения нейросети")
+
+        self._last_status_time = time.time()
+        self._last_stat_time = time.time()
 
         while True:
             try:
-                # получаем свежие свечи
-                df = self.fetch_ohlcv(limit=200)
+                now = time.time()
+
+                # Сканирование новой монеты (если не фиксированная)
+                if not FIXED_SYMBOL and now - self.last_scan_time > SCAN_INTERVAL:
+                    new_symbol = self.scan_best_symbol()
+                    if new_symbol != self.symbol:
+                        log.info(f"🔄 Переключение на монету: {new_symbol}")
+                        self.symbol = new_symbol
+                        try:
+                            self.exchange.set_leverage(LEVERAGE, self.symbol)
+                        except:
+                            pass
+                        # Переобучаем нейросеть под новую монету
+                        df_hist = self.fetch_ohlcv(self.symbol, self.timeframe, limit=NN_LOOKBACK)
+                        if not df_hist.empty:
+                            self.train_nn(df_hist, self.symbol)
+                        self.virtual_trade = None  # закрываем старую виртуальную сделку
+                    self.last_scan_time = now
+
+                # Периодическая статистика
+                if now - self._last_stat_time > 120:
+                    self.print_stats()
+                    self._last_stat_time = now
+
+                # Получаем свежие свечи
+                df = self.fetch_ohlcv(self.symbol, self.timeframe, limit=200)
                 if df.empty or len(df) < 20:
-                    time.sleep(MONITOR_INTERVAL)
+                    time.sleep(5)
                     continue
 
                 current_price = df['close'].iloc[-1]
+                mode = MODES[self.active_mode_idx]
 
-                # проверка виртуальной сделки (закрытие по TP/SL/тайм-аут)
-                if self.virtual_trade is not None:
+                # Проверка виртуальной сделки
+                if self.virtual_trade:
                     vt = self.virtual_trade
                     high = df['high'].iloc[-1]
                     low = df['low'].iloc[-1]
                     vt['bars_held'] += 1
                     result = None
-
                     if vt['signal'] == 'long':
                         if high >= vt['tp']:
                             result = 'tp'
@@ -380,62 +527,44 @@ class AdaptiveScoreBot:
                             result = 'tp'
                         elif high >= vt['sl']:
                             result = 'sl'
-
                     if result is None and vt['bars_held'] >= 10:
                         result = 'timeout'
-
-                    if result is not None:
-                        # завершаем сделку, начисляем баллы
-                        if result == 'tp':
-                            score_delta = SCORE_WIN
-                            self.wins += 1
-                        elif result == 'sl':
-                            score_delta = SCORE_LOSS
-                            self.losses += 1
-                        else:
-                            score_delta = SCORE_TIMEOUT
-
-                        self.score += score_delta
-                        self.total_trades += 1
-                        # обновляем статистику текущего режима
-                        idx = self.active_mode_idx
-                        self.mode_stats[idx]['trades'] += 1
-                        self.mode_stats[idx]['score'] += score_delta
-
-                        log.info(
-                            f"[{vt['mode']}] Сделка закрыта ({result}): "
-                            f"вход {vt['entry_price']:.4f} -> выход {current_price:.4f} | "
-                            f"баллы: {score_delta:+d} (всего: {self.score})"
-                        )
-                        self.virtual_trade = None
-
-                        # адаптируем стиль после каждой сделки
-                        self.adapt_mode()
-
-                # если нет активной сделки — ищем сигнал
-                if self.virtual_trade is None:
-                    mode = MODES[self.active_mode_idx]
-                    signal = self.get_signal(df, mode)
+                    if result:
+                        self.close_trade(result, current_price)
+                    elif now - self._last_status_time > 30:
+                        self.print_trade_status(current_price)
+                        self._last_status_time = now
+                else:
+                    # Мониторинг
+                    if now - self._last_status_time > 30:
+                        signal, rsi_val = self.get_signal(df, mode)
+                        proba = self.nn_predict(df)
+                        log.info(f"👁 Мониторинг [{self.symbol}] Цена: {current_price:.4f} | RSI({mode['period']}): {rsi_val:.1f} | "
+                                 f"NN proba: {proba:.2f} | Режим: {mode['name']} | Баллы: {self.score}")
+                        self._last_status_time = now
+                    # Поиск сигнала
+                    signal, rsi_val = self.get_signal(df, mode)
                     if signal:
-                        log.info(f"[{mode['name']}] Сигнал {signal.upper()} @ {current_price:.4f}")
                         self.execute_trade(signal, current_price, mode['name'])
 
-                # периодическое обучение нейросети
-                if time.time() - self.last_nn_train_time > NN_RETRAIN_INTERVAL:
-                    df_train = self.fetch_ohlcv(limit=NN_LOOKBACK)
+                # Переобучение нейросети
+                if now - self.last_nn_train_time > NN_RETRAIN_INTERVAL:
+                    log.info("🔄 Переобучение нейросети...")
+                    df_train = self.fetch_ohlcv(self.symbol, self.timeframe, limit=NN_LOOKBACK)
                     if not df_train.empty:
-                        self.train_nn(df_train)
-                        self.last_nn_train_time = time.time()
+                        self.train_nn(df_train, self.symbol)
+                    self.last_nn_train_time = now
 
-                time.sleep(MONITOR_INTERVAL)
+                time.sleep(5)
 
             except KeyboardInterrupt:
                 log.info("Остановка бота")
+                self.print_stats()
                 break
             except Exception as e:
                 log.error(f"Ошибка: {e}", exc_info=True)
-                time.sleep(MONITOR_INTERVAL)
+                time.sleep(5)
 
 if __name__ == "__main__":
     bot = AdaptiveScoreBot()
-    bot.run_simulation()
+    bot.run()
