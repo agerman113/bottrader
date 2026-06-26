@@ -422,12 +422,21 @@ def main() -> None:
                 time.sleep(CHECK_INTERVAL)
                 continue
 
+            # Проверяем актуальность данных
+            last_candle_ts = df["timestamp"].iloc[-1] / 1000
+            candle_age     = time.time() - last_candle_ts
+            if candle_age > 600:
+                log.warning(f"Данные устарели ({candle_age:.0f} сек), пропускаем")
+                time.sleep(CHECK_INTERVAL)
+                continue
+
             rsi      = calculate_rsi(df["close"], current_period)
             rsi_prev = rsi.iloc[-2]
             rsi_curr = rsi.iloc[-1]
             log.info(
                 f"RSI (период={current_period}): "
-                f"предыд.={rsi_prev:.2f}  текущ.={rsi_curr:.2f}  [{current_symbol}]"
+                f"предыд.={rsi_prev:.2f}  текущ.={rsi_curr:.2f}  "
+                f"свеча={candle_age:.0f}с назад  [{current_symbol}]"
             )
 
             # ── 5. Сигналы входа ─────────────────────────────────────────────
@@ -451,13 +460,35 @@ def main() -> None:
                 continue
 
             current_price = float(exchange.fetch_ticker(current_symbol)["last"])
-            position_size = float(
-                exchange.amount_to_precision(
-                    current_symbol, free_balance / current_price
+            raw_size      = free_balance / current_price
+
+            # Проверяем минимальный лот до вызова amount_to_precision
+            market   = exchange.market(current_symbol)
+            min_amt  = float((market.get("limits") or {}).get("amount", {}).get("min") or 0)
+            min_cost = float((market.get("limits") or {}).get("cost",   {}).get("min") or 0)
+
+            if min_amt > 0 and raw_size < min_amt:
+                log.warning(
+                    f"Недостаточно для мин. лота: нужно {min_amt} {market['base']}, "
+                    f"есть {raw_size:.6f}. Сканируем другую монету..."
                 )
-            )
+                last_scan = 0
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            if min_cost > 0 and raw_size * current_price < min_cost:
+                log.warning(
+                    f"Сумма {raw_size * current_price:.2f} USDT < минимума {min_cost} USDT. "
+                    f"Сканируем другую монету..."
+                )
+                last_scan = 0
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            position_size = float(exchange.amount_to_precision(current_symbol, raw_size))
             if position_size <= 0:
-                log.warning("Размер позиции слишком мал, пропускаем")
+                log.warning("Размер позиции = 0 после округления, сканируем другую монету...")
+                last_scan = 0
                 time.sleep(CHECK_INTERVAL)
                 continue
 
