@@ -2,12 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-ГИБРИДНЫЙ БОТ: SuperTrend + RSI + НЕЙРОСЕТЬ + БАЛЛЫ (ИСПРАВЛЕННЫЙ)
+ГИБРИДНЫЙ БОТ: SuperTrend + RSI + НЕЙРОСЕТЬ + БАЛЛЫ (ИСПРАВЛЕННЫЙ v2)
 - Сканирует белый список монет по волатильности
 - Сигналы RSI фильтруются SuperTrend и нейросетью
 - Первая сделка (10 мин) – максимальный риск, потом риск снижается
 - Мониторинг позиции с трейлинг-стопом и частичным безубытком
 - Авто-симуляция при недостатке средств
+
+ИСПРАВЛЕНИЯ В ЭТОЙ ВЕРСИИ (см. CHANGELOG.md):
+  1. self.last_signal_time теперь обновляется при каждом реальном сигнале
+     и при открытии позиции -> адаптивный порог NN больше не "застывает"
+     на 0.30 и не спамит лог каждые 5 секунд.
+  2. В симуляции (виртуальные сделки) TP/SL теперь считаются от ATR/процентов,
+     как и в реальной торговле, а не равны цене входа -> сделки больше не
+     закрываются мгновенно с фиктивным "TP" при нулевом PnL.
+  3. Добавлено логирование смены порога только при фактическом ИЗМЕНЕНИИ
+     значения (а не на каждой итерации цикла).
+  4. Мелкие правки устойчивости (защита от деления на ноль / пустых данных).
 """
 
 import os, time, logging, json, numpy as np, ccxt, pandas as pd
@@ -66,6 +77,9 @@ MIN_TRAILING_OFFSET = 0.6
 MIN_PROFIT_FOR_TRAIL = 1.0
 PARTIAL_BE_ENABLED = True
 PARTIAL_BE_PROFIT = 0.2
+
+# Сколько секунд без нового сигнала считаем "застоем" перед смягчением порога NN
+SIGNAL_STALE_SECONDS = 900
 
 TRADE_MAX_LIFETIME = 7200
 REPORT_INTERVAL = 1800
@@ -239,6 +253,10 @@ class HybridBot:
         self._last_stat_time = 0
         self.active_trade = None
 
+        # FIX #1: инициализируем здесь же, чтобы не зависеть от порядка вызовов в run()
+        self.adaptive_confidence = NN_CONFIDENCE_MIN
+        self.last_signal_time = time.time()
+
     # ---------- Сканер монет ----------
     def scan_best_symbol(self):
         syms = WHITELIST_SYMBOLS if WHITELIST_SYMBOLS else ["BTC/USDT:USDT"]
@@ -259,7 +277,7 @@ class HybridBot:
     # ---------- Обучение нейросети ----------
     def train_nn(self, df):
         if len(df) < 200: return
-        # df уже с колонками ['ts','o','h','l','c','v']
+        df = df.copy()  # не мутируем переданный df на месте
         close = df['c'].copy()
         df['rsi'] = calc_rsi(close, 14)
         df['ema_short'] = close.ewm(9).mean()
@@ -287,6 +305,7 @@ class HybridBot:
 
     def nn_predict(self, df):
         if not self.nn_trained: return 0.5
+        df = df.copy()  # не мутируем переданный df на месте
         close = df['c'].copy()
         df['rsi'] = calc_rsi(close, 14)
         df['ema_short'] = close.ewm(9).mean()
@@ -299,6 +318,7 @@ class HybridBot:
         feat_cols = ['rsi','ema_short','ema_long','macd','macd_signal','macd_hist',
                      'close_lag_1','close_lag_2','close_lag_3']
         last = df[feat_cols].iloc[-1:].values
+        if np.isnan(last).any(): return 0.5
         try: last_s = self.scaler.transform(last)
         except: return 0.5
         return self.nn.predict_proba(last_s)[0,0]
@@ -324,9 +344,26 @@ class HybridBot:
                 elif signal == 'short' and proba > 1-self.adaptive_confidence: signal = None
         return signal, rsi_val
 
+    # ---------- Расчёт уровней TP/SL (общий для live и для симуляции) ----------
+    def calc_tp_sl(self, signal, price):
+        """FIX #2: вынесено в отдельный метод, чтобы симуляция считала
+        TP/SL так же, как реальная торговля, а не приравнивала их к цене входа."""
+        atr = self.current_atr if self.current_atr > 0 else 0.003
+        tp_move = max(TAKE_PROFIT_PERCENT/100, atr*2)
+        sl_move = max(STOP_LOSS_PERCENT/100, atr*0.5)
+        if signal == 'long':
+            tp = price*(1+tp_move); sl = price*(1-sl_move)
+        else:
+            tp = price*(1-tp_move); sl = price*(1+sl_move)
+        return tp, sl
+
     # ---------- Открытие позиции ----------
     def open_position(self, signal, price, risk_override=None):
         fraction = risk_override if risk_override is not None else self.risk_fraction
+
+        # FIX #1: фиксируем момент сигнала здесь, единая точка для live и sim
+        self.last_signal_time = time.time()
+
         if self.live_trading:
             free = exchange.fetch_balance()['USDT']['free']
             avail = free * fraction
@@ -343,13 +380,8 @@ class HybridBot:
                 else: return False
             qty = float(exchange.amount_to_precision(self.symbol, raw_qty))
             if qty <= 0: return False
-            atr = self.current_atr if self.current_atr > 0 else 0.003
-            tp_move = max(TAKE_PROFIT_PERCENT/100, atr*2)
-            sl_move = max(STOP_LOSS_PERCENT/100, atr*0.5)
-            if signal == 'long':
-                side='buy'; tp=price*(1+tp_move); sl=price*(1-sl_move)
-            else:
-                side='sell'; tp=price*(1-tp_move); sl=price*(1+sl_move)
+            tp, sl = self.calc_tp_sl(signal, price)
+            side = 'buy' if signal == 'long' else 'sell'
             tp = float(exchange.price_to_precision(self.symbol, tp))
             sl = float(exchange.price_to_precision(self.symbol, sl))
             try:
@@ -364,8 +396,10 @@ class HybridBot:
                 log.error(f"Ошибка открытия: {e}")
                 return False
         else:
-            log.info(f"📈 СИМУЛЯЦИЯ {signal.upper()} @ {price:.4f}")
-            self.active_trade = {'side':signal, 'entry':price, 'tp':price, 'sl':price,
+            # FIX #2: считаем реальные TP/SL и для симуляции, не price/price
+            tp, sl = self.calc_tp_sl(signal, price)
+            log.info(f"📈 СИМУЛЯЦИЯ {signal.upper()} @ {price:.4f} TP={tp:.4f} SL={sl:.4f}")
+            self.active_trade = {'side':signal, 'entry':price, 'tp':tp, 'sl':sl,
                                  'qty':0, 'time':time.time(), 'virtual':True, 'bars_held':0}
             return True
 
@@ -519,7 +553,8 @@ class HybridBot:
             _, st_line = calc_supertrend(df, SUPERTREND_PERIOD, SUPERTREND_MULT)
             self.supertrend_dir = 'bullish' if (df['c'].iloc[-1] > st_line.iloc[-1]) else 'bearish'
 
-        self.adaptive_confidence = NN_CONFIDENCE_MIN
+        # last_signal_time/adaptive_confidence уже инициализированы в __init__ (FIX #1),
+        # но обновим время старта здесь же, чтобы отсчёт "застоя" начинался от запуска цикла.
         self.last_signal_time = time.time()
         FORCED_TIMEOUT = 9.5*60
 
@@ -541,13 +576,16 @@ class HybridBot:
                 self.monitor_position()
                 continue
 
-            # адаптивный порог
+            # FIX #1: адаптивный порог — логируем только когда значение
+            # действительно меняется, иначе лог не спамится при "застывшем" пороге.
             if self.first_trade_done:
-                if now - self.last_signal_time > 900:
+                prev_conf = self.adaptive_confidence
+                if now - self.last_signal_time > SIGNAL_STALE_SECONDS:
                     self.adaptive_confidence = max(0.3, self.adaptive_confidence - 0.1)
-                    log.info(f"Порог NN снижен до {self.adaptive_confidence:.2f}")
                 elif self.adaptive_confidence < NN_CONFIDENCE_MIN:
                     self.adaptive_confidence = min(NN_CONFIDENCE_MIN, self.adaptive_confidence + 0.05)
+                if abs(self.adaptive_confidence - prev_conf) > 1e-9:
+                    log.info(f"Порог NN изменён: {prev_conf:.2f} → {self.adaptive_confidence:.2f}")
 
             mode = MODES[self.active_mode_idx]
             signal, rsi_val = self.get_signal(df, mode, forced=not self.first_trade_done)
@@ -565,6 +603,9 @@ class HybridBot:
                 if signal:
                     log.info(f"Сигнал {signal.upper()}")
                     self.open_position(signal, price)
+                    # FIX #1: last_signal_time также обновляется внутри open_position(),
+                    # эта строка избыточна, но оставлена явной для читаемости намерения.
+                    self.last_signal_time = now
 
             if now - self._last_status_time > 30:
                 log.info(f"👁 {self.symbol} цена={price:.4f} RSI={rsi_val:.1f} ST={self.supertrend_dir} риск={self.risk_fraction*100:.0f}%")
