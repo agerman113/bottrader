@@ -33,10 +33,14 @@ load_dotenv()
 #                 КОНФИГУРАЦИЯ
 # ============================================================
 FIXED_SYMBOL        = ""               # если пусто – авто‑сканер
+# Из белого списка убраны BTC и ETH: при текущем балансе их минимальный
+# объём ордера на бирже (например 0.001 BTC ≈ $60) превышает доступные
+# средства, и сделки по ним просто не открываются ("Открытие отклонено").
+# Оставлены более дешёвые монеты, где минимальный лот стоит заметно меньше.
 WHITELIST_SYMBOLS   = [
-    "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT",
+    "SOL/USDT:USDT",
     "XRP/USDT:USDT", "DOGE/USDT:USDT", "ADA/USDT:USDT",
-    "BNB/USDT:USDT", "LINK/USDT:USDT", "MATIC/USDT:USDT", "DOT/USDT:USDT",
+    "LINK/USDT:USDT", "MATIC/USDT:USDT", "DOT/USDT:USDT",
 ]
 TIMEFRAME           = "1m"
 SCAN_TIMEFRAME      = "5m"
@@ -261,16 +265,62 @@ class HybridBot:
     def scan_best_symbol(self):
         syms = WHITELIST_SYMBOLS if WHITELIST_SYMBOLS else ["BTC/USDT:USDT"]
         log.info(f"Сканирование белого списка ({len(syms)} монет)")
-        best_sym = "BTC/USDT:USDT"
-        best_atr = 0
+
+        # Проверяем доступный баланс, чтобы не выбрать монету, минимальный
+        # лот которой всё равно не пройдёт при открытии позиции (как было
+        # с BTC при балансе 19 USDT — сигнал срабатывал, но ордер
+        # отклонялся биржей из-за min_amt/min_cost).
+        try:
+            free_balance = exchange.fetch_balance()['USDT']['free']
+        except Exception as e:
+            log.warning(f"Не удалось получить баланс для проверки сканера: {e}")
+            free_balance = None
+
+        affordable = []   # [(sym, atr), ...] - монеты, которые прошли проверку баланса
+        skipped = []
         for sym in syms:
             raw = safe_fetch_ohlcv(sym, SCAN_TIMEFRAME, limit=SCAN_BARS+5)
             if len(raw) < SCAN_BARS: continue
             df = pd.DataFrame(raw, columns=['ts','o','h','l','c','v'])
+            last_price = df['c'].iloc[-1]
+
+            if free_balance is not None:
+                try:
+                    market = exchange.market(sym)
+                    min_amt = float(market.get('limits', {}).get('amount', {}).get('min', 0) or 0)
+                    min_cost = float(market.get('limits', {}).get('cost', {}).get('min', 0) or 0)
+                    required = max(min_amt * last_price, min_cost)
+                    if required > free_balance:
+                        skipped.append(f"{sym} (нужно ~{required:.2f}, есть {free_balance:.2f})")
+                        continue
+                except Exception:
+                    pass  # если не удалось получить лимиты рынка - не блокируем монету из-за этого
+
             atr = ((df['h'] - df['l'])/df['c']).mean()
-            if atr > best_atr and atr >= MIN_ATR_PCT:
-                best_atr = atr
-                best_sym = sym
+            affordable.append((sym, atr))
+
+        if skipped:
+            log.info(f"Пропущены монеты (не хватает баланса на мин. лот): {', '.join(skipped)}")
+
+        if not affordable:
+            # ни одна монета не прошла даже проверку баланса - дальше
+            # сканировать нечего, явно сообщаем об этом и просим расширить
+            # список монет или пополнить счёт
+            log.error("Ни одна монета из белого списка не проходит по балансу — "
+                      "проверьте WHITELIST_SYMBOLS или пополните счёт")
+            return syms[0]  # последний fallback, чтобы бот не упал с исключением
+
+        # среди доступных по балансу выбираем монету с максимальным ATR,
+        # удовлетворяющим MIN_ATR_PCT; если ни одна не дотягивает до
+        # порога волатильности - берём просто самую волатильную из доступных
+        above_threshold = [(s, a) for s, a in affordable if a >= MIN_ATR_PCT]
+        if above_threshold:
+            best_sym, best_atr = max(above_threshold, key=lambda x: x[1])
+        else:
+            best_sym, best_atr = max(affordable, key=lambda x: x[1])
+            log.warning(f"Ни одна доступная монета не достигла MIN_ATR_PCT={MIN_ATR_PCT}%, "
+                        f"берём самую волатильную из доступных: {best_sym}")
+
         log.info(f"Лучшая монета по ATR: {best_sym} ({best_atr*100:.2f}%)")
         return best_sym
 
