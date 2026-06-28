@@ -55,7 +55,7 @@ MODES = [
 NN_HIDDEN=32; NN_LR=0.01; NN_EPOCHS=30; NN_BATCH=16
 NN_RETRAIN_INTERVAL = 1800
 NN_LOOKBACK = 500
-NN_CONFIDENCE_MIN = 0.6
+NN_CONFIDENCE_MIN = 0.45
 
 SCAN_TOP_N = 30
 SCAN_INTERVAL = 14400
@@ -335,13 +335,30 @@ class HybridBot:
         elif rsi.iloc[-2] >= mode['overbought'] and rsi.iloc[-1] < mode['overbought']:
             signal = 'short'
         if signal and not forced:
+            # Фильтр SuperTrend ослаблен: раньше контр-трендовый сигнал
+            # полностью блокировался. Теперь он не отбрасывается, а просто
+            # требует более высокой уверенности NN (более строгий локальный
+            # порог), чтобы пройти. Это увеличивает число сигналов, но не
+            # убирает тренд как фактор риска совсем.
+            against_trend = False
             if self.first_trade_done:
-                if signal == 'long' and self.supertrend_dir == 'bearish': signal = None
-                elif signal == 'short' and self.supertrend_dir == 'bullish': signal = None
+                if signal == 'long' and self.supertrend_dir == 'bearish':
+                    against_trend = True
+                elif signal == 'short' and self.supertrend_dir == 'bullish':
+                    against_trend = True
+                if against_trend:
+                    log.info(f"Сигнал {signal.upper()} против тренда "
+                             f"(ST={self.supertrend_dir}) — требуется повышенная уверенность NN")
             if signal:
                 proba = self.nn_predict(df)
-                if signal == 'long' and proba < self.adaptive_confidence: signal = None
-                elif signal == 'short' and proba > 1-self.adaptive_confidence: signal = None
+                # Контр-трендовый сигнал требует доп. запас уверенности (+0.1)
+                local_threshold = self.adaptive_confidence + (0.1 if against_trend else 0.0)
+                if signal == 'long' and proba < local_threshold:
+                    log.info(f"Сигнал LONG отклонён NN (proba={proba:.2f} < порог={local_threshold:.2f})")
+                    signal = None
+                elif signal == 'short' and proba > 1-local_threshold:
+                    log.info(f"Сигнал SHORT отклонён NN (proba={proba:.2f} > порог={1-local_threshold:.2f})")
+                    signal = None
         return signal, rsi_val
 
     # ---------- Расчёт уровней TP/SL (общий для live и для симуляции) ----------
@@ -361,72 +378,58 @@ class HybridBot:
     def open_position(self, signal, price, risk_override=None):
         fraction = risk_override if risk_override is not None else self.risk_fraction
 
-        # FIX #1: фиксируем момент сигнала здесь, единая точка для live и sim
+        # FIX #1: фиксируем момент сигнала здесь
         self.last_signal_time = time.time()
 
-        if self.live_trading:
-            free = exchange.fetch_balance()['USDT']['free']
-            avail = free * fraction
-            if avail <= 0: return False
-            raw_qty = avail / price
-            market = exchange.market(self.symbol)
-            min_amt = float(market.get('limits', {}).get('amount', {}).get('min', 0) or 0)
-            min_cost = float(market.get('limits', {}).get('cost', {}).get('min', 0) or 0)
-            if min_amt and raw_qty < min_amt:
-                if free >= min_amt * price: raw_qty = min_amt
-                else: return False
-            if min_cost and raw_qty * price < min_cost:
-                if free >= min_cost: raw_qty = min_cost / price
-                else: return False
-            qty = float(exchange.amount_to_precision(self.symbol, raw_qty))
-            if qty <= 0: return False
-            tp, sl = self.calc_tp_sl(signal, price)
-            side = 'buy' if signal == 'long' else 'sell'
-            tp = float(exchange.price_to_precision(self.symbol, tp))
-            sl = float(exchange.price_to_precision(self.symbol, sl))
-            try:
-                exchange.create_order(self.symbol, 'market', side, qty,
-                                      params={'takeProfit':tp, 'stopLoss':sl})
-                log.info(f"✅ {signal.upper()} {qty} @ {price:.4f} TP={tp:.4f} SL={sl:.4f}")
-                self.active_trade = {'side':signal, 'entry':price, 'tp':tp, 'sl':sl, 'qty':qty,
-                                     'time':time.time(), 'peak':price, 'phase':1, 'partial_done':False,
-                                     'trailing_active':False}
-                return True
-            except Exception as e:
-                log.error(f"Ошибка открытия: {e}")
+        free = exchange.fetch_balance()['USDT']['free']
+        avail = free * fraction
+        if avail <= 0:
+            log.warning(f"Открытие отклонено: avail={avail:.4f} (free={free:.4f}, fraction={fraction:.2f})")
+            return False
+        raw_qty = avail / price
+        market = exchange.market(self.symbol)
+        min_amt = float(market.get('limits', {}).get('amount', {}).get('min', 0) or 0)
+        min_cost = float(market.get('limits', {}).get('cost', {}).get('min', 0) or 0)
+        if min_amt and raw_qty < min_amt:
+            if free >= min_amt * price:
+                raw_qty = min_amt
+            else:
+                log.warning(f"Открытие отклонено: нужно min_amt={min_amt}, "
+                            f"но free={free:.4f} недостаточно для {min_amt}@{price:.4f}")
                 return False
-        else:
-            # FIX #2: считаем реальные TP/SL и для симуляции, не price/price
-            tp, sl = self.calc_tp_sl(signal, price)
-            log.info(f"📈 СИМУЛЯЦИЯ {signal.upper()} @ {price:.4f} TP={tp:.4f} SL={sl:.4f}")
-            self.active_trade = {'side':signal, 'entry':price, 'tp':tp, 'sl':sl,
-                                 'qty':0, 'time':time.time(), 'virtual':True, 'bars_held':0}
+        if min_cost and raw_qty * price < min_cost:
+            if free >= min_cost:
+                raw_qty = min_cost / price
+            else:
+                log.warning(f"Открытие отклонено: нужно min_cost={min_cost}, "
+                            f"но free={free:.4f} недостаточно")
+                return False
+        qty = float(exchange.amount_to_precision(self.symbol, raw_qty))
+        if qty <= 0:
+            log.warning(f"Открытие отклонено: рассчитанный qty={qty} <= 0 "
+                        f"(raw_qty={raw_qty}, avail={avail:.4f})")
+            return False
+        tp, sl = self.calc_tp_sl(signal, price)
+        side = 'buy' if signal == 'long' else 'sell'
+        tp = float(exchange.price_to_precision(self.symbol, tp))
+        sl = float(exchange.price_to_precision(self.symbol, sl))
+        try:
+            exchange.create_order(self.symbol, 'market', side, qty,
+                                  params={'takeProfit':tp, 'stopLoss':sl})
+            log.info(f"✅ {signal.upper()} {qty} @ {price:.4f} TP={tp:.4f} SL={sl:.4f}")
+            self.active_trade = {'side':signal, 'entry':price, 'tp':tp, 'sl':sl, 'qty':qty,
+                                 'time':time.time(), 'peak':price, 'phase':1, 'partial_done':False,
+                                 'trailing_active':False}
             return True
+        except Exception as e:
+            log.error(f"Ошибка открытия: {e}")
+            return False
 
     # ---------- Мониторинг позиции ----------
     def monitor_position(self):
         if not self.active_trade: return
         trade = self.active_trade
-        if trade.get('virtual'):
-            raw = safe_fetch_ohlcv(self.symbol, self.timeframe, limit=10)
-            if len(raw) < 2: return
-            df = pd.DataFrame(raw, columns=['ts','o','h','l','c','v'])
-            high, low, close = df['h'].iloc[-1], df['l'].iloc[-1], df['c'].iloc[-1]
-            trade['bars_held'] += 1
-            result = None
-            if trade['side'] == 'long':
-                if high >= trade['tp']: result = 'tp'
-                elif low <= trade['sl']: result = 'sl'
-            else:
-                if low <= trade['tp']: result = 'tp'
-                elif high >= trade['sl']: result = 'sl'
-            if result is None and trade['bars_held'] >= 10: result = 'timeout'
-            if result:
-                self.add_trade_result(result, trade['entry'], close, trade['side'])
-                self.active_trade = None
-            return
-
-        # реальная позиция
+        # Реальная позиция (симуляция убрана — счёт пополнен, торгуем live)
         deadline = trade['time'] + TRADE_MAX_LIFETIME
         while True:
             if time.time() >= deadline:
@@ -527,22 +530,22 @@ class HybridBot:
     # ---------- Главный цикл ----------
     def run(self):
         log.info("Запуск гибридного бота")
+        # Проверка баланса/автопереход в симуляцию убраны — счёт пополнен,
+        # бот всегда торгует live (self.live_trading = True задаётся в __init__).
         try:
             balance = exchange.fetch_balance()['USDT']['free']
-            if balance < 5:
-                log.warning(f"Баланс {balance:.2f}USDT — переход в симуляцию")
-                self.live_trading = False
-        except: self.live_trading = False
+            log.info(f"Баланс {balance:.2f} USDT")
+        except Exception as e:
+            log.warning(f"Не удалось получить баланс: {e}")
 
         if not FIXED_SYMBOL:
             self.symbol = self.scan_best_symbol()
         else:
             self.symbol = FIXED_SYMBOL
 
-        log.info(f"Пара: {self.symbol} | Режим: {'LIVE' if self.live_trading else 'SIM'} | Риск: {self.risk_fraction*100:.0f}%")
-        if self.live_trading:
-            try: exchange.set_leverage(LEVERAGE, self.symbol)
-            except: pass
+        log.info(f"Пара: {self.symbol} | Режим: LIVE | Риск: {self.risk_fraction*100:.0f}%")
+        try: exchange.set_leverage(LEVERAGE, self.symbol)
+        except: pass
 
         # первичное обучение
         raw = safe_fetch_ohlcv(self.symbol, self.timeframe, limit=NN_LOOKBACK)
