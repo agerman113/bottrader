@@ -10,3 +10,4 @@ xgboost>=1.6.0
 matplotlib>=3.5.0
 statsmodels>=0.13.0
 pybit
+pyyaml>=6.0
