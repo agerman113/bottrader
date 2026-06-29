@@ -2,82 +2,115 @@
 # -*- coding: utf-8 -*-
 
 """
-ГИБРИДНЫЙ БОТ (v2.0) – ПРИБЫЛЬНАЯ ВЕРСИЯ
-- SuperTrend + RSI + нейросеть + адаптивный риск
-- Улучшенные сигналы: подтверждение свечных паттернов, ATR-фильтр, старший тренд
-- Корректный трейлинг‑стоп (через edit_order)
-- Асинхронный мониторинг позиции без блокировки
-- Защита от серий убытков (временная остановка торгов)
+ГИБРИДНЫЙ БОТ v2 (трендовая стратегия + улучшенный риск-менеджмент)
+====================================================================
+Ключевые отличия от v1:
+  • Вход ТОЛЬКО по тренду (15m SuperTrend + EMA200 как фильтр старшего ТФ).
+  • SL/TP рассчитываются от ATR, а не фиксированные проценты:
+        SL  = 1.5 * ATR,  TP = 3.0 * ATR  (соотношение R:R = 1:2).
+  • Размер позиции — по фиксированному риску на сделку (1% от баланса),
+    а не дамп 80% в один ордер.
+  • Вход по откату RSI внутри тренда (RSI 14), а не на шумных кроссах.
+  • Нет «принудительных» сделок — терпеливо ждём сигнал.
+  • Мониторинг НЕ блокирует основной цикл (неблокирующий poll).
+  • Грамотный трейлинг: безубыток при +1 ATR, трейл при +2 ATR.
+  • Улучшенная нейросеть: цель — предсказать движение вперёд,
+    расширенный набор фичей, больше эпох.
 """
 
-import os, time, logging, json, numpy as np, ccxt, pandas as pd
+import os, time, logging, json
+import numpy as np
+import ccxt
+import pandas as pd
 from dotenv import load_dotenv
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
 from sklearn.preprocessing import MinMaxScaler
 
 load_dotenv()
 
 # ============================================================
-#                 КОНФИГУРАЦИЯ (обновлена)
+#                      КОНФИГУРАЦИЯ
 # ============================================================
-FIXED_SYMBOL        = ""               # авто‑сканер
-WHITELIST_SYMBOLS   = [
+FIXED_SYMBOL = ""                       # "" -> авто-сканер
+WHITELIST_SYMBOLS = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT",
     "XRP/USDT:USDT", "DOGE/USDT:USDT", "ADA/USDT:USDT",
-    "BNB/USDT:USDT", "LINK/USDT:USDT", "MATIC/USDT:USDT", "DOT/USDT:USDT",
-]
-TIMEFRAME           = "5m"             # основной ТФ для сигналов
-FAST_TIMEFRAME      = "1m"             # для уточнения входа
-LEVERAGE            = 1
-STOP_LOSS_ATR_MULT  = 2.0             # SL = ATR*2
-TAKE_PROFIT_ATR_MULT= 3.5             # TP = ATR*3.5
-MIN_ATR_FOR_TRADE   = 0.003           # минимальная ATR (0.3%)
-
-SCORE_WIN = 2; SCORE_LOSS = -2; SCORE_TIMEOUT = 0; SCORE_PARTIAL = 0.5
-MIN_TRADES_FOR_ADAPT = 5
-MODES = [
-    {"name": "Агрессивный",  "period": 5,  "oversold": 35, "overbought": 65},
-    {"name": "Умеренный",    "period": 7,  "oversold": 30, "overbought": 70},
-    {"name": "Консервативный","period": 9, "oversold": 25, "overbought": 75},
+    "BNB/USDT:USDT", "LINK/USDT:USDT", "DOT/USDT:USDT",
+    "AVAX/USDT:USDT",
 ]
 
-NN_HIDDEN=32; NN_LR=0.01; NN_EPOCHS=30; NN_BATCH=16
+# --- Таймфреймы ---
+ENTRY_TIMEFRAME = "1m"                 # рабочие бары
+TREND_TIMEFRAME = "15m"                # старший ТФ для направления тренда
+
+# --- Риск-менеджмент (ATR-based) ---
+LEVERAGE = 1
+SL_ATR_MULT = 1.5                      # стоп = 1.5 * ATR(entry TF)
+TP_ATR_MULT = 3.0                      # тейк = 3.0 * ATR
+RISK_PER_TRADE = 0.01                  # 1% капитала на сделку
+ATR_PERIOD = 14
+MIN_ATR_PCT = 0.25                     # если волатильность ниже — пропускаем (нет движения)
+
+# --- RSI: вход по откату внутри тренда ---
+RSI_PERIOD = 14
+RSI_LONG_PULLBACK_MAX = 50             # в аптренде: вход в лонг, когда RSI откатился <=50
+RSI_LONG_EXIT_MIN = 52                 # и развернулся вверх (закрытие > 52)
+RSI_SHORT_PULLBACK_MIN = 50
+RSI_SHORT_EXIT_MAX = 48
+
+# --- Тренд (старший ТФ) ---
+TREND_SUPERTREND_PERIOD = 10
+TREND_SUPERTREND_MULT = 3.0
+TREND_USE_EMA = True
+TREND_EMA = 200
+
+# --- Подтверждение входа ---
+REQUIRE_PULLBACK_CONFIRM = True        # ждать разворотного бара (close выше prev close для long)
+
+# --- Трейлинг / безубыток ---
+BE_TRIGGER_ATR = 1.0                   # +1 ATR -> безубыток
+TRAIL_TRIGGER_ATR = 2.0                # +2 ATR -> трейлинг
+TRAIL_ATR_MULT = 1.0                   # отступ трейла в ATR
+TRADE_MAX_LIFETIME = 3600              # максимум в сделке, сек
+
+# --- Нейросеть ---
+NN_LOOKBACK = 600
+NN_EPOCHS = 50
+NN_BATCH = 32
+NN_LR = 0.005
+NN_HIDDEN = 48
+NN_FORWARD_BARS = 3                    # предсказываем движение через 3 бара
+NN_TARGET_PCT = 0.0015                 # «успех» = +0.15% вперёд
+NN_CONFIDENCE_MIN = 0.55               # подтверждение направления (long: proba long-класса)
 NN_RETRAIN_INTERVAL = 1800
-NN_LOOKBACK = 500
-NN_CONFIDENCE_MIN = 0.55            # снижена для большей чувствительности
-NN_CONFIDENCE_CONTRA = 0.65         # порог для противотрендовых сигналов
 
-SCAN_TOP_N = 30
-SCAN_INTERVAL = 14400
+# --- Сканер ---
+SCAN_TIMEFRAME = "5m"
 SCAN_BARS = 60
 MIN_VOLUME_USDT = 5_000_000
-MIN_ATR_PCT = 0.5
+SCAN_INTERVAL = 14400
+MAX_SPREAD_PCT = 0.12
 
-SUPERTREND_PERIOD = 10
-SUPERTREND_MULT = 3.0
+# --- Режимы (адаптация) ---
+MIN_TRADES_FOR_ADAPT = 6
+MODES = [
+    {"name": "Сбалансированный", "sl_mult": 1.5, "tp_mult": 3.0, "rsi_pb": 50},
+    {"name": "Консервативный",   "sl_mult": 2.0, "tp_mult": 4.0, "rsi_pb": 45},
+    {"name": "Агрессивный",      "sl_mult": 1.3, "tp_mult": 2.5, "rsi_pb": 55},
+]
 
-INITIAL_RISK = 1.0
-RISK_REDUCTION_STEP = 0.15
-MIN_RISK = 0.1
+# --- Оценка сделок ---
+SCORE_WIN = 2
+SCORE_LOSS = -2
+SCORE_BE = 0.5
+SCORE_TIMEOUT = -0.5
 
-TRAILING_ATR_MULT = 2.5
-TRAILING_STEP_ATR_MULT = 1.0
-MIN_PROFIT_FOR_TRAIL = 1.0        # % прибыли для активации трейлинга
-PARTIAL_BE_ENABLED = True
-PARTIAL_BE_PROFIT = 0.4           # % для частичного безубытка
-
-TRADE_MAX_LIFETIME = 7200
-REPORT_INTERVAL = 1800
-STATE_FILE = "hybrid_state.json"
-TRADES_FILE = "hybrid_trades.json"
-
-# Дополнительные защиты
-MAX_CONSECUTIVE_LOSSES = 4         # остановка торгов после 4 убытков подряд
-COOLDOWN_MINUTES = 60              # пауза после серии убытков
+# --- Файлы состояния ---
+STATE_FILE = "hybrid_state_v2.json"
+REPORT_INTERVAL = 900
 
 # ============================================================
-#                        ЛОГИРОВАНИЕ
+#                       ЛОГИРОВАНИЕ
 # ============================================================
 logging.basicConfig(
     level=logging.INFO,
@@ -88,608 +121,606 @@ logging.basicConfig(
 log = logging.getLogger("HybridBotV2")
 
 # ============================================================
-#                    НЕЙРОСЕТЕВОЙ ПРЕДИКТОР
+#                  НЕЙРОСЕТЬ (Adam, 2 скрытых)
 # ============================================================
 class NeuralPredictor:
-    def __init__(self, input_size=10, hidden=32, lr=0.01):
-        self.W1 = np.random.randn(input_size, hidden) * np.sqrt(2./input_size)
+    def __init__(self, input_size=10, hidden=48, lr=0.005):
+        rng = np.random.default_rng(42)
+        self.W1 = rng.standard_normal((input_size, hidden)) * np.sqrt(2.0 / input_size)
         self.b1 = np.zeros(hidden)
-        self.W2 = np.random.randn(hidden, 1) * np.sqrt(2./hidden)
+        self.W2 = rng.standard_normal((hidden, 1)) * np.sqrt(2.0 / hidden)
         self.b2 = np.zeros(1)
-        self.m_W1, self.v_W1 = np.zeros_like(self.W1), np.zeros_like(self.W1)
-        self.m_b1, self.v_b1 = np.zeros_like(self.b1), np.zeros_like(self.b1)
-        self.m_W2, self.v_W2 = np.zeros_like(self.W2), np.zeros_like(self.W2)
-        self.m_b2, self.v_b2 = np.zeros_like(self.b2), np.zeros_like(self.b2)
-        self.lr = lr; self.beta1=0.9; self.beta2=0.999; self.eps=1e-8; self.t=0
+        self._adam_init()
+        self.lr = lr
+        self.beta1, self.beta2, self.eps, self.t = 0.9, 0.999, 1e-8, 0
 
-    def sigmoid(self, x): return 1/(1+np.exp(-x))
+    def _adam_init(self):
+        self.mW1, self.vW1 = np.zeros_like(self.W1), np.zeros_like(self.W1)
+        self.mb1, self.vb1 = np.zeros_like(self.b1), np.zeros_like(self.b1)
+        self.mW2, self.vW2 = np.zeros_like(self.W2), np.zeros_like(self.W2)
+        self.mb2, self.vb2 = np.zeros_like(self.b2), np.zeros_like(self.b2)
+
+    @staticmethod
+    def _relu(z): return np.maximum(0, z)
+    @staticmethod
+    def _sig(x): return 1 / (1 + np.exp(-np.clip(x, -50, 50)))
+
     def forward(self, X):
         self.z1 = X @ self.W1 + self.b1
-        self.a1 = np.maximum(0, self.z1)
+        self.a1 = self._relu(self.z1)
         self.z2 = self.a1 @ self.W2 + self.b2
-        self.a2 = self.sigmoid(self.z2)
+        self.a2 = self._sig(self.z2)
         return self.a2
-    def backward(self, X, y, output):
+
+    def backward(self, X, y):
         m = X.shape[0]
-        dZ2 = output - y
-        dW2 = (self.a1.T @ dZ2)/m
-        db2 = np.sum(dZ2, axis=0, keepdims=True).flatten()/m
-        dA1 = dZ2 @ self.W2.T
-        dZ1 = dA1 * (self.z1 > 0)
-        dW1 = (X.T @ dZ1)/m
-        db1 = np.sum(dZ1, axis=0)/m
+        dZ2 = self.a2 - y
+        dW2 = (self.a1.T @ dZ2) / m
+        db2 = dZ2.mean(axis=0)
+        dZ1 = (dZ2 @ self.W2.T) * (self.z1 > 0)
+        dW1 = (X.T @ dZ1) / m
+        db1 = dZ1.mean(axis=0)
         self.t += 1
-        for param, m_, v_, grad in zip(
-            [self.W1, self.b1, self.W2, self.b2],
-            [self.m_W1, self.m_b1, self.m_W2, self.m_b2],
-            [self.v_W1, self.v_b1, self.v_W2, self.v_b2],
-            [dW1, db1, dW2, db2]
-        ):
-            m_[:] = self.beta1*m_ + (1-self.beta1)*grad
-            v_[:] = self.beta2*v_ + (1-self.beta2)*(grad**2)
-            m_hat = m_/(1-self.beta1**self.t)
-            v_hat = v_/(1-self.beta2**self.t)
-            param -= self.lr * m_hat / (np.sqrt(v_hat)+self.eps)
-    def fit(self, X, y, epochs=30, batch=16):
-        for epoch in range(epochs):
+        for p, mp, vp, g in [
+            (self.W1, self.mW1, self.vW1, dW1),
+            (self.b1, self.mb1, self.vb1, db1),
+            (self.W2, self.mW2, self.vW2, dW2),
+            (self.b2, self.mb2, self.vb2, db2),
+        ]:
+            mp *= self.beta1; mp += (1 - self.beta1) * g
+            vp *= self.beta2; vp += (1 - self.beta2) * (g * g)
+            mhat = mp / (1 - self.beta1 ** self.t)
+            vhat = vp / (1 - self.beta2 ** self.t)
+            p -= self.lr * mhat / (np.sqrt(vhat) + self.eps)
+
+    def fit(self, X, y, epochs=50, batch=32):
+        for _ in range(epochs):
             idx = np.random.permutation(len(X))
             for i in range(0, len(X), batch):
-                bi = idx[i:i+batch]
+                bi = idx[i:i + batch]
                 self.forward(X[bi])
-                self.backward(X[bi], y[bi].reshape(-1,1), self.a2)
-    def predict_proba(self, X): return self.forward(X)
+                self.backward(X[bi], y[bi].reshape(-1, 1))
+
+    def predict(self, X):
+        return self.forward(X)[0, 0]
 
 # ============================================================
-#             БЕЗОПАСНЫЕ ОБЁРТКИ API
+#                  БЕЗОПАСНЫЕ ОБЁРТКИ API
 # ============================================================
 exchange = ccxt.bybit({
     "apiKey": os.getenv("BYBIT_API_KEY"),
     "secret": os.getenv("BYBIT_API_SECRET"),
-    "enableRateLimit": True, "timeout": 10_000,
+    "enableRateLimit": True,
+    "timeout": 10_000,
     "options": {"defaultType": "linear"},
 })
 
-def safe_api_call(func, *args, retries=3, delay=1.0, **kwargs):
+def safe_api(func, *a, retries=3, delay=1.0, **kw):
     for attempt in range(retries):
         try:
-            return func(*args, **kwargs)
+            return func(*a, **kw)
         except ccxt.RateLimitExceeded:
-            log.warning("Rate limit, пауза 5с")
-            time.sleep(5)
+            log.warning("Rate limit, пауза 5с"); time.sleep(5)
         except ccxt.NetworkError as e:
-            log.warning(f"Сеть: {e}")
-            time.sleep(delay); delay *= 2
+            log.warning(f"Сеть: {e}"); time.sleep(delay); delay *= 2
         except Exception as e:
-            if attempt == retries-1: raise
-            time.sleep(delay); delay *= 2
+            if attempt == retries - 1: raise
+            log.warning(f"API ошибка: {e}"); time.sleep(delay); delay *= 2
     return None
 
-def safe_fetch_ohlcv(symbol, tf, limit=150):
-    try: return safe_api_call(exchange.fetch_ohlcv, symbol, tf, limit=limit) or []
-    except: return []
+def fetch_ohlcv(symbol, tf, limit=150):
+    try: return safe_api(exchange.fetch_ohlcv, symbol, tf, limit=limit) or []
+    except Exception: return []
 
-def safe_fetch_ticker(symbol):
-    try: return safe_api_call(exchange.fetch_ticker, symbol)
-    except: return None
+def fetch_positions(symbols=None):
+    try: return safe_api(exchange.fetch_positions, symbols) or []
+    except Exception: return []
 
-def safe_fetch_positions(symbols=None):
-    try: return safe_api_call(exchange.fetch_positions, symbols) or []
-    except: return []
+def fetch_price(symbol):
+    try:
+        t = safe_api(exchange.fetch_ticker, symbol)
+        return float(t["last"]) if t else None
+    except Exception: return None
 
 # ============================================================
-#             ТЕХНИЧЕСКИЕ ИНДИКАТОРЫ
+#                   ИНДИКАТОРЫ
 # ============================================================
 def calc_rsi(close, period):
     d = close.diff()
     gain = d.clip(lower=0)
     loss = (-d).clip(lower=0)
-    avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, float('nan'))
-    return 100 - (100/(1+rs))
+    ag = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    al = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    rs = ag / al.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
 
 def calc_atr(df, period=14):
-    hi, lo, pc = df['h'], df['l'], df['c'].shift(1)
-    tr = pd.concat([hi-lo, (hi-pc).abs(), (lo-pc).abs()], axis=1).max(axis=1)
-    return tr.ewm(alpha=1/period, adjust=False).mean()
+    hi, lo, pc = df["h"], df["l"], df["c"].shift(1)
+    tr = pd.concat([hi - lo, (hi - pc).abs(), (lo - pc).abs()], axis=1).max(axis=1)
+    return tr.ewm(alpha=1 / period, adjust=False).mean()
 
 def calc_supertrend(df, period=10, mult=3.0):
     atr = calc_atr(df, period)
-    hl2 = (df['h'] + df['l'])/2
-    ub = hl2 + mult*atr
-    lb = hl2 - mult*atr
+    hl2 = (df["h"] + df["l"]) / 2
+    ub = hl2 + mult * atr
+    lb = hl2 - mult * atr
     trend = pd.Series(1, index=df.index)
-    st_line = pd.Series(0., index=df.index)
+    st_line = pd.Series(0.0, index=df.index)
     for i in range(1, len(df)):
-        c = df['c'].iloc[i]
-        if st_line.iloc[i-1] == 0:
+        c = df["c"].iloc[i]
+        if st_line.iloc[i - 1] == 0:
             st_line.iloc[i] = lb.iloc[i] if c > lb.iloc[i] else ub.iloc[i]
             trend.iloc[i] = 1 if c > lb.iloc[i] else -1
-        elif trend.iloc[i-1] == 1:
-            st_line.iloc[i] = max(lb.iloc[i], st_line.iloc[i-1])
-            if c < st_line.iloc[i]:
-                trend.iloc[i] = -1
-                st_line.iloc[i] = ub.iloc[i]
-            else:
-                trend.iloc[i] = 1
+        elif c > st_line.iloc[i - 1]:
+            st_line.iloc[i] = max(lb.iloc[i], st_line.iloc[i - 1])
+            trend.iloc[i] = 1
         else:
-            st_line.iloc[i] = min(ub.iloc[i], st_line.iloc[i-1])
-            if c > st_line.iloc[i]:
-                trend.iloc[i] = 1
-                st_line.iloc[i] = lb.iloc[i]
-            else:
-                trend.iloc[i] = -1
-    return trend == 1, st_line
+            st_line.iloc[i] = min(ub.iloc[i], st_line.iloc[i - 1])
+            trend.iloc[i] = -1
+    return (trend == 1), st_line, atr
 
-def is_bullish_engulfing(df):
-    """Поглощение на понижение (бычий разворот)"""
-    if len(df) < 2: return False
-    prev, curr = df.iloc[-2], df.iloc[-1]
-    return (prev['c'] < prev['o'] and curr['c'] > curr['o'] and
-            curr['c'] > prev['o'] and curr['o'] < prev['c'])
-
-def is_bearish_engulfing(df):
-    if len(df) < 2: return False
-    prev, curr = df.iloc[-2], df.iloc[-1]
-    return (prev['c'] > prev['o'] and curr['c'] < curr['o'] and
-            curr['o'] > prev['c'] and curr['c'] < prev['o'])
+def build_features(df):
+    """Возвращает DataFrame с признаками для NN (и сам df с доп. колонками)."""
+    c = df["c"]
+    df = df.copy()
+    df["ret1"] = c.pct_change(1)
+    df["ret3"] = c.pct_change(3)
+    df["ret5"] = c.pct_change(5)
+    df["rsi"] = calc_rsi(c, RSI_PERIOD)
+    df["ema9"] = c.ewm(9).mean()
+    df["ema21"] = c.ewm(21).mean()
+    df["ema_slope"] = df["ema9"] - df["ema9"].shift(3)
+    macd = c.ewm(12).mean() - c.ewm(26).mean()
+    df["macd_hist"] = macd - macd.ewm(9).mean()
+    df["vol_ratio"] = df["v"] / (df["v"].rolling(20).mean().replace(0, np.nan))
+    df["atr_pct"] = calc_atr(df, ATR_PERIOD) / c
+    df["dist_ema"] = (c - df["ema21"]) / c
+    feat = ["ret1", "ret3", "ret5", "rsi", "ema_slope", "macd_hist",
+            "vol_ratio", "atr_pct", "dist_ema"]
+    return df, feat
 
 # ============================================================
-#                КЛАСС ГИБРИДНОГО БОТА
+#                       БОТ
 # ============================================================
-class HybridBot:
+class HybridBotV2:
     def __init__(self):
         self.symbol = None
-        self.timeframe = TIMEFRAME
         self.total_trades = 0
-        self.wins = 0; self.losses = 0; self.timeouts = 0
+        self.wins = self.losses = self.timeouts = 0
         self.score = 0
         self.active_mode_idx = 0
-        self.mode_stats = [{'trades':0,'score':0,'avg':0} for _ in MODES]
+        self.mode_stats = [{"trades": 0, "score": 0} for _ in MODES]
 
         self.nn = None
         self.scaler = MinMaxScaler()
         self.nn_trained = False
+        self.nn_confidence = NN_CONFIDENCE_MIN
         self.last_nn_train = 0
-        self.current_atr = 0.0
-        self.supertrend_dir = "neutral"
+        self.feat_cols = None
 
         self.live_trading = True
-        self.risk_fraction = INITIAL_RISK
-        self.first_trade_done = False
         self.start_time = time.time()
-
         self.last_scan_time = 0
-        self._last_status_time = 0
+        self._last_status = 0
         self.active_trade = None
+        self.last_signal_time = 0
 
-        # Защита от серии убытков
-        self.consecutive_losses = 0
-        self.cooldown_until = 0
+    # ---------- Сохранение/загрузка состояния ----------
+    def save_state(self):
+        try:
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump({
+                    "total_trades": self.total_trades, "wins": self.wins,
+                    "losses": self.losses, "timeouts": self.timeouts,
+                    "score": self.score, "mode_idx": self.active_mode_idx,
+                    "mode_stats": self.mode_stats,
+                }, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log.warning(f"Не удалось сохранить состояние: {e}")
 
-        # Для асинхронного мониторинга храним ордера SL/TP
-        self.tp_order_id = None
-        self.sl_order_id = None
+    def load_state(self):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            self.total_trades = d.get("total_trades", 0)
+            self.wins = d.get("wins", 0)
+            self.losses = d.get("losses", 0)
+            self.timeouts = d.get("timeouts", 0)
+            self.score = d.get("score", 0)
+            self.active_mode_idx = d.get("mode_idx", 0)
+            self.mode_stats = d.get("mode_stats", self.mode_stats)
+            log.info(f"Состояние загружено: сделок={self.total_trades} счёт={self.score}")
+        except Exception:
+            pass
 
-    # ---------- Сканер монет ----------
+    # ---------- Сканер монет по ATR и объёму ----------
     def scan_best_symbol(self):
-        syms = WHITELIST_SYMBOLS if WHITELIST_SYMBOLS else ["BTC/USDT:USDT"]
-        log.info(f"Сканирование {len(syms)} монет на {SCAN_TIMEFRAME}")
-        best_sym = "BTC/USDT:USDT"
-        best_atr = 0
+        syms = WHITELIST_SYMBOLS or ["BTC/USDT:USDT"]
+        log.info(f"Сканирование {len(syms)} монет (ATR + объём)")
+        best, best_score = "BTC/USDT:USDT", 0
         for sym in syms:
-            raw = safe_fetch_ohlcv(sym, "5m", limit=SCAN_BARS+5)
+            raw = fetch_ohlcv(sym, SCAN_TIMEFRAME, limit=SCAN_BARS + 5)
             if len(raw) < SCAN_BARS: continue
-            df = pd.DataFrame(raw, columns=['ts','o','h','l','c','v'])
-            atr = ((df['h'] - df['l'])/df['c']).mean()
-            if atr > best_atr and atr >= MIN_ATR_PCT/100:
-                best_atr = atr
-                best_sym = sym
-        log.info(f"Выбрана: {best_sym} (средняя ATR={best_atr*100:.2f}%)")
-        return best_sym
+            df = pd.DataFrame(raw, columns=["ts", "o", "h", "l", "c", "v"])
+            atr_pct = (calc_atr(df, 14) / df["c"]).tail(20).mean()
+            vol_usdt = (df["c"] * df["v"]).tail(20).mean()
+            if vol_usdt < MIN_VOLUME_USDT: continue
+            score = atr_pct * (1 + np.log10(vol_usdt / MIN_VOLUME_USDT + 1))
+            if atr_pct >= MIN_ATR_PCT / 100 and score > best_score:
+                best_score, best = score, sym
+        log.info(f"Лучшая монета: {best} (score={best_score:.3f})")
+        return best
 
-    # ---------- Обучение нейросети ----------
-    def train_nn(self, df):
-        if len(df) < 200: return
-        df = df.copy()
-        close = df['c']
-        df['rsi'] = calc_rsi(close, 14)
-        df['ema_short'] = close.ewm(9).mean()
-        df['ema_long'] = close.ewm(21).mean()
-        macd = close.ewm(12).mean() - close.ewm(26).mean()
-        df['macd'] = macd
-        df['macd_signal'] = macd.ewm(9).mean()
-        df['macd_hist'] = macd - df['macd_signal']
-        for lag in [1,2,3]: df[f'close_lag_{lag}'] = close.shift(lag)
-        feat_cols = ['rsi','ema_short','ema_long','macd','macd_signal','macd_hist',
-                     'close_lag_1','close_lag_2','close_lag_3']
-        df = df.dropna()
-        X = df[feat_cols].values
-        y = (df['c'].shift(-1) > df['c']).astype(int).values[:-1]
-        X, y = X[:len(y)], y
-        if len(X) < 100: return
+    # ---------- Обучение NN ----------
+    def train_nn(self, df_raw):
+        if len(df_raw) < 200: return
+        df, feat = build_features(df_raw)
+        self.feat_cols = feat
+        future = df["c"].shift(-NN_FORWARD_BARS)
+        fwd_ret = (future - df["c"]) / df
+        target = (fwd_ret > NN_TARGET_PCT).astype(int)
+        work = df[feat + ["c"]].join(target.rename("y")).dropna()
+        work = work[work["y"].notna()]
+        X = work[feat].values
+        y = work["y"].astype(int).values
+        if len(X) < 100:
+            log.info(f"Недостаточно данных для NN ({len(X)})"); return
+        # балансировка классов
+        pos = np.where(y == 1)[0]; neg = np.where(y == 0)[0]
+        if len(pos) < 10 or len(neg) < 10:
+            log.info("NN: классы несбалансированы, пропуск"); return
+        n = min(len(pos), len(neg))
+        idx = np.concatenate([np.random.choice(pos, n), np.random.choice(neg, n)])
+        X, y = X[idx], y[idx]
         self.scaler.fit(X)
-        X_s = self.scaler.transform(X)
+        Xs = self.scaler.transform(X)
         if self.nn is None or self.nn.W1.shape[0] != X.shape[1]:
-            self.nn = NeuralPredictor(input_size=X.shape[1], hidden=NN_HIDDEN, lr=NN_LR)
-        self.nn.fit(X_s, y, epochs=NN_EPOCHS, batch=NN_BATCH)
+            self.nn = NeuralPredictor(X.shape[1], NN_HIDDEN, NN_LR)
+        self.nn.fit(Xs, y, NN_EPOCHS, NN_BATCH)
         self.nn_trained = True
         self.last_nn_train = time.time()
-        log.info(f"Нейросеть обучена на {len(X)} примерах")
+        # точность
+        acc = (self.nn.forward(Xs).flatten().round() == y).mean()
+        log.info(f"NN обучена: {len(X)} примеров, точность {acc*100:.1f}%")
 
-    def nn_predict(self, df):
-        if not self.nn_trained: return 0.5
-        df = df.copy()
-        close = df['c']
-        df['rsi'] = calc_rsi(close, 14)
-        df['ema_short'] = close.ewm(9).mean()
-        df['ema_long'] = close.ewm(21).mean()
-        macd = close.ewm(12).mean() - close.ewm(26).mean()
-        df['macd'] = macd
-        df['macd_signal'] = macd.ewm(9).mean()
-        df['macd_hist'] = macd - df['macd_signal']
-        for lag in [1,2,3]: df[f'close_lag_{lag}'] = close.shift(lag)
-        feat_cols = ['rsi','ema_short','ema_long','macd','macd_signal','macd_hist',
-                     'close_lag_1','close_lag_2','close_lag_3']
-        last = df[feat_cols].iloc[-1:].values
-        try: last_s = self.scaler.transform(last)
-        except: return 0.5
-        return self.nn.predict_proba(last_s)[0,0]
+    def nn_predict(self, df_raw):
+        if not self.nn_trained or self.feat_cols is None: return 0.5
+        try:
+            df, feat = build_features(df_raw)
+            last = df[feat].iloc[-1:].values
+            last_s = self.scaler.transform(last)
+            return float(self.nn.predict(last_s))
+        except Exception:
+            return 0.5
 
-    # ---------- Сигнал с улучшенными фильтрами ----------
+    # ---------- Тренд старшего ТФ ----------
+    def get_trend(self, symbol):
+        raw = fetch_ohlcv(symbol, TREND_TIMEFRAME, limit=TREND_EMA + 50)
+        if len(raw) < TREND_EMA + 20:
+            return "neutral", None
+        df = pd.DataFrame(raw, columns=["ts", "o", "h", "l", "c", "v"])
+        bull_st, st_line, _ = calc_supertrend(df, TREND_SUPERTREND_PERIOD, TREND_SUPERTREND_MULT)
+        st_dir = "bullish" if bull_st.iloc[-1] else "bearish"
+        if TREND_USE_EMA:
+            ema = df["c"].ewm(TREND_EMA).mean().iloc[-1]
+            price = df["c"].iloc[-1]
+            ema_dir = "bullish" if price > ema else "bearish"
+            if st_dir == ema_dir:
+                return st_dir, st_line.iloc[-1]
+            return "neutral", st_line.iloc[-1]
+        return st_dir, st_line.iloc[-1]
+
+    # ---------- Сигнал ----------
     def get_signal(self, df, mode):
-        """Возвращает (signal, rsi_val) с учётом свечных паттернов, ATR и Supertrend"""
-        if len(df) < mode['period']+2: return None, None
-        close = df['c']
-        rsi = calc_rsi(close, mode['period'])
-        rsi_val = rsi.iloc[-1]
-        atr = self.current_atr
-        if atr < MIN_ATR_FOR_TRADE:
-            return None, rsi_val
-
-        # Свечной паттерн
-        engulfing_bull = is_bullish_engulfing(df)
-        engulfing_bear = is_bearish_engulfing(df)
+        if len(df) < max(RSI_PERIOD, 30): return None
+        rsi = calc_rsi(df["c"], RSI_PERIOD)
+        r1, r2 = rsi.iloc[-2], rsi.iloc[-1]
+        c = df["c"]; prev_close = c.iloc[-2]
+        trend, _ = self.get_trend(self.symbol)
+        if trend == "neutral": return None
 
         signal = None
-        # Long: RSI выходит из перепроданности + бычье поглощение
-        if (rsi.iloc[-2] <= mode['oversold'] and rsi.iloc[-1] > mode['oversold']) or \
-           (rsi_val <= mode['oversold'] + 5 and engulfing_bull):
-            signal = 'long'
-        # Short: RSI выходит из перекупленности + медвежье поглощение
-        elif (rsi.iloc[-2] >= mode['overbought'] and rsi.iloc[-1] < mode['overbought']) or \
-             (rsi_val >= mode['overbought'] - 5 and engulfing_bear):
-            signal = 'short'
+        if trend == "bullish":
+            # откат: RSI был <= порога и развернулся вверх
+            if r1 <= mode["rsi_pb"] and r2 >= RSI_LONG_EXIT_MIN:
+                signal = "long"
+                if REQUIRE_PULLBACK_CONFIRM and c.iloc[-1] <= prev_close:
+                    signal = None
+        else:  # bearish
+            if r1 >= (100 - mode["rsi_pb"]) and r2 <= RSI_SHORT_EXIT_MAX:
+                signal = "short"
+                if REQUIRE_PULLBACK_CONFIRM and c.iloc[-1] >= prev_close:
+                    signal = None
 
-        if signal and self.first_trade_done:
-            # Фильтр Supertrend (только по тренду)
-            if signal == 'long' and self.supertrend_dir == 'bearish':
-                signal = None
-            elif signal == 'short' and self.supertrend_dir == 'bullish':
-                signal = None
+        if signal is None: return None
 
-        if signal:
-            proba = self.nn_predict(df)
-            # Для противотрендовых сигналов используем более высокий порог
-            if (signal == 'long' and self.supertrend_dir == 'bearish') or \
-               (signal == 'short' and self.supertrend_dir == 'bullish'):
-                conf_threshold = NN_CONFIDENCE_CONTRA
-                log.info(f"Сигнал {signal.upper()} против тренда (ST={self.supertrend_dir}) — требуется повышенная уверенность NN")
-            else:
-                conf_threshold = self.adaptive_confidence
+        # подтверждение нейросетью: long -> ждём proba роста >= порога
+        proba = self.nn_predict(df)
+        if signal == "long" and proba < self.nn_confidence:
+            log.info(f"NN отклонил LONG (proba={proba:.2f} < {self.nn_confidence:.2f})")
+            return None
+        if signal == "short" and (1 - proba) < self.nn_confidence:
+            log.info(f"NN отклонил SHORT (proba падения={1-proba:.2f} < {self.nn_confidence:.2f})")
+            return None
+        return signal
 
-            if signal == 'long' and proba < conf_threshold:
-                log.info(f"Сигнал LONG отклонён NN (proba={proba:.2f} < порог={conf_threshold:.2f})")
-                return None, rsi_val
-            elif signal == 'short' and proba > (1 - conf_threshold):
-                log.info(f"Сигнал SHORT отклонён NN (proba={proba:.2f} > порог={1-conf_threshold:.2f})")
-                return None, rsi_val
-            self.last_signal_time = time.time()
-        return signal, rsi_val
+    # ---------- Размер позиции по риску ----------
+    def calc_qty(self, entry, sl_price, side):
+        try:
+            bal = exchange.fetch_balance()
+            equity = float(bal.get("USDT", {}).get("free", 0))
+        except Exception:
+            return None
+        if equity <= 0: return None
+        risk_amt = equity * RISK_PER_TRADE
+        sl_dist = abs(entry - sl_price)
+        if sl_dist <= 0: return None
+        notional = risk_amt * LEVERAGE / (sl_dist / entry)  # ~ qty*entry scaled by risk
+        raw_qty = risk_amt / sl_dist
+        market = exchange.market(self.symbol)
+        min_amt = float(market.get("limits", {}).get("amount", {}).get("min", 0) or 0)
+        min_cost = float(market.get("limits", {}).get("cost", {}).get("min", 0) or 0)
+        if min_amt and raw_qty < min_amt: raw_qty = min_amt
+        if min_cost and raw_qty * entry < min_cost: raw_qty = min_cost / entry
+        try:
+            qty = float(exchange.amount_to_precision(self.symbol, raw_qty))
+        except Exception:
+            qty = round(raw_qty, 4)
+        if qty <= 0: return None
+        return qty
 
     # ---------- Открытие позиции ----------
-    def open_position(self, signal, price, risk_override=None):
-        if self.cooldown_until > time.time():
-            log.info("Пропуск входа – действует кулдаун после серии убытков")
-            return False
-        fraction = risk_override if risk_override is not None else self.risk_fraction
+    def open_position(self, signal, price):
+        atr = calc_atr(self._last_df, ATR_PERIOD).iloc[-1] if self._last_df is not None else price * 0.005
+        mode = MODES[self.active_mode_idx]
+        sl_dist = atr * mode["sl_mult"]
+        tp_dist = atr * mode["tp_mult"]
+        if signal == "long":
+            sl, tp = price - sl_dist, price + tp_dist
+        else:
+            sl, tp = price + sl_dist, price - tp_dist
+
         if self.live_trading:
-            free = exchange.fetch_balance()['USDT']['free']
-            avail = free * fraction
-            if avail <= 0: return False
-            raw_qty = avail / price
-            market = exchange.market(self.symbol)
-            min_amt = float(market.get('limits', {}).get('amount', {}).get('min', 0) or 0)
-            min_cost = float(market.get('limits', {}).get('cost', {}).get('min', 0) or 0)
-            if min_amt and raw_qty < min_amt:
-                if free >= min_amt * price: raw_qty = min_amt
-                else: return False
-            if min_cost and raw_qty * price < min_cost:
-                if free >= min_cost: raw_qty = min_cost / price
-                else: return False
-            qty = float(exchange.amount_to_precision(self.symbol, raw_qty))
-            if qty <= 0: return False
-            atr = self.current_atr
-            sl_dist = STOP_LOSS_ATR_MULT * atr
-            tp_dist = TAKE_PROFIT_ATR_MULT * atr
-            if signal == 'long':
-                side='buy'; tp=price*(1+tp_dist); sl=price*(1-sl_dist)
-            else:
-                side='sell'; tp=price*(1-tp_dist); sl=price*(1+sl_dist)
-            tp = float(exchange.price_to_precision(self.symbol, tp))
-            sl = float(exchange.price_to_precision(self.symbol, sl))
+            qty = self.calc_qty(price, sl, signal)
+            if not qty:
+                log.warning("Не удалось рассчитать размер позиции"); return False
+            tp_p = float(exchange.price_to_precision(self.symbol, tp))
+            sl_p = float(exchange.price_to_precision(self.symbol, sl))
+            side = "buy" if signal == "long" else "sell"
             try:
-                order = exchange.create_order(
-                    self.symbol, 'market', side, qty,
-                    params={'takeProfit': tp, 'stopLoss': sl}
-                )
-                log.info(f"✅ {signal.upper()} {qty} @ {price:.4f} TP={tp:.4f} SL={sl:.4f}")
+                exchange.create_order(self.symbol, "market", side, qty,
+                                      params={"takeProfit": tp_p, "stopLoss": sl_p, "tpTrigger": "LastPrice"})
+                log.info(f"✅ {signal.upper()} {qty} @ {price:.4f} TP={tp_p:.4f} SL={sl_p:.4f} "
+                         f"(ATR={atr:.4f}, R:R=1:{mode['tp_mult']/mode['sl_mult']:.1f})")
                 self.active_trade = {
-                    'side': signal, 'entry': price, 'tp': tp, 'sl': sl, 'qty': qty,
-                    'time': time.time(), 'peak': price, 'phase': 1, 'partial_done': False,
-                    'trailing_active': False, 'sl_order_id': order.get('stopLossOrderId'),
-                    'tp_order_id': order.get('takeProfitOrderId')
+                    "side": signal, "entry": price, "tp": tp_p, "sl": sl_p, "qty": qty,
+                    "atr": atr, "time": time.time(), "peak": price, "be_done": False,
+                    "trail_active": False, "virtual": False,
                 }
                 return True
             except Exception as e:
-                log.error(f"Ошибка открытия: {e}")
-                return False
+                log.error(f"Ошибка открытия: {e}"); return False
         else:
-            log.info(f"📈 СИМУЛЯЦИЯ {signal.upper()} @ {price:.4f}")
-            self.active_trade = {'side':signal, 'entry':price, 'tp':price, 'sl':price,
-                                 'qty':0, 'time':time.time(), 'virtual':True, 'bars_held':0}
+            log.info(f"📈 СИМ {signal.upper()} @ {price:.4f} SL={sl:.4f} TP={tp:.4f}")
+            self.active_trade = {
+                "side": signal, "entry": price, "tp": tp, "sl": sl, "qty": 0,
+                "atr": atr, "time": time.time(), "peak": price, "be_done": False,
+                "trail_active": False, "virtual": True, "bars": 0,
+            }
             return True
 
-    # ---------- Обновление стоп-лосса (реальное) ----------
-    def update_stop_loss(self, new_sl):
-        if not self.live_trading or self.active_trade is None: return
-        trade = self.active_trade
-        try:
-            # Отменяем старый SL
-            if trade.get('sl_order_id'):
-                exchange.cancel_order(trade['sl_order_id'], self.symbol)
-            # Создаём новый SL ордер (условный, reduce-only)
-            side_close = 'sell' if trade['side'] == 'long' else 'buy'
-            sl_order = exchange.create_order(
-                self.symbol, 'stop_market', side_close, trade['qty'],
-                params={'stopPrice': new_sl, 'reduceOnly': True}
-            )
-            trade['sl_order_id'] = sl_order['id']
-            trade['sl'] = new_sl
-            log.info(f"Стоп-лосс обновлён → {new_sl:.4f}")
-        except Exception as e:
-            log.error(f"Не удалось обновить SL: {e}")
-
-    # ---------- Частичное закрытие ----------
-    def partial_close(self, fraction=0.5):
-        if not self.live_trading or self.active_trade is None: return
-        trade = self.active_trade
-        close_qty = trade['qty'] * fraction
-        close_side = 'sell' if trade['side'] == 'long' else 'buy'
-        try:
-            exchange.create_order(self.symbol, 'market', close_side, close_qty,
-                                  params={'reduceOnly': True})
-            trade['qty'] -= close_qty
-            trade['partial_done'] = True
-            log.info(f"Частичное закрытие {fraction*100:.0f}% позиции")
-        except Exception as e:
-            log.error(f"Ошибка частичного закрытия: {e}")
-
-    # ---------- Асинхронный мониторинг (вызывается часто) ----------
+    # ---------- Мониторинг (неблокирующий, один шаг за вызов) ----------
     def monitor_position(self):
         if not self.active_trade: return
-        trade = self.active_trade
-        # Симуляция
-        if trade.get('virtual'):
-            raw = safe_fetch_ohlcv(self.symbol, FAST_TIMEFRAME, limit=10)
-            if len(raw) < 2: return
-            df = pd.DataFrame(raw, columns=['ts','o','h','l','c','v'])
-            high, low, close = df['h'].iloc[-1], df['l'].iloc[-1], df['c'].iloc[-1]
-            trade['bars_held'] += 1
-            result = None
-            if trade['side'] == 'long':
-                if high >= trade['tp']: result = 'tp'
-                elif low <= trade['sl']: result = 'sl'
-            else:
-                if low <= trade['tp']: result = 'tp'
-                elif high >= trade['sl']: result = 'sl'
-            if result is None and trade['bars_held'] >= 50: result = 'timeout'
-            if result:
-                self.add_trade_result(result, trade['entry'], close, trade['side'])
-                self.active_trade = None
+        t = self.active_trade
+        price = fetch_price(self.symbol)
+        if price is None: return
+        entry = t["entry"]
+
+        # --- симуляция ---
+        if t.get("virtual"):
+            t["bars"] += 1
+            raw = fetch_ohlcv(self.symbol, ENTRY_TIMEFRAME, limit=3)
+            if len(raw) >= 2:
+                hi, lo = raw[-1][2], raw[-1][3]
+                if t["side"] == "long":
+                    if hi >= t["tp"]: self._close_virtual("tp", price); return
+                    if lo <= t["sl"]: self._close_virtual("sl", price); return
+                else:
+                    if lo <= t["tp"]: self._close_virtual("tp", price); return
+                    if hi >= t["sl"]: self._close_virtual("sl", price); return
+            if t["bars"] >= 60: self._close_virtual("timeout", price)
             return
 
-        # Реальная позиция: проверяем, существует ли ещё
-        pos = safe_fetch_positions([self.symbol])
-        active = [p for p in pos if float(p.get('contracts',0))>0 and p.get('side')==trade['side']]
+        # --- реальная позиция ---
+        # время жизни
+        if time.time() - t["time"] > TRADE_MAX_LIFETIME:
+            log.warning("Дедлайн — закрываем по рынку")
+            self._market_close(t["qty"], t["side"])
+            self._record_result("timeout", entry, price, t["side"]); return
+
+        pos = fetch_positions([self.symbol])
+        active = [p for p in pos if float(p.get("contracts", 0) or 0) > 0 and p.get("side") == t["side"]]
         if not active:
-            cur = exchange.fetch_ticker(self.symbol)['last']
-            # Определяем результат: если цена за TP или SL – считаем соответствующим
-            if trade['side'] == 'long':
-                result = 'tp' if cur >= trade['tp'] else ('sl' if cur <= trade['sl'] else 'timeout')
+            # позиция закрылась биржей (SL/TP). Определяем результат по цене.
+            if t["side"] == "long":
+                res = "tp" if price >= t["tp"] else ("sl" if price <= t["sl"] else "be")
             else:
-                result = 'tp' if cur <= trade['tp'] else ('sl' if cur >= trade['sl'] else 'timeout')
-            self.add_trade_result(result, trade['entry'], cur, trade['side'])
-            self.active_trade = None
-            return
+                res = "tp" if price <= t["tp"] else ("sl" if price >= t["sl"] else "be")
+            self._record_result(res, entry, price, t["side"]); return
 
-        # Позиция ещё открыта – проверяем условия трейлинга и частичного безубытка
-        ticker = safe_fetch_ticker(self.symbol)
-        if ticker is None: return
-        cur = ticker['last']
-        pnl_pct = (cur/trade['entry']-1)*100 if trade['side']=='long' else (trade['entry']/cur-1)*100
+        # P&L %
+        pnl = (price / entry - 1) * 100 if t["side"] == "long" else (entry / price - 1) * 100
+        atr = t["atr"]
 
-        # Частичный безубыток
-        if PARTIAL_BE_ENABLED and not trade['partial_done'] and pnl_pct >= PARTIAL_BE_PROFIT:
-            self.partial_close(0.5)
-            # После частичного закрытия подтягиваем SL в безубыток
-            new_sl = trade['entry']  # безубыток
-            self.update_stop_loss(new_sl)
-            trade['phase'] = 2
+        # безубыток при +1 ATR
+        if not t["be_done"]:
+            be_trig = BE_TRIGGER_ATR * atr
+            profit_dist = (price - entry) if t["side"] == "long" else (entry - price)
+            if profit_dist >= be_trig:
+                new_sl = entry * (1 + 0.0005) if t["side"] == "long" else entry * (1 - 0.0005)
+                new_sl = float(exchange.price_to_precision(self.symbol, new_sl))
+                self._move_sl(new_sl, t["side"])
+                t["sl"] = new_sl; t["be_done"] = True
+                log.info(f"🔒 Безубыток: SL→{new_sl:.4f} (P&L {pnl:+.2f}%)")
 
-        # Активация трейлинга
-        if not trade.get('trailing_active') and pnl_pct >= MIN_PROFIT_FOR_TRAIL:
-            trade['trailing_active'] = True
-            trade['peak'] = cur
-            log.info("Трейлинг активирован")
+        # трейлинг при +2 ATR
+        if not t["trail_active"]:
+            trig = TRAIL_TRIGGER_ATR * atr
+            profit_dist = (price - entry) if t["side"] == "long" else (entry - price)
+            if profit_dist >= trig:
+                t["trail_active"] = True
+                log.info(f"📐 Трейлинг активирован (P&L {pnl:+.2f}%)")
 
-        # Трейлинг (только если фаза >=2 и трейлинг активен)
-        if trade.get('trailing_active') and trade['phase'] >= 2:
-            atr = self.current_atr
-            trail_offset = TRAILING_STEP_ATR_MULT * atr
-            if trade['side'] == 'long':
-                if cur > trade['peak']:
-                    trade['peak'] = cur
-                new_sl = trade['peak'] * (1 - trail_offset)
-                if new_sl > trade['sl'] + trail_offset * 0.5:
-                    self.update_stop_loss(new_sl)
+        if t["trail_active"]:
+            if t["side"] == "long":
+                if price > t["peak"]: t["peak"] = price
+                new_sl = t["peak"] - TRAIL_ATR_MULT * atr
             else:
-                if cur < trade['peak']:
-                    trade['peak'] = cur
-                new_sl = trade['peak'] * (1 + trail_offset)
-                if new_sl < trade['sl'] - trail_offset * 0.5:
-                    self.update_stop_loss(new_sl)
+                if price < t["peak"]: t["peak"] = price
+                new_sl = t["peak"] + TRAIL_ATR_MULT * atr
+            new_sl = float(exchange.price_to_precision(self.symbol, new_sl))
+            if (t["side"] == "long" and new_sl > t["sl"]) or (t["side"] == "short" and new_sl < t["sl"]):
+                self._move_sl(new_sl, t["side"])
+                t["sl"] = new_sl
 
-        # Проверка максимального времени жизни
-        if time.time() - trade['time'] > TRADE_MAX_LIFETIME:
-            log.warning("Дедлайн — закрываем позицию")
-            close_side = 'sell' if trade['side']=='long' else 'buy'
-            try:
-                exchange.create_order(self.symbol, 'market', close_side, trade['qty'],
-                                      params={'reduceOnly': True})
-            except: pass
-            self.add_trade_result('timeout', trade['entry'], cur, trade['side'])
-            self.active_trade = None
-            return
+        log.info(f"👁 {self.symbol} {t['side']} цена={price:.4f} P&L={pnl:+.2f}% SL={t['sl']:.4f}")
 
-        log.info(f"Мониторинг: цена={cur:.4f} P&L={pnl_pct:+.2f}% SL={trade['sl']:.4f}")
+    def _move_sl(self, new_sl, side):
+        try:
+            exchange.create_order(self.symbol, "market",
+                                  "sell" if side == "long" else "buy", 0,
+                                  params={"stopLoss": new_sl, "reduceOnly": True})
+            log.info(f"   SL перемещён → {new_sl:.4f}")
+        except Exception as e:
+            log.warning(f"   не удалось переставить SL: {e}")
 
-    # ---------- Учёт результатов ----------
-    def add_trade_result(self, exit_type, entry, exit_price, side):
-        profit = (exit_price-entry)/entry*100 if side=='long' else (entry-exit_price)/entry*100
-        if exit_type=='tp':
-            sc=SCORE_WIN; self.wins+=1
-            self.consecutive_losses = 0
-        elif exit_type=='sl':
-            sc=SCORE_LOSS; self.losses+=1
-            self.consecutive_losses += 1
-            if self.consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
-                self.cooldown_until = time.time() + COOLDOWN_MINUTES * 60
-                log.warning(f"Серия из {MAX_CONSECUTIVE_LOSSES} убытков – пауза на {COOLDOWN_MINUTES} мин")
-        else:
-            sc = SCORE_PARTIAL if profit >= TAKE_PROFIT_ATR_MULT/2 else SCORE_TIMEOUT
-            self.timeouts+=1
-            self.consecutive_losses = 0
+    def _market_close(self, qty, side):
+        try:
+            exchange.create_order(self.symbol, "market",
+                                  "sell" if side == "long" else "buy", qty,
+                                  params={"reduceOnly": True})
+        except Exception as e:
+            log.error(f"Закрытие не удалось: {e}")
+
+    def _close_virtual(self, exit_type, price):
+        t = self.active_trade
+        self._record_result(exit_type, t["entry"], price, t["side"])
+
+    # ---------- Учёт результата ----------
+    def _record_result(self, exit_type, entry, exit_price, side):
+        profit = ((exit_price - entry) / entry * 100) if side == "long" \
+            else ((entry - exit_price) / entry * 100)
+        if exit_type == "tp":
+            sc = SCORE_WIN; self.wins += 1
+        elif exit_type == "sl":
+            sc = SCORE_LOSS; self.losses += 1
+        elif exit_type == "be":
+            sc = SCORE_BE
+        else:  # timeout
+            sc = SCORE_BE if profit >= 0 else SCORE_TIMEOUT
+            self.timeouts += 1
         self.score += sc
         self.total_trades += 1
-        idx = self.active_mode_idx
-        self.mode_stats[idx]['trades'] += 1
-        self.mode_stats[idx]['score'] += sc
-        log.info(f"🏁 {exit_type.upper()} {side} {profit:+.2f}% балл {sc:+d} (всего {self.score})")
-        if not self.first_trade_done:
-            self.first_trade_done = True
-            self.risk_fraction = max(MIN_RISK, self.risk_fraction - RISK_REDUCTION_STEP)
-            log.info(f"Риск снижен до {self.risk_fraction*100:.0f}%")
+        self.mode_stats[self.active_mode_idx]["trades"] += 1
+        self.mode_stats[self.active_mode_idx]["score"] += sc
+        wr = (self.wins / max(1, self.wins + self.losses)) * 100
+        log.info(f"🏁 {exit_type.upper()} {side} {profit:+.2f}% | балл {sc:+.1f} "
+                 f"| всего {self.score} | winrate {wr:.0f}%")
+        self.active_trade = None
+        self.last_signal_time = time.time()
+        self.save_state()
+
+        # адаптация режима
         if self.total_trades >= MIN_TRADES_FOR_ADAPT:
-            for i, s in enumerate(self.mode_stats):
-                if s['trades']>0: s['avg']=s['score']/s['trades']
-            best = max(range(len(self.mode_stats)), key=lambda i: self.mode_stats[i]['avg'])
-            if best != self.active_mode_idx:
-                log.info(f"Стиль изменён: {MODES[self.active_mode_idx]['name']} → {MODES[best]['name']}")
+            best = max(range(len(MODES)), key=lambda i: self.mode_stats[i]["score"])
+            if best != self.active_mode_idx and self.mode_stats[best]["trades"] >= 3:
+                log.info(f"⚙ Стиль: {MODES[self.active_mode_idx]['name']} → {MODES[best]['name']}")
                 self.active_mode_idx = best
 
     # ---------- Главный цикл ----------
     def run(self):
-        log.info("🚀 Запуск Гибридного Бота v2.0")
+        self.load_state()
+        log.info("=== Запуск гибридного бота v2 ===")
         try:
-            balance = exchange.fetch_balance()['USDT']['free']
-            if balance < 5:
-                log.warning(f"Баланс {balance:.2f}USDT – переход в симуляцию")
+            bal = exchange.fetch_balance()["USDT"]["free"]
+            if bal < 5:
+                log.warning(f"Баланс {bal:.2f} USDT — режим симуляции")
                 self.live_trading = False
-        except: self.live_trading = False
+            else:
+                log.info(f"Баланс: {bal:.2f} USDT")
+        except Exception:
+            self.live_trading = False
 
-        if not FIXED_SYMBOL:
-            self.symbol = self.scan_best_symbol()
-        else:
-            self.symbol = FIXED_SYMBOL
-
-        log.info(f"Пара: {self.symbol} | Режим: {'LIVE' if self.live_trading else 'SIM'} | Риск: {self.risk_fraction*100:.0f}%")
+        self.symbol = FIXED_SYMBOL or self.scan_best_symbol()
+        log.info(f"Пара: {self.symbol} | Режим: {'LIVE' if self.live_trading else 'SIM'}")
         if self.live_trading:
             try: exchange.set_leverage(LEVERAGE, self.symbol)
-            except: pass
+            except Exception: pass
 
-        # Первичное обучение NN и расчёт индикаторов
-        raw = safe_fetch_ohlcv(self.symbol, self.timeframe, limit=NN_LOOKBACK)
-        if len(raw) > 100:
-            df = pd.DataFrame(raw, columns=['ts','o','h','l','c','v'])
-            self.train_nn(df)
-            self.current_atr = calc_atr(df, 14).iloc[-1]
-            _, st_line = calc_supertrend(df, SUPERTREND_PERIOD, SUPERTREND_MULT)
-            self.supertrend_dir = 'bullish' if (df['c'].iloc[-1] > st_line.iloc[-1]) else 'bearish'
+        self._last_df = None
+        # первичное обучение
+        raw = fetch_ohlcv(self.symbol, ENTRY_TIMEFRAME, limit=NN_LOOKBACK)
+        if len(raw) > 200:
+            self._last_df = pd.DataFrame(raw, columns=["ts", "o", "h", "l", "c", "v"])
+            self.train_nn(self._last_df)
 
-        self.adaptive_confidence = NN_CONFIDENCE_MIN
         self.last_signal_time = time.time()
-        FORCED_TIMEOUT = 9.5 * 60
 
         while True:
             now = time.time()
-            # Кулдаун
-            if self.cooldown_until > now:
-                log.info(f"Ожидание окончания кулдауна до {datetime.fromtimestamp(self.cooldown_until).strftime('%H:%M:%S')}")
-                time.sleep(30)
-                continue
+            # периодический рескан
+            if not FIXED_SYMBOL and now - self.last_scan_time > SCAN_INTERVAL and not self.active_trade:
+                self.symbol = self.scan_best_symbol()
+                self.last_scan_time = now
 
-            # Принудительный вход для первой сделки (если не было)
-            if not self.first_trade_done and (now - self.start_time) > FORCED_TIMEOUT:
-                self.first_trade_done = True
-
-            # Обновление данных
-            raw = safe_fetch_ohlcv(self.symbol, self.timeframe, limit=200)
-            if len(raw) < 50:
+            raw = fetch_ohlcv(self.symbol, ENTRY_TIMEFRAME, limit=200)
+            if len(raw) < 60:
                 time.sleep(10); continue
-            df = pd.DataFrame(raw, columns=['ts','o','h','l','c','v'])
-            self.current_atr = calc_atr(df, 14).iloc[-1]
-            _, st_line = calc_supertrend(df, SUPERTREND_PERIOD, SUPERTREND_MULT)
-            self.supertrend_dir = 'bullish' if (df['c'].iloc[-1] > st_line.iloc[-1]) else 'bearish'
+            df = pd.DataFrame(raw, columns=["ts", "o", "h", "l", "c", "v"])
+            self._last_df = df
+            price = df["c"].iloc[-1]
 
-            # Мониторинг активной позиции (не блокирует)
+            # мониторинг активной сделки
             if self.active_trade:
                 self.monitor_position()
-                time.sleep(5)
-                continue
+                # мягкая адаптация порога NN по времени простоя
+                if self.live_trading and now - self.last_signal_time > 1800 \
+                        and self.nn_confidence > 0.45:
+                    self.nn_confidence = max(0.45, self.nn_confidence - 0.025)
+                    log.info(f"Порог NN снижен до {self.nn_confidence:.2f}")
+                time.sleep(15); continue
 
-            # Адаптивный порог NN
-            if self.first_trade_done:
-                if now - self.last_signal_time > 900:
-                    self.adaptive_confidence = max(0.3, self.adaptive_confidence - 0.05)
-                    log.info(f"Порог NN снижен до {self.adaptive_confidence:.2f}")
-                elif self.adaptive_confidence < NN_CONFIDENCE_MIN:
-                    self.adaptive_confidence = min(NN_CONFIDENCE_MIN, self.adaptive_confidence + 0.02)
-
+            # нет позиции -> ищем сигнал
             mode = MODES[self.active_mode_idx]
-            signal, rsi_val = self.get_signal(df, mode)
-            price = df['c'].iloc[-1]
-
+            signal = self.get_signal(df, mode)
             if signal:
-                log.info(f"Сигнал {signal.upper()}")
-                self.open_position(signal, price, risk_override=1.0 if not self.first_trade_done else None)
+                self.open_position(signal, price)
             else:
-                # Если первая сделка не совершена и время вышло – принудительный вход
-                if not self.first_trade_done and (now - self.start_time) > FORCED_TIMEOUT:
-                    force = 'long' if self.supertrend_dir != 'bearish' else 'short'
-                    log.info(f"Принудительный вход {force.upper()}")
-                    self.open_position(force, price, risk_override=1.0)
+                # плавно повышаем порог обратно, если давно не было сделок
+                if now - self.last_signal_time > 1800 and self.nn_confidence < NN_CONFIDENCE_MIN:
+                    self.nn_confidence = min(NN_CONFIDENCE_MIN, self.nn_confidence + 0.02)
 
-            if now - self._last_status_time > 30:
-                log.info(f"👁 {self.symbol} цена={price:.4f} RSI={rsi_val:.1f} ST={self.supertrend_dir} риск={self.risk_fraction*100:.0f}%")
-                self._last_status_time = now
+            if now - self._last_status > 60:
+                rsi = calc_rsi(df["c"], RSI_PERIOD).iloc[-1]
+                trend, _ = self.get_trend(self.symbol)
+                log.info(f"👁 {self.symbol} {price:.4f} RSI={rsi:.1f} тренд(15m)={trend} "
+                         f"стиль={mode['name']} счёт={self.score}")
+                self._last_status = now
 
+            # переобучение NN
             if now - self.last_nn_train > NN_RETRAIN_INTERVAL:
                 self.train_nn(df)
                 self.last_nn_train = now
 
-            time.sleep(5)
+            time.sleep(10)
+
 
 if __name__ == "__main__":
-    bot = HybridBot()
-    bot.run()
+    bot = HybridBotV2()
+    try:
+        bot.run()
+    except KeyboardInterrupt:
+        log.info("Остановлен пользователем")
+    except Exception as e:
+        log.exception(f"Критическая ошибка: {e}")
