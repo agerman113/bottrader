@@ -357,10 +357,10 @@ class HybridBotV2:
         df, feat = build_features(df_raw)
         self.feat_cols = feat
         future = df["c"].shift(-NN_FORWARD_BARS)
-        fwd_ret = (future - df["c"]) / df
+        fwd_ret = (future - df["c"]) / df["c"]
         target = (fwd_ret > NN_TARGET_PCT).astype(int)
-        work = df[feat + ["c"]].join(target.rename("y")).dropna()
-        work = work[work["y"].notna()]
+        target.name = "y"
+        work = df[feat + ["c"]].join(target).dropna()
         X = work[feat].values
         y = work["y"].astype(int).values
         if len(X) < 100:
@@ -455,7 +455,6 @@ class HybridBotV2:
         risk_amt = equity * RISK_PER_TRADE
         sl_dist = abs(entry - sl_price)
         if sl_dist <= 0: return None
-        notional = risk_amt * LEVERAGE / (sl_dist / entry)  # ~ qty*entry scaled by risk
         raw_qty = risk_amt / sl_dist
         market = exchange.market(self.symbol)
         min_amt = float(market.get("limits", {}).get("amount", {}).get("min", 0) or 0)
