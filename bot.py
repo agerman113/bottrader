@@ -14,11 +14,11 @@
 Работает с Bybit USDT‑M фьючерсами.
 """
 
-import os, sys, time, json, logging, requests, ccxt
+import os, time, json, logging, ccxt
 import pandas as pd, numpy as np
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Optional
 
 load_dotenv()
 
@@ -43,21 +43,21 @@ LEVERAGE = 3
 TIMEFRAME_TA = "5m"
 TIMEFRAME_TREND = "1h"
 TIMEFRAME_4H = "4h"
-SCAN_INTERVAL = 120                     # секунд между сканированиями
+SCAN_INTERVAL = 120
 
-MIN_SCORE = 1                            # порог не используется, но оставим
-ENTRY_CONFIRM_BARS = 0                  # подтверждение отключаем (можно 1)
+MIN_SCORE = 1
+ENTRY_CONFIRM_BARS = 0
 MA_CROSSOVER_ENABLED = True
 MA1_TYPE, MA2_TYPE = "EMA", "EMA"
 MA1_LENGTH, MA2_LENGTH = 21, 50
 
 # --- Стаканные сигналы ---
 ORDER_BOOK_DEPTH = 20
-WALL_THRESHOLD_VOL_RATIO = 3.0         # объём уровня > медианы других уровней в X раз
-MIN_WALL_VOLUME_USDT = 500             # минимальный объём стены в USDT
-MAX_WALL_DISTANCE_PCT = 2.0            # стена не дальше X% от best bid/ask
-IMBALANCE_RATIO_LONG = 1.5             # сумма bid / сумма ask > X
-IMBALANCE_RATIO_SHORT = 1 / 1.5        # сумма bid / сумма ask < 1/X
+WALL_THRESHOLD_VOL_RATIO = 3.0
+MIN_WALL_VOLUME_USDT = 500
+MAX_WALL_DISTANCE_PCT = 2.0
+IMBALANCE_RATIO_LONG = 1.5
+IMBALANCE_RATIO_SHORT = 1 / 1.5
 
 # --- TP/SL на основе ATR ---
 ATR_SL_MULT = 1.5
@@ -78,7 +78,7 @@ MIN_TRAILING_OFFSET = 0.6
 MIN_PROFIT_FOR_TRAIL = 1.0
 RR_EXIT_TRIGGER = 0.6
 SIGNAL_EXIT_ENABLED = True
-VOLUME_SPIKE_MULT = 5.0                # почти отключен
+VOLUME_SPIKE_MULT = 5.0
 VOLUME_AVG_PERIOD = 20
 
 DAILY_LOSS_LIMIT_PCT = 3.0
@@ -217,31 +217,29 @@ def detect_wall_signal(symbol: str) -> Optional[Dict]:
         asks = book["asks"]
         if len(bids) < 5 or len(asks) < 5: return None
 
-        # --- Расчёт медианных объёмов для каждой стороны (без учёта лучшего уровня) ---
+        # Медианные объёмы
         bid_volumes = [v for _, v in bids[1:]]
         ask_volumes = [v for _, v in asks[1:]]
         med_bid_vol = np.median(bid_volumes) if bid_volumes else 0
         med_ask_vol = np.median(ask_volumes) if ask_volumes else 0
 
-        # --- Поиск стены на покупку (bid wall) ---
         best_bid, best_bid_vol = bids[0]
-        bid_wall_vol = 0
-        bid_wall_price = 0
-        for price, vol in bids[:5]:  # проверяем первые 5 уровней
+        best_ask, best_ask_vol = asks[0]
+
+        # Поиск bid wall
+        bid_wall_vol = best_bid_vol
+        bid_wall_price = best_bid
+        for price, vol in bids[:5]:
             if vol >= WALL_THRESHOLD_VOL_RATIO * med_bid_vol and vol >= best_bid_vol * 0.8:
                 dist_pct = (best_bid - price) / best_bid * 100 if best_bid > 0 else 0
                 if dist_pct <= MAX_WALL_DISTANCE_PCT:
                     bid_wall_vol = vol
                     bid_wall_price = price
                     break
-        if bid_wall_vol == 0:
-            bid_wall_vol = best_bid_vol
-            bid_wall_price = best_bid
 
-        # --- Поиск стены на продажу (ask wall) ---
-        best_ask, best_ask_vol = asks[0]
-        ask_wall_vol = 0
-        ask_wall_price = 0
+        # Поиск ask wall
+        ask_wall_vol = best_ask_vol
+        ask_wall_price = best_ask
         for price, vol in asks[:5]:
             if vol >= WALL_THRESHOLD_VOL_RATIO * med_ask_vol and vol >= best_ask_vol * 0.8:
                 dist_pct = (price - best_ask) / best_ask * 100 if best_ask > 0 else 0
@@ -249,19 +247,14 @@ def detect_wall_signal(symbol: str) -> Optional[Dict]:
                     ask_wall_vol = vol
                     ask_wall_price = price
                     break
-        if ask_wall_vol == 0:
-            ask_wall_vol = best_ask_vol
-            ask_wall_price = best_ask
 
-        # --- Общий дисбаланс (первые DEPTH уровней) ---
-        total_bid_vol = sum(v for _, v in bids[:ORDER_BOOK_DEPTH])
-        total_ask_vol = sum(v for _, v in asks[:ORDER_BOOK_DEPTH])
-        imbalance = total_bid_vol / (total_ask_vol + 1e-10)
+        # Дисбаланс
+        total_bid = sum(v for _, v in bids[:ORDER_BOOK_DEPTH])
+        total_ask = sum(v for _, v in asks[:ORDER_BOOK_DEPTH])
+        imbalance = total_bid / (total_ask + 1e-10)
 
-        # --- Спред ---
         spread_pct = (best_ask - best_bid) / best_bid * 100 if best_bid > 0 else 0
 
-        # --- Формирование сигнала ---
         signal = None
         wall_usdt = 0
         if imbalance > IMBALANCE_RATIO_LONG and spread_pct < 1.0:
@@ -271,7 +264,6 @@ def detect_wall_signal(symbol: str) -> Optional[Dict]:
             signal = "short"
             wall_usdt = ask_wall_vol * ask_wall_price
         else:
-            # Дополнительно: если есть стена без сильного дисбаланса, но очень большая
             if bid_wall_vol * best_bid > MIN_WALL_VOLUME_USDT * 5 and imbalance > 1.2:
                 signal = "long"
                 wall_usdt = bid_wall_vol * best_bid
@@ -283,7 +275,7 @@ def detect_wall_signal(symbol: str) -> Optional[Dict]:
             return {
                 "signal": signal,
                 "wall_usdt": wall_usdt,
-                "price": best_ask if signal == "long" else best_bid,  # цена входа (аск для лонга, бид для шорта)
+                "price": best_ask if signal == "long" else best_bid,
                 "spread_pct": spread_pct,
                 "imbalance": imbalance,
             }
@@ -293,7 +285,7 @@ def detect_wall_signal(symbol: str) -> Optional[Dict]:
         return None
 
 # ============================================================
-#                  ОТКРЫТИЕ ПОЗИЦИИ (как в v10.2)
+#                  ОТКРЫТИЕ ПОЗИЦИИ (исправлено)
 # ============================================================
 def set_leverage(symbol, lev):
     try:
@@ -311,12 +303,14 @@ def set_leverage(symbol, lev):
     except Exception as e2:
         if "leverage not modified" in str(e2).lower(): return True
     log.warning(f"Плечо не удалось установить для {symbol}")
-    return True  # продолжаем
+    return True
 
 def open_position(symbol, side, qty, tp_price, sl_price):
     set_leverage(symbol, LEVERAGE)
     ticker = fetch_ticker(symbol)
-    if not ticker: return None, None
+    if not ticker or ticker.get("last") is None:
+        log.error(f"Не удалось получить цену для {symbol}")
+        return None, None
     price = float(ticker["last"])
     s = "buy" if side == "long" else "sell"
     try:
@@ -325,6 +319,7 @@ def open_position(symbol, side, qty, tp_price, sl_price):
             "stopLoss": float(exchange.price_to_precision(symbol, sl_price)),
         })
         entry = float(order.get("average", price))
+        log.info(f"{side.upper()} открыт: {qty} @ {entry:.6f}")
         return entry, qty
     except Exception as e:
         log.error(f"Ошибка открытия {side} {symbol}: {e}")
@@ -378,11 +373,12 @@ def monitor_position(symbol, entry, qty, start_time, sl_price, tp_price, side, a
         active = [p for p in pos_list if float(p.get("contracts", 0) or 0) > 0 and p.get("side") == side]
         if not active:
             ticker = fetch_ticker(symbol)
-            cur = float(ticker["last"]) if ticker else entry
+            cur = float(ticker["last"]) if ticker and ticker.get("last") else entry
             return "tp" if (cur >= tp_price if side=="long" else cur <= tp_price) or be_done else "sl"
         pos = active[0]
         ticker = fetch_ticker(symbol)
-        cur = float(ticker["last"]) if ticker else entry
+        if not ticker or ticker.get("last") is None: continue
+        cur = float(ticker["last"])
         qty_act = abs(float(pos.get("contracts", 0) or 0))
         pnl_pct = (cur/entry - 1)*100 if side=="long" else (entry/cur - 1)*100
 
@@ -402,9 +398,8 @@ def monitor_position(symbol, entry, qty, start_time, sl_price, tp_price, side, a
                 except Exception as e:
                     log.warning(f"Ошибка частичного закрытия: {e}")
 
-        # Signal exit (разворотный сигнал по Supertrend/Range Filter – упрощён)
+        # Signal exit по смене 4h тренда
         if SIGNAL_EXIT_ENABLED and be_done and pnl_pct > 0.5:
-            # Проверяем смену тренда 4h
             if (side == "long" and not trend_4h(symbol, "bull")) or (side == "short" and not trend_4h(symbol, "bear")):
                 log.info("Signal exit по 4h тренду")
                 close_position(symbol, qty_act, side)
@@ -464,13 +459,13 @@ def main():
 
             свободный = get_balance(free=True)
             if свободный < MIN_BALANCE:
-                active = fetch_positions()
-                if not [p for p in active if float(p.get("contracts",0))>0]:
+                active = [p for p in fetch_positions() if float(p.get("contracts",0))>0]
+                if not active:
                     log.warning("Мало средств")
                     time.sleep(300)
                     continue
 
-            # Проверка дневного лимита
+            # Дневной лимит
             if stats["депозит_старт"] > 0:
                 loss = (stats["депозит_старт"] - get_balance(free=False)) / stats["депозит_старт"] * 100
                 if loss >= DAILY_LOSS_LIMIT_PCT:
@@ -478,25 +473,20 @@ def main():
                     time.sleep(DAILY_LOSS_PAUSE_SEC)
                     continue
 
-            # Активные позиции — ждём
-            if fetch_positions():
+            # Ждём закрытия открытых позиций
+            if [p for p in fetch_positions() if float(p.get("contracts",0))>0]:
                 time.sleep(30)
                 continue
 
-            # Сканирование
+            # Сканирование стаканов
             signals = []
             for sym in SYMBOLS:
                 if sym in заблокированные and time.time() < заблокированные[sym]:
                     continue
-                if not trend_4h(sym, "bull") and not trend_4h(sym, "bear"):
-                    continue   # без тренда не входим
                 sig = detect_wall_signal(sym)
                 if sig:
-                    # Фильтр тренда
-                    if sig["signal"] == "long" and not trend_4h(sym, "bull"):
-                        continue
-                    if sig["signal"] == "short" and not trend_4h(sym, "bear"):
-                        continue
+                    if sig["signal"] == "long" and not trend_4h(sym, "bull"): continue
+                    if sig["signal"] == "short" and not trend_4h(sym, "bear"): continue
                     signals.append((sym, sig))
 
             if not signals:
@@ -504,19 +494,18 @@ def main():
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            # Сортируем по wall_usdt и берём лучший
             signals.sort(key=lambda x: x[1]["wall_usdt"], reverse=True)
             sym, sig = signals[0]
 
-            # Проверка MA кроссовера (по быстрому df)
+            # Проверка MA кроссовера и объёма
             df_ta = pd.DataFrame(fetch_ohlcv(sym, TIMEFRAME_TA, limit=50), columns=["ts","o","h","l","c","v"])
+            if len(df_ta) < 20: continue
             if not ma_cross_ok(df_ta, sig["signal"]):
                 log.info(f"MA кроссовер не пройден для {sym}")
                 continue
             if not volume_spike_guard(df_ta):
                 continue
 
-            # Расчёт ATR, SL, TP
             atr_val = calc_atr(df_ta, 14).iloc[-1] if len(df_ta) > 14 else sig["price"] * 0.01
             price = sig["price"]
             sl_dist = atr_val * ATR_SL_MULT
@@ -527,23 +516,27 @@ def main():
             else:
                 sl = price + sl_dist
                 tp = price - tp_dist
-            sl = max(price * (1 - MAX_SL_PERCENT/100), min(price * (1 - MIN_SL_PERCENT/100), sl)) if sig["signal"]=="long" else min(price * (1 + MAX_SL_PERCENT/100), max(price * (1 + MIN_SL_PERCENT/100), sl))
-            tp = max(price * (1 + TP_PERCENT/100), tp) if sig["signal"]=="long" else min(price * (1 - TP_PERCENT/100), tp)
-            rr = abs(tp - price) / abs(sl - price) if abs(price-sl) > 0 else 0
+
+            # Ограничиваем SL/TP
+            if sig["signal"] == "long":
+                sl = max(price * (1 - MAX_SL_PERCENT/100), min(price * (1 - MIN_SL_PERCENT/100), sl))
+                tp = max(price * (1 + TP_PERCENT/100), tp)
+            else:
+                sl = min(price * (1 + MAX_SL_PERCENT/100), max(price * (1 + MIN_SL_PERCENT/100), sl))
+                tp = min(price * (1 - TP_PERCENT/100), tp)
+
+            rr = abs(tp - price) / abs(sl - price) if abs(price - sl) > 0 else 0
             if rr < 2.0:
                 log.info(f"RR={rr:.1f} < 2.0, пропуск")
                 continue
 
-            # Размер позиции
             risk_usdt = свободный * RISK_PCT / 100
             qty = risk_usdt / abs(sl - price)
-            # Округление
             try:
                 qty = float(exchange.amount_to_precision(sym, qty))
             except:
                 pass
-            if qty <= 0:
-                continue
+            if qty <= 0: continue
 
             log.info(f"Вход {sig['signal'].upper()} {sym} стена={sig['wall_usdt']:.0f} USDT цена={price:.6f} SL={sl:.6f} TP={tp:.6f}")
             entry, qty_open = open_position(sym, sig["signal"], qty, tp, sl)
@@ -559,9 +552,7 @@ def main():
             stats["сделок_всего"] += 1
             start_t = time.time()
             result = monitor_position(sym, entry, qty_open, start_t, sl, tp, sig["signal"], atr_val)
-            pnl = (get_balance(free=False) - get_balance(free=False))  # упрощённо
-            # Более точный расчёт PnL
-            cur_price = fetch_ticker(sym)["last"] if fetch_ticker(sym) else entry
+            cur_price = float(fetch_ticker(sym).get("last", entry)) if fetch_ticker(sym) else entry
             pnl = (cur_price - entry) * qty_open if sig["signal"]=="long" else (entry - cur_price) * qty_open
             stats["прибыль_usdt" if result=="tp" else "убыток_usdt"] += max(0, pnl) if result=="tp" else abs(min(0, pnl))
             stats["тейкпрофит" if result=="tp" else "стоплосс"] += 1
