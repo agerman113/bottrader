@@ -3,15 +3,7 @@
 
 """
 ГИБРИДНЫЙ БОТ v10.3 — СТАКАННЫЙ СКАЛЬПЕР НА ОСНОВЕ МОНСТРА
-=============================================================
-Взят каркас v10.2 (риск‑менеджмент, мониторинг, частичный безубыток,
-трейлинг, отчёты), а сигналы заменены на анализ Order Book:
-  • Поиск крупных лимитных стен (bid/ask wall)
-  • Дисбаланс bid/ask объёмов
-  • Фильтр тренда 4h, MA‑кроссовер, минимальная ATR
-  • Выбор лучшей монеты по объёму стены в USDT
-
-Работает с Bybit USDT‑M фьючерсами.
+(с расширенным логгированием этапов)
 """
 
 import os, time, json, logging, ccxt
@@ -209,7 +201,6 @@ def volume_spike_guard(df):
 #          ДЕТЕКТОР СТЕНЫ ЗАЯВОК (Order Book Wall)
 # ============================================================
 def detect_wall_signal(symbol: str) -> Optional[Dict]:
-    """Возвращает сигнал на основе стены в стакане."""
     try:
         book = safe_api(exchange.fetch_order_book, symbol, ORDER_BOOK_DEPTH)
         if not book: return None
@@ -217,7 +208,6 @@ def detect_wall_signal(symbol: str) -> Optional[Dict]:
         asks = book["asks"]
         if len(bids) < 5 or len(asks) < 5: return None
 
-        # Медианные объёмы
         bid_volumes = [v for _, v in bids[1:]]
         ask_volumes = [v for _, v in asks[1:]]
         med_bid_vol = np.median(bid_volumes) if bid_volumes else 0
@@ -226,7 +216,6 @@ def detect_wall_signal(symbol: str) -> Optional[Dict]:
         best_bid, best_bid_vol = bids[0]
         best_ask, best_ask_vol = asks[0]
 
-        # Поиск bid wall
         bid_wall_vol = best_bid_vol
         bid_wall_price = best_bid
         for price, vol in bids[:5]:
@@ -237,7 +226,6 @@ def detect_wall_signal(symbol: str) -> Optional[Dict]:
                     bid_wall_price = price
                     break
 
-        # Поиск ask wall
         ask_wall_vol = best_ask_vol
         ask_wall_price = best_ask
         for price, vol in asks[:5]:
@@ -248,11 +236,9 @@ def detect_wall_signal(symbol: str) -> Optional[Dict]:
                     ask_wall_price = price
                     break
 
-        # Дисбаланс
         total_bid = sum(v for _, v in bids[:ORDER_BOOK_DEPTH])
         total_ask = sum(v for _, v in asks[:ORDER_BOOK_DEPTH])
         imbalance = total_bid / (total_ask + 1e-10)
-
         spread_pct = (best_ask - best_bid) / best_bid * 100 if best_bid > 0 else 0
 
         signal = None
@@ -398,14 +384,12 @@ def monitor_position(symbol, entry, qty, start_time, sl_price, tp_price, side, a
                 except Exception as e:
                     log.warning(f"Ошибка частичного закрытия: {e}")
 
-        # Signal exit по смене 4h тренда
         if SIGNAL_EXIT_ENABLED and be_done and pnl_pct > 0.5:
             if (side == "long" and not trend_4h(symbol, "bull")) or (side == "short" and not trend_4h(symbol, "bear")):
                 log.info("Signal exit по 4h тренду")
                 close_position(symbol, qty_act, side)
                 return "tp"
 
-        # Безубыток
         if not partial_done and not be_done and pnl_pct >= 0.3:
             new_sl = entry * (1 + BYBIT_FEE*2 + 0.0003) if side=="long" else entry * (1 - BYBIT_FEE*2 - 0.0003)
             if update_sl(symbol, new_sl, side):
@@ -413,7 +397,6 @@ def monitor_position(symbol, entry, qty, start_time, sl_price, tp_price, side, a
                 be_done = True
                 log.info("Безубыток")
 
-        # Трейлинг
         if be_done:
             if not trailing_active:
                 if (side=="long" and cur >= rr_trigger) or (side=="short" and cur <= rr_trigger):
@@ -436,7 +419,7 @@ def monitor_position(symbol, entry, qty, start_time, sl_price, tp_price, side, a
     return "sl"
 
 # ============================================================
-#                    ГЛАВНЫЙ ЦИКЛ
+#                    ГЛАВНЫЙ ЦИКЛ (с детальными логами)
 # ============================================================
 def main():
     global stats
@@ -447,21 +430,27 @@ def main():
     stats["депозит_старт"] = get_balance(free=False)
     stats["старт_время"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
     log.info(f"=== СТАКАННЫЙ БОТ v10.3 ===")
+    log.info(f"Депозит: {stats['депозит_старт']:.2f} USDT")
+    
+    # Сразу выводим первый отчёт, чтобы видеть, что бот работает
+    stats["последний_отчёт"] = 0  # чтобы сработал при первой итерации
+
     заблокированные: Dict[str, float] = {}
     fail_attempts: Dict[str, int] = {}
 
     while True:
         try:
+            # Периодический отчёт
             if time.time() - stats.get("последний_отчёт", 0) >= REPORT_INTERVAL:
                 bal = get_balance(free=False)
-                log.info(f"Баланс: {bal:.2f} USDT | Сделок: {stats['сделок_всего']} | TP: {stats['тейкпрофит']} SL: {stats['стоплосс']}")
+                log.info(f"📊 Отчёт: Баланс={bal:.2f} USDT | Сделок: {stats['сделок_всего']} | TP: {stats['тейкпрофит']} SL: {stats['стоплосс']}")
                 stats["последний_отчёт"] = time.time()
 
             свободный = get_balance(free=True)
             if свободный < MIN_BALANCE:
                 active = [p for p in fetch_positions() if float(p.get("contracts",0))>0]
                 if not active:
-                    log.warning("Мало средств")
+                    log.warning("Мало средств, жду 300с")
                     time.sleep(300)
                     continue
 
@@ -469,41 +458,57 @@ def main():
             if stats["депозит_старт"] > 0:
                 loss = (stats["депозит_старт"] - get_balance(free=False)) / stats["депозит_старт"] * 100
                 if loss >= DAILY_LOSS_LIMIT_PCT:
-                    log.warning("Дневной лимит")
+                    log.warning(f"Дневной лимит {loss:.2f}%, пауза {DAILY_LOSS_PAUSE_SEC//60} мин")
                     time.sleep(DAILY_LOSS_PAUSE_SEC)
                     continue
 
             # Ждём закрытия открытых позиций
-            if [p for p in fetch_positions() if float(p.get("contracts",0))>0]:
+            open_positions = [p for p in fetch_positions() if float(p.get("contracts",0))>0]
+            if open_positions:
+                log.info(f"Открытые позиции: {[p['symbol'] for p in open_positions]}, жду 30с")
                 time.sleep(30)
                 continue
 
-            # Сканирование стаканов
+            # ================= СКАНИРОВАНИЕ =================
+            log.info("── Начало сканирования стаканов ──")
             signals = []
+            checked = 0
             for sym in SYMBOLS:
                 if sym in заблокированные and time.time() < заблокированные[sym]:
                     continue
+                checked += 1
                 sig = detect_wall_signal(sym)
                 if sig:
-                    if sig["signal"] == "long" and not trend_4h(sym, "bull"): continue
-                    if sig["signal"] == "short" and not trend_4h(sym, "bear"): continue
+                    if sig["signal"] == "long" and not trend_4h(sym, "bull"):
+                        log.debug(f"{sym}: LONG сигнал, но тренд 4h не бычий")
+                        continue
+                    if sig["signal"] == "short" and not trend_4h(sym, "bear"):
+                        log.debug(f"{sym}: SHORT сигнал, но тренд 4h не медвежий")
+                        continue
                     signals.append((sym, sig))
+                    log.info(f"Найден сигнал {sig['signal'].upper()} {sym} стена={sig['wall_usdt']:.0f} USDT")
 
+            log.info(f"Проверено {checked} монет, найдено {len(signals)} сигналов")
             if not signals:
-                log.info("Нет сигналов")
+                log.info("Нет сигналов, ожидание")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
+            # Сортируем и выбираем лучший
             signals.sort(key=lambda x: x[1]["wall_usdt"], reverse=True)
             sym, sig = signals[0]
+            log.info(f"Лучший сигнал: {sig['signal'].upper()} {sym} стена={sig['wall_usdt']:.0f} USDT")
 
             # Проверка MA кроссовера и объёма
             df_ta = pd.DataFrame(fetch_ohlcv(sym, TIMEFRAME_TA, limit=50), columns=["ts","o","h","l","c","v"])
-            if len(df_ta) < 20: continue
+            if len(df_ta) < 20:
+                log.warning(f"Недостаточно данных для {sym}")
+                continue
             if not ma_cross_ok(df_ta, sig["signal"]):
                 log.info(f"MA кроссовер не пройден для {sym}")
                 continue
             if not volume_spike_guard(df_ta):
+                log.info(f"Volume spike guard не пройден для {sym}")
                 continue
 
             atr_val = calc_atr(df_ta, 14).iloc[-1] if len(df_ta) > 14 else sig["price"] * 0.01
@@ -517,7 +522,7 @@ def main():
                 sl = price + sl_dist
                 tp = price - tp_dist
 
-            # Ограничиваем SL/TP
+            # Ограничения SL/TP
             if sig["signal"] == "long":
                 sl = max(price * (1 - MAX_SL_PERCENT/100), min(price * (1 - MIN_SL_PERCENT/100), sl))
                 tp = max(price * (1 + TP_PERCENT/100), tp)
@@ -536,9 +541,11 @@ def main():
                 qty = float(exchange.amount_to_precision(sym, qty))
             except:
                 pass
-            if qty <= 0: continue
+            if qty <= 0:
+                log.warning("Размер позиции 0, пропуск")
+                continue
 
-            log.info(f"Вход {sig['signal'].upper()} {sym} стена={sig['wall_usdt']:.0f} USDT цена={price:.6f} SL={sl:.6f} TP={tp:.6f}")
+            log.info(f"✅ Вход {sig['signal'].upper()} {sym} цена={price:.6f} SL={sl:.6f} TP={tp:.6f}")
             entry, qty_open = open_position(sym, sig["signal"], qty, tp, sl)
             if not entry:
                 log.warning("Не удалось открыть позицию")
@@ -546,6 +553,7 @@ def main():
                 if fail_attempts[sym] >= SYMBOL_MAX_FAIL_ATTEMPTS:
                     заблокированные[sym] = time.time() + SYMBOL_BLOCK_AFTER_FAIL
                     fail_attempts.pop(sym, None)
+                    log.warning(f"{sym} заблокирован после {SYMBOL_MAX_FAIL_ATTEMPTS} неудач")
                 continue
             fail_attempts.pop(sym, None)
 
@@ -559,8 +567,10 @@ def main():
             stats["sl_streak"] = 0 if result=="tp" else stats.get("sl_streak",0)+1
             if result == "tp":
                 заблокированные[sym] = time.time() + SYMBOL_BLOCK_AFTER_TP
+                log.info(f"TP {sym} заблокирован на {SYMBOL_BLOCK_AFTER_TP//60} мин")
             else:
                 заблокированные[sym] = time.time() + SYMBOL_BLOCK_AFTER_SL
+                log.info(f"SL {sym} заблокирован на {SYMBOL_BLOCK_AFTER_SL//60} мин")
                 if stats["sl_streak"] >= SL_STREAK_LIMIT:
                     log.warning("Серия SL, пауза")
                     time.sleep(SL_STREAK_PAUSE)
