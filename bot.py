@@ -3,18 +3,27 @@
 
 """
 ================================================================================
-Bybit ГИБРИДНЫЙ ПРОФЕССИОНАЛЬНЫЙ БОТ — v10.1 FIXED
+Bybit ГИБРИДНЫЙ ПРОФЕССИОНАЛЬНЫЙ БОТ — v10.2
 ================================================================================
-ИСПРАВЛЕНИЯ v10.1:
-1. КРИТИЧНО: float(NoneType) — исправлена обработка order.get("average")
-2. КРИТИЧНО: "leverage not modified" больше не блокирует сделку — это не ошибка
+ИСПРАВЛЕНИЯ v10.2 (поверх v10.1):
+1. FIX: Счётчик попыток на монету — после N неудачных отменённых входов
+        символ блокируется на SYMBOL_BLOCK_AFTER_FAIL секунд.
+2. FIX: ENTRY_CONFIRM_MIN_SCORE теперь не может быть ниже MIN_SCORE.
+        Гарантия логической последовательности порогов.
+3. FIX: мониторить_позицию — все exchange.fetch_positions заменены на
+        safe_api_call(...) для защиты от rate limit в цикле мониторинга.
+4. FIX: calculate_cointegration — hedge_ratio теперь берётся через OLS
+        регрессию (np.polyfit), а не из coint_result[0][1] который является
+        скалярной t-статистикой и не является массивом.
+================================================================================
+ИСПРАВЛЕНИЯ v10.1 (базовые):
+1. КРИТИЧНО: float(NoneType) — безопасная обработка order.get("average")
+2. КРИТИЧНО: "leverage not modified" больше не блокирует сделку
 3. КРИТИЧНО: Баланс свободный vs total — правильное определение margin balance
 4. Детальный отчёт по каждой сделке в лог + файл
 5. Двухфакторная система обхода ошибок биржи
 6. Rate limit — очередь запросов с задержками
 7. Незакрытые позиции при старте — бот их подхватывает
-8. Убраны неработающие блоки: ML, Monte Carlo (нет данных для обучения)
-9. Квантовый анализ и Order Flow — оставлены как есть (не трогать)
 ================================================================================
 """
 
@@ -47,7 +56,7 @@ SYMBOLS = [
     "SOL/USDT:USDT", "ADA/USDT:USDT", "TRX/USDT:USDT", "TON/USDT:USDT",
     "AVAX/USDT:USDT", "DOT/USDT:USDT", "LTC/USDT:USDT", "BCH/USDT:USDT",
     "ATOM/USDT:USDT", "XLM/USDT:USDT", "NEAR/USDT:USDT", "DOGE/USDT:USDT",
-    "PEPE/USDT:USDT", "WIF/USDT:USDT", "BOME/USDT:USDT", "FET/USDT:USDT",
+    "1000PEPE/USDT:USDT", "WIF/USDT:USDT", "BOME/USDT:USDT",
     "RENDER/USDT:USDT", "TAO/USDT:USDT", "WLD/USDT:USDT", "ARKM/USDT:USDT",
     "IO/USDT:USDT", "ONDO/USDT:USDT", "VIRTUAL/USDT:USDT", "UNI/USDT:USDT",
     "AAVE/USDT:USDT", "ARB/USDT:USDT", "OP/USDT:USDT", "LINK/USDT:USDT",
@@ -128,10 +137,18 @@ VOLUME_AVG_PERIOD = 20
 
 SIGNAL_EXIT_ENABLED = True
 ENTRY_CONFIRM_BARS = 1
-ENTRY_CONFIRM_MIN_SCORE = 60
+# FIX #2: ENTRY_CONFIRM_MIN_SCORE не может быть ниже MIN_SCORE.
+# Если задать вручную ниже MIN_SCORE — будет автоматически поднято до MIN_SCORE.
+_ENTRY_CONFIRM_MIN_SCORE_RAW = 60
+ENTRY_CONFIRM_MIN_SCORE = max(_ENTRY_CONFIRM_MIN_SCORE_RAW, MIN_SCORE)
 
-SYMBOL_BLOCK_AFTER_TP = 90
-SYMBOL_BLOCK_AFTER_SL = 180
+SYMBOL_BLOCK_AFTER_TP = 90      # минут
+SYMBOL_BLOCK_AFTER_SL = 180     # минут
+
+# FIX #1: новые параметры счётчика попыток на монету
+SYMBOL_MAX_FAIL_ATTEMPTS = 3    # максимум отменённых входов подряд
+SYMBOL_BLOCK_AFTER_FAIL = 120   # минут блокировки после SYMBOL_MAX_FAIL_ATTEMPTS провалов
+
 SL_STREAK_LIMIT = 2
 SL_STREAK_PAUSE = 3600
 SL_STREAK_EXTRA_PAUSE = 300
@@ -158,7 +175,7 @@ SR_CLUSTER_TOL = 0.005
 SR_BLOCK_DIST_PCT = 0.3
 
 # --- RATE LIMIT ЗАЩИТА ---
-API_CALL_DELAY = 0.3   # секунды между запросами к одному символу
+API_CALL_DELAY = 0.3    # секунды между запросами к одному символу
 API_RATE_LIMIT_PAUSE = 5  # пауза при rate limit
 
 # ============================================================
@@ -175,6 +192,13 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
+
+# Логируем итоговое значение порога подтверждения после проверки
+if ENTRY_CONFIRM_MIN_SCORE != _ENTRY_CONFIRM_MIN_SCORE_RAW:
+    log.warning(
+        f"ENTRY_CONFIRM_MIN_SCORE поднят с {_ENTRY_CONFIRM_MIN_SCORE_RAW} "
+        f"до {ENTRY_CONFIRM_MIN_SCORE} (= MIN_SCORE={MIN_SCORE})"
+    )
 
 # ============================================================
 #                         БИРЖА
@@ -215,7 +239,7 @@ def safe_api_call(func, *args, retries=3, delay=1.0, ignore_errors=None, **kwarg
     """
     Универсальная обёртка для вызовов API биржи.
     Автоматически повторяет при rate limit, сетевых ошибках.
-    ignore_errors — список строк, которые не считаются ошибкой (например 'leverage not modified').
+    ignore_errors — список строк, которые не считаются ошибкой.
     """
     ignore_errors = ignore_errors or []
     for attempt in range(retries):
@@ -230,11 +254,10 @@ def safe_api_call(func, *args, retries=3, delay=1.0, ignore_errors=None, **kwarg
             delay *= 2
         except Exception as e:
             err_str = str(e)
-            # Проверяем — может это не настоящая ошибка
             for ignore in ignore_errors:
                 if ignore.lower() in err_str.lower():
                     log.info(f"Игнорируем ожидаемый ответ: {ignore}")
-                    return None  # None = "не ошибка, просто ничего не произошло"
+                    return None
             log.error(f"API ошибка: {e} (попытка {attempt+1}/{retries})")
             if attempt < retries - 1:
                 time.sleep(delay)
@@ -261,6 +284,22 @@ def safe_fetch_ticker(symbol: str) -> Optional[dict]:
     except Exception as e:
         log.debug(f"fetch_ticker {symbol}: {e}")
         return None
+
+
+def safe_fetch_positions(symbols: Optional[List[str]] = None) -> List[dict]:
+    """
+    FIX #3: Централизованная безопасная функция получения позиций.
+    Используется везде вместо прямого exchange.fetch_positions.
+    """
+    try:
+        if symbols:
+            result = safe_api_call(exchange.fetch_positions, symbols, retries=3)
+        else:
+            result = safe_api_call(exchange.fetch_positions, retries=3)
+        return result if result is not None else []
+    except Exception as e:
+        log.warning(f"safe_fetch_positions ошибка: {e}")
+        return []
 
 
 # ============================================================
@@ -501,37 +540,64 @@ def bayes_trend_probability(df: pd.DataFrame) -> float:
     except Exception: return 0.5
 
 # ============================================================
-#       КВАНТОВЫЙ МОДУЛЬ (Ernest Chan) — НЕ ТРОГАТЬ
+#       КВАНТОВЫЙ МОДУЛЬ (Ernest Chan) — FIX #4
 # ============================================================
 
 def calculate_cointegration(pair: Tuple[str, str], window: int = COINTEGRATION_WINDOW) -> Dict[str, Any]:
+    """
+    FIX #4: hedge_ratio теперь вычисляется через OLS (np.polyfit),
+    а не через coint_result[0][1].
+    coint() возвращает (t_statistic: float, pvalue: float, crit_values: array).
+    t_statistic — скаляр, не массив, поэтому [0][1] вызывало IndexError/TypeError.
+    """
     try:
         symbol1, symbol2 = pair
         ohlcv1 = safe_fetch_ohlcv(symbol1, TIMEFRAME_TA, limit=window)
         ohlcv2 = safe_fetch_ohlcv(symbol2, TIMEFRAME_TA, limit=window)
         if len(ohlcv1) < window or len(ohlcv2) < window:
             return {"coint": 0, "pvalue": 1, "spread": 0, "zscore": 0, "valid": False}
+
         df1 = pd.DataFrame(ohlcv1, columns=["ts", "o", "h", "l", "c", "v"])["c"]
         df2 = pd.DataFrame(ohlcv2, columns=["ts", "o", "h", "l", "c", "v"])["c"]
+
+        # Убеждаемся в одинаковой длине
+        min_len = min(len(df1), len(df2))
+        df1 = df1.iloc[-min_len:].reset_index(drop=True)
+        df2 = df2.iloc[-min_len:].reset_index(drop=True)
+
+        # Стационарность — если нет, берём diff
         adf1 = adfuller(df1)
         adf2 = adfuller(df2)
         if adf1[1] > 0.05 or adf2[1] > 0.05:
             df1 = df1.diff().dropna()
             df2 = df2.diff().dropna()
-        coint_result = coint(df1, df2)
-        coint_coeff = coint_result[0]
-        pvalue = coint_result[1]
-        hedge_ratio = coint_result[0][1]
+            # Выравниваем длину после diff
+            min_len = min(len(df1), len(df2))
+            df1 = df1.iloc[-min_len:].reset_index(drop=True)
+            df2 = df2.iloc[-min_len:].reset_index(drop=True)
+
+        # Тест коинтеграции: возвращает (t_stat, pvalue, crit_values)
+        coint_t, pvalue, crit_vals = coint(df1, df2)
+
+        # FIX: hedge_ratio через OLS регрессию (np.polyfit — slope, intercept)
+        # y = hedge_ratio * x + intercept → spread = df1 - hedge_ratio * df2
+        hedge_ratio, _ = np.polyfit(df2.values, df1.values, 1)
+
         spread = df1 - hedge_ratio * df2
         spread_mean = spread.mean()
         spread_std = spread.std()
-        current_spread = spread.iloc[-1]
+        current_spread = float(spread.iloc[-1])
         zscore = (current_spread - spread_mean) / spread_std if spread_std > 0 else 0
+
         return {
-            "coint": float(coint_coeff), "pvalue": float(pvalue),
-            "spread": float(current_spread), "zscore": float(zscore),
-            "hedge_ratio": float(hedge_ratio), "spread_mean": float(spread_mean),
-            "spread_std": float(spread_std), "valid": True
+            "coint": float(coint_t),
+            "pvalue": float(pvalue),
+            "spread": current_spread,
+            "zscore": float(zscore),
+            "hedge_ratio": float(hedge_ratio),
+            "spread_mean": float(spread_mean),
+            "spread_std": float(spread_std),
+            "valid": True,
         }
     except Exception as e:
         log.debug(f"Ошибка коинтеграции для {pair}: {e}")
@@ -718,7 +784,7 @@ def рассчитать_размер_позиции(score: int, баланс: f
     return round(max(1.0, margin_usdt), 2)
 
 # ============================================================
-#           РАСШИРЕННАЯ СКОРИНГОВАЯ СИСТЕМА — НЕ ТРОГАТЬ
+#           РАСШИРЕННАЯ СКОРИНГОВАЯ СИСТЕМА
 # ============================================================
 
 def получить_скор(symbol: str) -> dict:
@@ -878,28 +944,24 @@ def применить_ai_корректировку(score: int, symbol: str) ->
     return score
 
 # ============================================================
-#         ИСПРАВЛЕННОЕ УПРАВЛЕНИЕ ПЛЕЧОМ
+#         УПРАВЛЕНИЕ ПЛЕЧОМ
 # ============================================================
 
 def установить_плечо(symbol: str, leverage: int) -> bool:
     """
-    ИСПРАВЛЕНИЕ: 'leverage not modified' — НЕ ошибка!
-    Плечо уже стоит нужное — продолжаем.
+    'leverage not modified' — НЕ ошибка! Плечо уже стоит нужное.
     """
-    # Метод 1: стандартный ccxt
     try:
         exchange.set_leverage(leverage, symbol, params={"buyLeverage": leverage, "sellLeverage": leverage})
         log.info(f"Плечо {leverage}x установлено для {symbol}")
         return True
     except Exception as e1:
         err1 = str(e1)
-        # "leverage not modified" = плечо уже правильное, это не ошибка
         if "leverage not modified" in err1.lower() or "110043" in err1:
             log.info(f"Плечо {leverage}x уже установлено для {symbol} — OK")
             return True
         log.warning(f"Метод 1 плеча не сработал: {e1}")
 
-    # Метод 2: прямой v5 API
     try:
         coin_sym = symbol.replace("/", "").replace(":USDT", "")
         exchange.private_post_v5_position_set_leverage({
@@ -915,10 +977,8 @@ def установить_плечо(symbol: str, leverage: int) -> bool:
             return True
         log.warning(f"Метод 2 плеча не сработал: {e2}")
 
-    # Метод 3: считаем что плечо установлено (биржа может уже иметь нужное)
-    # Проверяем текущее плечо через позицию
     try:
-        positions = exchange.fetch_positions([symbol])
+        positions = safe_fetch_positions([symbol])
         for pos in positions:
             cur_lev = pos.get("leverage")
             if cur_lev and abs(float(cur_lev) - leverage) < 0.1:
@@ -928,7 +988,7 @@ def установить_плечо(symbol: str, leverage: int) -> bool:
         log.debug(f"Проверка плеча через позицию не удалась: {e3}")
 
     log.warning(f"Плечо не удалось установить явно для {symbol}, продолжаем с текущим")
-    return True  # Не блокируем сделку из-за плеча!
+    return True
 
 
 def обновить_sl_на_бирже(symbol: str, new_sl: float, side: str = "long") -> bool:
@@ -946,18 +1006,12 @@ def обновить_sl_на_бирже(symbol: str, new_sl: float, side: str = 
         return False
 
 # ============================================================
-#         ИСПРАВЛЕННОЕ ОТКРЫТИЕ ПОЗИЦИИ
+#         ОТКРЫТИЕ ПОЗИЦИИ
 # ============================================================
 
 def открыть_позицию(symbol: str, margin_usdt: float, tp_price: float,
                     sl_price: float, side: str = "long") -> Tuple[Optional[float], Optional[float]]:
-    """
-    ИСПРАВЛЕНИЕ:
-    - Безопасное получение entry price из ордера (None → использовать текущую цену)
-    - Плечо не блокирует сделку
-    """
     try:
-        # Устанавливаем плечо (НЕ блокируем при ошибке)
         установить_плечо(symbol, LEVERAGE)
 
         ticker = safe_fetch_ticker(symbol)
@@ -974,7 +1028,6 @@ def открыть_позицию(symbol: str, margin_usdt: float, tp_price: flo
             log.error(f"Нулевое количество {symbol}")
             return None, None
 
-        # Корректировка TP/SL
         if side == "long":
             sl_price = min(sl_price, price - max(price * MIN_SL_PERCENT/100, price * 0.001))
             tp_price = max(tp_price, price + price * TP_PERCENT/100)
@@ -993,8 +1046,6 @@ def открыть_позицию(symbol: str, margin_usdt: float, tp_price: flo
             "stopLoss": float(sl_str)
         })
 
-        # ИСПРАВЛЕНИЕ: безопасное получение entry price
-        # order["average"] может быть None для market ордеров на некоторых биржах
         entry_price = None
 
         if order.get("average") is not None:
@@ -1004,7 +1055,6 @@ def открыть_позицию(symbol: str, margin_usdt: float, tp_price: flo
                 pass
 
         if entry_price is None or entry_price <= 0:
-            # Резервный вариант 1: из поля "price"
             if order.get("price") is not None:
                 try:
                     entry_price = float(order["price"])
@@ -1012,10 +1062,9 @@ def открыть_позицию(symbol: str, margin_usdt: float, tp_price: flo
                     pass
 
         if entry_price is None or entry_price <= 0:
-            # Резервный вариант 2: ждём и берём из позиции
             time.sleep(2)
             try:
-                positions = exchange.fetch_positions([symbol])
+                positions = safe_fetch_positions([symbol])
                 for pos in positions:
                     if float(pos.get("contracts", 0) or 0) > 0:
                         ep = pos.get("entryPrice") or pos.get("avgCost")
@@ -1026,7 +1075,6 @@ def открыть_позицию(symbol: str, margin_usdt: float, tp_price: flo
                 log.debug(f"Не удалось получить entry price из позиции: {ep_err}")
 
         if entry_price is None or entry_price <= 0:
-            # Резервный вариант 3: текущая цена рынка
             entry_price = price
             log.warning(f"Entry price не получен из ордера, используем рыночную цену: {entry_price}")
 
@@ -1044,7 +1092,7 @@ def закрыть_позицию_с_подтверждением(symbol: str, q
         try:
             exchange.create_market_order(symbol, close_side, qty, params={"reduceOnly": True})
             time.sleep(3)
-            positions = exchange.fetch_positions([symbol])
+            positions = safe_fetch_positions([symbol])   # FIX #3
             active = [p for p in positions if float(p.get("contracts", 0) or 0) > 0 and p.get("side") == side]
             if not active:
                 log.info(f"Позиция {symbol} закрыта успешно")
@@ -1070,15 +1118,15 @@ def проверить_signal_exit(symbol: str, side: str) -> bool:
     except Exception: return False
 
 # ============================================================
-#            ИСПРАВЛЕННЫЙ МОНИТОРИНГ ПОЗИЦИЙ
+#            МОНИТОРИНГ ПОЗИЦИЙ — FIX #3
 # ============================================================
 
 def мониторить_позицию(symbol: str, entry_price: float, qty: float,
                         открыта_в: float, sl_цена: float,
                         tp_цена: float, side: str = "long") -> Tuple[str, float]:
     """
-    Возвращает (результат, итоговый_pnl_usdt).
-    ИСПРАВЛЕНИЕ: возвращаем реальный PnL из позиции для точного учёта.
+    FIX #3: Все вызовы exchange.fetch_positions заменены на safe_fetch_positions()
+    для защиты от rate limit во время цикла мониторинга.
     """
     deadline = открыта_в + TRADE_MAX_LIFETIME
     coin = symbol.split("/")[0]
@@ -1104,7 +1152,7 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
     фаза, текущий_sl, пиковая_цена = 1, sl_цена, entry_price
     trailing_активен = (RR_EXIT_TRIGGER == 0.0)
     partial_done = False
-    accumulated_pnl = 0.0  # накопленный PnL от частичного закрытия
+    accumulated_pnl = 0.0
 
     log.info(f"Мониторинг {coin} {side} вход={entry_price:.8f} SL={sl_цена:.8f} TP={tp_цена:.8f}")
 
@@ -1117,14 +1165,10 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
         time.sleep(15)
 
         try:
-            positions = safe_api_call(exchange.fetch_positions, [symbol], retries=3)
-            if positions is None:
-                positions = []
-
+            positions = safe_fetch_positions([symbol])   # FIX #3
             active = [p for p in positions if float(p.get("contracts", 0) or 0) > 0 and p.get("side") == side]
 
             if not active:
-                # Позиция закрылась (биржа закрыла по TP/SL)
                 ticker = safe_fetch_ticker(symbol)
                 cur_price = float(ticker["last"]) if ticker else entry_price
 
@@ -1212,12 +1256,8 @@ def мониторить_позицию(symbol: str, entry_price: float, qty: fl
 # ============================================================
 
 def проверить_и_подхватить_позиции() -> List[dict]:
-    """
-    При запуске бота — проверяем открытые позиции.
-    Если есть — логируем и не мешаем им закрыться естественно.
-    """
     try:
-        positions = exchange.fetch_positions()
+        positions = safe_fetch_positions()
         active = [p for p in positions if float(p.get("contracts", 0) or 0) > 0]
         if not active:
             log.info("Открытых позиций нет — готов к торговле")
@@ -1368,7 +1408,6 @@ def полный_баланс_usdt() -> float:
         b = exchange.fetch_balance({"type": "linear"})
         total = float(b.get("USDT", {}).get("total", 0.0))
         if total > 0: return total
-        # Резервный вариант
         equity = float(b.get("USDT", {}).get("equity", 0.0))
         if equity > 0: return equity
         return баланс_usdt()
@@ -1377,12 +1416,8 @@ def полный_баланс_usdt() -> float:
         return баланс_usdt()
 
 def получить_позиции() -> List[dict]:
-    try:
-        positions = exchange.fetch_positions()
-        return [p for p in positions if float(p.get("contracts", 0) or 0) > 0]
-    except Exception as e:
-        log.warning(f"Ошибка получения позиций: {e}")
-        return []
+    positions = safe_fetch_positions()
+    return [p for p in positions if float(p.get("contracts", 0) or 0) > 0]
 
 def обновить_начало_дня(баланс: float):
     сегодня = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1403,11 +1438,10 @@ def превышен_дневной_лимит() -> bool:
     return False
 
 # ============================================================
-#            ДЕТАЛЬНЫЙ ОТЧЁТ ПО СДЕЛКЕ (НОВОЕ)
+#            ДЕТАЛЬНЫЙ ОТЧЁТ ПО СДЕЛКЕ
 # ============================================================
 
 def детальный_отчёт_сделки(запись: dict):
-    """Подробный лог по каждой завершённой сделке."""
     r = запись.get("результат", "?")
     sym = запись.get("symbol", "?").split(":")[0]
     pnl = запись.get("pnl_usdt", 0)
@@ -1515,7 +1549,7 @@ def печатать_отчёт():
 
     log.info("")
     log.info("=" * 65)
-    log.info("📊 ОТЧЁТ ГИБРИДНОГО БОТА v10.1 FIXED")
+    log.info("📊 ОТЧЁТ ГИБРИДНОГО БОТА v10.2")
     log.info(f"  Баланс: {баланс:.2f} USDT ({дельта:+.2f} USDT / {пct:+.2f}%)")
     log.info(f"  Сделок: {всего} | TP={tp_} | SL={sl_} | Таймаут={stats['таймаут']}")
     log.info(f"  WinRate: {wr:.1f}%")
@@ -1555,7 +1589,6 @@ def запустить_предстартовую_проверку() -> bool:
 
     все_ок = True
 
-    # Этап 1
     log.info("\n▶ Этап 1: Окружение и API ключи...")
     api_key = os.getenv("BYBIT_API_KEY", "")
     api_secret = os.getenv("BYBIT_API_SECRET", "")
@@ -1569,7 +1602,6 @@ def запустить_предстартовую_проверку() -> bool:
         log.warning("⚠️ .env файл не найден (используем переменные окружения)")
     if все_ок: log.info("✅ Этап 1 — ПРОЙДЕН")
 
-    # Этап 2
     log.info("\n▶ Этап 2: Подключение к бирже...")
     try:
         b = exchange.fetch_balance({"type": "linear"})
@@ -1583,7 +1615,6 @@ def запустить_предстартовую_проверку() -> bool:
         log.error(f"❌ Ошибка подключения: {e}")
         все_ок = False
 
-    # Этап 3
     log.info("\n▶ Этап 3: Конфигурация...")
     rr = TP_PERCENT / SL_PERCENT
     if rr < 2.0:
@@ -1592,10 +1623,11 @@ def запустить_предстартовую_проверку() -> bool:
     if MIN_SCORE < 65:
         log.error(f"❌ MIN_SCORE={MIN_SCORE} < 65")
         все_ок = False
+    # FIX #2: проверяем согласованность порогов
     log.info(f"Конфигурация: TP={TP_PERCENT}% | SL={SL_PERCENT}% | RR={rr:.1f}:1")
+    log.info(f"  MIN_SCORE={MIN_SCORE} | ENTRY_CONFIRM_MIN_SCORE={ENTRY_CONFIRM_MIN_SCORE} ✅")
     log.info("✅ Этап 3 — ПРОЙДЕН")
 
-    # Этап 4
     log.info("\n▶ Этап 4: Доступность рынка...")
     доступные = 0
     for sym in SYMBOLS[:5]:
@@ -1610,11 +1642,11 @@ def запустить_предстартовую_проверку() -> bool:
     else:
         log.info("✅ Этап 4 — ПРОЙДЕН")
 
-    # Этап 5
     log.info("\n▶ Этап 5: Открытые позиции...")
     проверить_и_подхватить_позиции()
     история = загрузить_историю()
     log.info(f"История: {len(история)} сделок в базе")
+    log.info(f"  Лимит попыток на монету: {SYMBOL_MAX_FAIL_ATTEMPTS} | Блок: {SYMBOL_BLOCK_AFTER_FAIL} мин")
     log.info("✅ Этап 5 — ПРОЙДЕН")
 
     log.info("")
@@ -1650,17 +1682,24 @@ def main():
 
     log.info("")
     log.info("=" * 65)
-    log.info("🤖 ГИБРИДНЫЙ ФЬЮЧЕРСНЫЙ БОТ v10.1 FIXED")
+    log.info("🤖 ГИБРИДНЫЙ ФЬЮЧЕРСНЫЙ БОТ v10.2")
     log.info(f"  Плечо: {LEVERAGE}x | RR: {TP_PERCENT}/{SL_PERCENT} ({TP_PERCENT/SL_PERCENT:.1f}:1)")
     log.info(f"  Баланс: {баланс_сейчас:.4f} USDT (полный)")
     log.info(f"  Свободно: {баланс_usdt():.4f} USDT")
-    log.info(f"  MIN_SCORE: {MIN_SCORE} | Пар: {len(SYMBOLS)}")
+    log.info(f"  MIN_SCORE: {MIN_SCORE} | ENTRY_CONFIRM_MIN_SCORE: {ENTRY_CONFIRM_MIN_SCORE}")
+    log.info(f"  Пар: {len(SYMBOLS)}")
     log.info(f"  Квантовый анализ: {'ВКЛ' if QUANT_ENABLED else 'ВЫКЛ'}")
     log.info(f"  Order Flow: {'ВКЛ' if ORDER_FLOW_ENABLED else 'ВЫКЛ'}")
+    log.info(f"  Лимит попыток на монету: {SYMBOL_MAX_FAIL_ATTEMPTS} → блок {SYMBOL_BLOCK_AFTER_FAIL} мин")
     log.info("=" * 65)
     log.info("")
 
-    заблокированные = {}
+    # заблокированные[symbol] = timestamp_до_которого_заблокирован
+    заблокированные: Dict[str, float] = {}
+
+    # FIX #1: счётчик провалённых входов per symbol
+    # fail_attempts[symbol] = количество подряд идущих отменённых входов
+    fail_attempts: Dict[str, int] = {}
 
     while True:
         try:
@@ -1671,9 +1710,7 @@ def main():
             свободный = баланс_usdt()
             обновить_начало_дня(баланс)
 
-            # Проверка минимального баланса
             if свободный < MIN_BALANCE:
-                # Проверяем — может есть открытая позиция?
                 активные = получить_позиции()
                 if активные:
                     log.info(f"⏳ Открытые позиции: {[p['symbol'] for p in активные]} — ждём")
@@ -1683,7 +1720,6 @@ def main():
                 time.sleep(600)
                 continue
 
-            # Просадка
             if stats["депозит_старт"] > 0:
                 просадка = (stats["депозит_старт"] - баланс) / stats["депозит_старт"] * 100
                 if просадка > MAX_DRAWDOWN_PCT:
@@ -1718,12 +1754,16 @@ def main():
             scores = {}
 
             for sym in SYMBOLS:
+                # Проверка блокировки (по времени)
                 if sym in заблокированные:
                     if time.time() < заблокированные[sym]: continue
-                    else: del заблокированные[sym]
+                    else:
+                        del заблокированные[sym]
+                        # Сбрасываем счётчик при снятии блока
+                        fail_attempts.pop(sym, None)
 
                 if not тренд_4h_бычий(sym): continue
-                time.sleep(API_CALL_DELAY)  # Защита от rate limit
+                time.sleep(API_CALL_DELAY)
 
                 res = получить_скор(sym)
                 ai_score = применить_ai_корректировку(res["score"], sym)
@@ -1842,8 +1882,26 @@ def main():
             if ENTRY_CONFIRM_BARS > 0:
                 if not подтвердить_вход(выбрана, фин_скор, side):
                     log.info(f"⛔ Вход в {выбрана} отменён по подтверждению")
+
+                    # FIX #1: увеличиваем счётчик провалов для этого символа
+                    fail_attempts[выбрана] = fail_attempts.get(выбрана, 0) + 1
+                    текущий_счётчик = fail_attempts[выбрана]
+                    log.warning(
+                        f"  ► {выбрана.split(':')[0]}: попытка {текущий_счётчик}/{SYMBOL_MAX_FAIL_ATTEMPTS}"
+                    )
+                    if текущий_счётчик >= SYMBOL_MAX_FAIL_ATTEMPTS:
+                        заблокированные[выбрана] = time.time() + SYMBOL_BLOCK_AFTER_FAIL * 60
+                        fail_attempts.pop(выбрана, None)
+                        log.warning(
+                            f"  ⛔ {выбрана.split(':')[0]} заблокирован на {SYMBOL_BLOCK_AFTER_FAIL} мин "
+                            f"({SYMBOL_MAX_FAIL_ATTEMPTS} отменённых входов подряд)"
+                        )
+
                     time.sleep(30)
                     continue
+
+            # Вход подтверждён — сбрасываем счётчик провалов
+            fail_attempts.pop(выбрана, None)
 
             баланс_до = полный_баланс_usdt()
             время_входа = time.time()
@@ -1851,8 +1909,24 @@ def main():
 
             if вход_цена is None or кол_во is None:
                 log.warning("Не удалось открыть позицию — пауза 30 сек")
+
+                # FIX #1: технический сбой открытия тоже считается провалом
+                fail_attempts[выбрана] = fail_attempts.get(выбрана, 0) + 1
+                текущий_счётчик = fail_attempts[выбрана]
+                log.warning(f"  ► {выбрана.split(':')[0]}: попытка открытия {текущий_счётчик}/{SYMBOL_MAX_FAIL_ATTEMPTS}")
+                if текущий_счётчик >= SYMBOL_MAX_FAIL_ATTEMPTS:
+                    заблокированные[выбрана] = time.time() + SYMBOL_BLOCK_AFTER_FAIL * 60
+                    fail_attempts.pop(выбрана, None)
+                    log.warning(
+                        f"  ⛔ {выбрана.split(':')[0]} заблокирован на {SYMBOL_BLOCK_AFTER_FAIL} мин "
+                        f"(многократные сбои открытия)"
+                    )
+
                 time.sleep(30)
                 continue
+
+            # Позиция успешно открыта — сбрасываем счётчик
+            fail_attempts.pop(выбрана, None)
 
             stats["сделок_всего"] += 1
             сохранить_состояние()
@@ -1870,7 +1944,6 @@ def main():
 
             time.sleep(3)
             баланс_после = полный_баланс_usdt()
-            # PnL = реальное изменение баланса (более точно чем расчётный)
             pnl_реальный = баланс_после - баланс_до
             длит_мин = (time.time() - время_входа) / 60
 
@@ -1917,7 +1990,7 @@ def main():
             }
             сохранить_сделку(запись)
             обновить_статистику_индикаторов(запись)
-            детальный_отчёт_сделки(запись)  # НОВЫЙ ДЕТАЛЬНЫЙ ОТЧЁТ
+            детальный_отчёт_сделки(запись)
             сохранить_состояние()
 
             log.info("Сделка завершена — пауза 60 сек")
