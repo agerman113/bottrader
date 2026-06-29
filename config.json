@@ -1,0 +1,49 @@
+{
+  "mode": "live",
+  "symbol": "BTC/USDT:USDT",
+  "timeframe": "1m",
+  "exchange": "bybit",
+
+  "vwap": {
+    "lookback": 100,
+    "bbands_std": 2.0
+  },
+
+  "atr": {
+    "period": 14,
+    "stop_loss_multiplier": 1.2,
+    "take_profit_multiplier": 3.0,
+    "trailing_step_multiplier": 0.5
+  },
+
+  "signal": {
+    "volume_threshold": 1.8,
+    "min_distance_from_vwap": 0.5,
+    "confirmation_required": true,
+    "signal_lifetime_seconds": 60,
+    "min_body_coverage": 0.6
+  },
+
+  "predictor": {
+    "model_type": "mlp",
+    "initial_confidence_threshold": 0.60,
+    "min_samples_for_training": 50,  // Уменьшите для тестирования
+    "retrain_interval_hours": 168,
+    "adaptation_window": 20,
+    "min_confidence_threshold": 0.55
+  },
+
+  "risk": {
+    "risk_per_trade": 0.005,
+    "max_risk_per_trade": 0.02,
+    "max_trade_lifetime_minutes": 5,
+    "max_daily_loss": 0.03,
+    "cool_down_after_losses": 2,
+    "cool_down_minutes": 15
+  },
+
+  "logging": {
+    "log_file": "vwap_scalper.log",
+    "level": "INFO"
+  }
+}
