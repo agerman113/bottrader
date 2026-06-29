@@ -2,10 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 УСТОЙЧИВЫЙ ORDER BOOK SCALPER
+- Исправлен порядок определения классов
 - Единый WebSocket для всех символов
-- Автоматическое переподключение с экспоненциальной задержкой
-- Буферизация сообщений
-- Стабильная работа в Docker
+- Автоматическое переподключение
 """
 
 import os
@@ -67,11 +66,11 @@ DEFAULT_CONFIG = {
     },
 
     "websocket": {
-        "reconnect_delay": 3,          # Начальная задержка переподключения (секунды)
-        "max_reconnect_delay": 30,    # Максимальная задержка
-        "reconnect_backoff": 1.5,     # Множитель для экспоненциальной задержки
-        "ping_interval": 20,          # Интервал ping сообщений (секунды)
-        "buffer_size": 100            # Размер буфера для сообщений
+        "reconnect_delay": 3,
+        "max_reconnect_delay": 30,
+        "reconnect_backoff": 1.5,
+        "ping_interval": 20,
+        "buffer_size": 100
     },
 
     "risk": {
@@ -89,7 +88,7 @@ DEFAULT_CONFIG = {
 }
 
 # ============================================================
-#                 ПЕРЕЧИСЛЕНИЯ
+#                 ПЕРЕЧИСЛЕНИЯ (ENUMS)
 # ============================================================
 
 class TradeSide(Enum):
@@ -111,8 +110,17 @@ class SignalReason(Enum):
     ABSORPTION = auto()
 
 # ============================================================
-#                 ДАТАКЛАССЫ
+#                 ДАТАКЛАССЫ (ПЕРЕНЕСЕНЫ В НАЧАЛО)
 # ============================================================
+
+@dataclass
+class Candle:
+    timestamp: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
 
 @dataclass
 class OrderBookLevel:
@@ -178,11 +186,10 @@ def setup_logging(config: Dict) -> logging.Logger:
     return logger
 
 # ============================================================
-#                 WEB SOCKET MANAGER (УЛУЧШЕННЫЙ)
+#                 WEB SOCKET MANAGER
 # ============================================================
 
 class WebSocketManager:
-    """Унифицированный менеджер WebSocket для всех символов"""
     def __init__(self, config: Dict, data_collector: 'DataCollector', logger: logging.Logger):
         self.config = config
         self.data_collector = data_collector
@@ -191,18 +198,16 @@ class WebSocketManager:
         self.ws_thread = None
         self.is_connected = False
         self.reconnect_delay = config["websocket"]["reconnect_delay"]
-        self.message_buffer = defaultdict(list)  # {symbol: [messages]}
+        self.message_buffer = defaultdict(list)
         self.lock = threading.Lock()
         self.ping_timer = None
         self.last_ping = datetime.min
 
     def start(self):
-        """Запускаем WebSocket в отдельном потоке"""
         self.ws_thread = threading.Thread(target=self._run_websocket, daemon=True)
         self.ws_thread.start()
 
     def _run_websocket(self):
-        """Основной цикл WebSocket с автоматическим переподключением"""
         while True:
             try:
                 self._connect_and_run()
@@ -213,7 +218,6 @@ class WebSocketManager:
                 time.sleep(self._get_reconnect_delay())
 
     def _get_reconnect_delay(self) -> float:
-        """Экспоненциальная задержка переподключения"""
         delay = self.reconnect_delay
         self.reconnect_delay = min(
             self.reconnect_delay * self.config["websocket"]["reconnect_backoff"],
@@ -222,11 +226,9 @@ class WebSocketManager:
         return delay
 
     def _connect_and_run(self):
-        """Подключение и обработка сообщений"""
         self.reconnect_delay = self.config["websocket"]["reconnect_delay"]
         self.is_connected = False
 
-        # Создаём подключение
         ws_url = "wss://stream.bybit.com/v5/public/linear"
         self.ws = websocket.WebSocketApp(
             ws_url,
@@ -240,18 +242,12 @@ class WebSocketManager:
         self.ws.run_forever()
 
     def _on_open(self, ws):
-        """Обработчик открытия соединения"""
         self.is_connected = True
         self.reconnect_delay = self.config["websocket"]["reconnect_delay"]
         self.logger.info("✅ WebSocket connected successfully")
-
-        # Подписываемся на все символы
         self._subscribe_to_all_symbols()
-
-        # Запускаем ping таймер
         self._start_ping_timer()
 
-        # Обрабатываем буферизованные сообщения
         with self.lock:
             for symbol, messages in self.message_buffer.items():
                 for msg in messages:
@@ -259,7 +255,6 @@ class WebSocketManager:
             self.message_buffer.clear()
 
     def _on_message(self, ws, message):
-        """Обработчик входящих сообщений"""
         try:
             data = json.loads(message)
             if "topic" in data:
@@ -270,17 +265,14 @@ class WebSocketManager:
             self.logger.error(f"Error processing message: {e}")
 
     def _on_error(self, ws, error):
-        """Обработчик ошибок"""
         self.is_connected = False
         self.logger.error(f"❌ WebSocket error: {error}")
 
     def _on_close(self, ws, close_status_code, close_msg):
-        """Обработчик закрытия соединения"""
         self.is_connected = False
         self.logger.warning(f"🔌 WebSocket closed: {close_msg} (code: {close_status_code})")
 
     def _extract_symbol_from_topic(self, topic: str) -> Optional[str]:
-        """Извлекаем символ из топика WebSocket"""
         for symbol in self.config["symbols"]:
             clean_symbol = symbol.replace("/", "").replace(":", "")
             if clean_symbol in topic:
@@ -288,7 +280,6 @@ class WebSocketManager:
         return None
 
     def _process_message(self, symbol: str, data: Dict):
-        """Обработка сообщения для конкретного символа"""
         try:
             if "orderbook" in data.get("topic", ""):
                 book_data = data["data"]
@@ -298,15 +289,12 @@ class WebSocketManager:
 
                 with self.data_collector.lock:
                     self.data_collector.order_books[symbol] = order_book
-                    # Сохраняем историю для поглощения
                     if symbol not in self.data_collector.wall_history:
                         self.data_collector.wall_history[symbol] = {}
                     self.data_collector.wall_history[symbol][order_book.timestamp] = {
                         'bids': {level.price: level.volume for level in bids},
                         'asks': {level.price: level.volume for level in asks}
                     }
-
-                # Логируем лучшие лимитные заявки
                 self._log_limit_orders(symbol, order_book)
 
             elif "kline" in data.get("topic", ""):
@@ -341,7 +329,6 @@ class WebSocketManager:
             self.logger.error(f"Error processing message for {symbol}: {e}")
 
     def _subscribe_to_all_symbols(self):
-        """Подписка на все символы"""
         if not self.is_connected:
             return
 
@@ -350,7 +337,6 @@ class WebSocketManager:
                 "op": "subscribe",
                 "args": []
             }
-
             for symbol in self.config["symbols"]:
                 clean_symbol = symbol.replace("/", "").replace(":", "")
                 subscription["args"].append(f"orderbook.50.{clean_symbol}")
@@ -358,12 +344,10 @@ class WebSocketManager:
 
             self.ws.send(json.dumps(subscription))
             self.logger.info(f"📡 Subscribed to {len(self.config['symbols'])} symbols")
-
         except Exception as e:
             self.logger.error(f"Error subscribing to symbols: {e}")
 
     def _start_ping_timer(self):
-        """Запуск таймера для ping сообщений"""
         def ping_loop():
             while self.is_connected:
                 time.sleep(self.config["websocket"]["ping_interval"])
@@ -373,12 +357,10 @@ class WebSocketManager:
                         self.last_ping = datetime.now()
                     except:
                         pass
-
         self.ping_timer = threading.Thread(target=ping_loop, daemon=True)
         self.ping_timer.start()
 
     def _log_limit_orders(self, symbol: str, order_book: OrderBook):
-        """Логируем лучшие лимитные заявки"""
         if not order_book.bids or not order_book.asks:
             return
 
@@ -403,7 +385,6 @@ class WebSocketManager:
                 )
 
     def close(self):
-        """Закрытие WebSocket"""
         self.is_connected = False
         if self.ws:
             try:
@@ -414,7 +395,7 @@ class WebSocketManager:
             self.ping_timer.join(timeout=1)
 
 # ============================================================
-#                 DATA COLLECTOR (ОПТИМИЗИРОВАННЫЙ)
+#                 DATA COLLECTOR
 # ============================================================
 
 class DataCollector:
@@ -427,7 +408,7 @@ class DataCollector:
         self.lock = threading.Lock()
         self.last_ohlcv_update: Dict[str, datetime] = {}
         self.last_orderbook_update: Dict[str, datetime] = {}
-        self.wall_history: Dict[str, Dict] = {}  # {symbol: {timestamp: {bids/asks}}}
+        self.wall_history: Dict[str, Dict] = {}
         self.ws_manager = WebSocketManager(config, self, logger)
 
     def _init_exchange(self) -> ccxt.Exchange:
@@ -440,15 +421,12 @@ class DataCollector:
         })
 
     def start_websockets(self):
-        """Запускаем WebSocket менеджер"""
         self.ws_manager.start()
 
     def close_all_websockets(self):
-        """Закрываем WebSocket"""
         self.ws_manager.close()
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 1) -> Optional[pd.DataFrame]:
-        """Резервный метод получения OHLCV (если WebSocket не работает)"""
         try:
             if (datetime.now() - self.last_ohlcv_update.get(symbol, datetime.min)).total_seconds() < 0.1:
                 return self.ohlcv_data.get(symbol)
@@ -1017,7 +995,6 @@ class OrderBookScalperBot:
         self.executor = Executor(config, self.logger)
 
         self.is_running = False
-        self.last_analysis_time = datetime.min
 
     def start(self):
         self.is_running = True
@@ -1061,7 +1038,7 @@ class OrderBookScalperBot:
         self.logger.info(f"💰 Current balance: {self.risk_manager.balance:.2f} USDT")
 
         self.data_collector.start_websockets()
-        time.sleep(3)  # Даём время на подключение
+        time.sleep(3)
 
         self.logger.info("🔄 Main loop started...")
 
@@ -1071,7 +1048,6 @@ class OrderBookScalperBot:
                     time.sleep(5)
                     continue
 
-                # Анализируем стаканы для всех символов
                 for symbol in self.config["symbols"]:
                     if symbol in self.data_collector.order_books:
                         order_book = self.data_collector.order_books[symbol]
@@ -1080,9 +1056,7 @@ class OrderBookScalperBot:
                         for signal in signals:
                             self._process_signal(signal)
 
-                # Мониторинг открытых позиций
                 self._monitor_positions()
-
                 time.sleep(0.1)
 
             except KeyboardInterrupt:
