@@ -1,18 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ГИБРИДНЫЙ ИИ-СКАЛЬПЕР: "ОДНА ХОРОШАЯ СДЕЛКА"
-Философия Майка Беллафиоре: охота за ЕДИНСТВЕННЫМ повторяющимся сетапом
-с нейросетевым фильтром для повышения точности.
-
-Ключевые улучшения:
-1. Полностью асинхронный мониторинг
-2. Работающий трейлинг-стоп через API Bybit
-3. SL и TP на основе ATR
-4. Улучшенный нейросетевой предиктор
-5. Защита от проскальзывания
-6. Оптимизированные запросы к API (решение проблемы rate limits)
-7. Стабильный WebSocket с автоматическим переподключением
+МУЛЬТИ-КОИН СКАЛЬПЕР НА ОСНОВЕ АНАЛИЗА СТАКАНА (Order Book Strategy)
+- Анализирует стаканы в реальном времени через WebSocket
+- Ищет стены заявок, дисбаланс спроса/предложения, поглощение стен
+- Торгует на Bybit с строгим риск-менеджментом
 """
 
 import os
@@ -25,69 +17,80 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from datetime import datetime, timedelta
-from sklearn.neural_network import MLPClassifier
-from sklearn.preprocessing import StandardScaler
 import ccxt
 import websocket
 import threading
 from dotenv import load_dotenv
 
 # ============================================================
-#                 КОНСТАНТЫ И КОНФИГУРАЦИЯ
+#                 КОНФИГУРАЦИЯ
 # ============================================================
 
 load_dotenv()
 
+# Список коинов для анализа
+COINS = [
+    "BTC/USDT:USDT",
+    "ETH/USDT:USDT",
+    "SOL/USDT:USDT",
+    "PEPE/USDT:USDT",
+    "WIF/USDT:USDT",
+    "BONK/USDT:USDT",
+    "DOGE/USDT:USDT",
+    "SHIB/USDT:USDT"
+]
+
 DEFAULT_CONFIG = {
     "mode": "live",
-    "symbol": "BTC/USDT:USDT",
+    "symbols": COINS,
     "timeframe": "1m",
     "exchange": "bybit",
     "api_key": os.getenv("BYBIT_API_KEY", ""),
     "api_secret": os.getenv("BYBIT_API_SECRET", ""),
 
-    "vwap": {
-        "lookback": 100,
-        "bbands_std": 2.0,
+    # Параметры стратегии стакана
+    "orderbook_strategy": {
+        "enabled": True,
+        "wall_threshold": 3.0,          # Минимальное соотношение объёма стены к медиане
+        "max_wall_distance_percent": 2.0,  # Максимальное расстояние стены от лучшей цены (%)
+        "imbalance_ratio": 2.0,        # Минимальное соотношение дисбаланса
+        "depth": 10,                    # Глубина анализа для дисбаланса
+        "sl_offset_ticks": 2,          # Отступ SL от стены (в тиках)
+        "tp_ticks": 8,                 # Фиксированный TP в тиках
+        "use_atr_for_tp": False,       # Использовать ATR для TP
+        "tp_atr_multiplier": 2.0,      # Множитель ATR для TP
+        "max_trade_lifetime_minutes": 1,  # Максимальное время удержания позиции
+        "min_trade_interval_seconds": 10, # Минимальный интервал между сделками на одном символе
+        "absorption_enabled": True,    # Включить детекцию поглощения стен
+        "absorption_pct": 70.0,        # Процент поглощения для пробоя
+        "absorption_time_seconds": 5, # Время для поглощения (секунды)
     },
 
+    # Параметры ATR (если используется для TP)
     "atr": {
         "period": 14,
-        "stop_loss_multiplier": 1.2,
-        "take_profit_multiplier": 3.0,
-        "trailing_step_multiplier": 0.5,
     },
 
-    "signal": {
-        "volume_threshold": 1.8,
-        "min_distance_from_vwap": 0.5,
-        "confirmation_required": True,
-        "signal_lifetime_seconds": 60,
-        "min_body_coverage": 0.6,
-    },
-
-    "predictor": {
-        "model_type": "mlp",
-        "hidden_layers": [64, 32],
-        "initial_confidence_threshold": 0.60,
-        "min_samples_for_training": 50,
-        "adaptation_window": 20,
-        "min_confidence_threshold": 0.55,
-    },
-
+    # Параметры риск-менеджмента
     "risk": {
-        "risk_per_trade": 0.005,
-        "max_risk_per_trade": 0.02,
-        "max_trade_lifetime_minutes": 5,
-        "max_daily_loss": 0.03,
-        "cool_down_after_losses": 2,
-        "cool_down_minutes": 15,
+        "risk_per_trade": 0.005,      # 0.5% от капитала
+        "max_risk_per_trade": 0.02,   # Максимум 2% от капитала в позиции
+        "max_daily_loss": 0.03,        # Дневной лимит убытков (3%)
+        "cool_down_after_losses": 2,   # Тайм-аут после 2 убытков подряд
+        "cool_down_minutes": 10,       # Длительность тайм-аута (минут)
     },
 
+    # Логирование
     "logging": {
-        "log_file": "vwap_scalper.log",
+        "log_file": "orderbook_scalper.log",
         "level": "INFO",
     },
+
+    # Настройки стакана (для логирования)
+    "orderbook": {
+        "depth": 5,                   # Глубина стакана для логирования
+        "min_volume_threshold": 0.1,  # Минимальный объём для логирования заявки
+    }
 }
 
 # ============================================================
@@ -108,14 +111,25 @@ class SignalType(Enum):
     SHORT = auto()
     NONE = auto()
 
-class SignalStatus(Enum):
-    DETECTED = auto()
-    CONFIRMED = auto()
-    EXPIRED = auto()
+class SignalReason(Enum):
+    WALL = auto()          # Стена заявок
+    IMBALANCE = auto()    # Дисбаланс спроса/предложения
+    ABSORPTION = auto()   # Поглощение стены
 
 # ============================================================
 #                 ДАТАКЛАССЫ
 # ============================================================
+
+@dataclass
+class OrderBookLevel:
+    price: float
+    volume: float
+
+@dataclass
+class OrderBook:
+    bids: List[OrderBookLevel]  # От лучшей цены к худшей
+    asks: List[OrderBookLevel]  # От лучшей цены к худшей
+    timestamp: datetime
 
 @dataclass
 class Candle:
@@ -138,30 +152,24 @@ class Trade:
     close_price: Optional[float] = None
     close_time: Optional[datetime] = None
     pnl: Optional[float] = None
-    trailing_stop: Optional[float] = None
-    signal: Optional['Signal'] = None
+    symbol: str = ""
+    signal_reason: Optional[SignalReason] = None
+    wall_price: Optional[float] = None  # Цена стены (для SL)
+    spread: Optional[float] = None      # Спред при входе
+    wall_volume: Optional[float] = None # Объём стены
 
 @dataclass
 class Signal:
     side: SignalType
-    timestamp: datetime
-    candle: Candle
-    vwap: float
-    vwap_std: float
-    atr: float
-    distance_from_vwap: float
-    volume_ratio: float
-    candle_pattern: str
-    features: Dict[str, float] = field(default_factory=dict)
-    probability: Optional[float] = None
-    status: SignalStatus = SignalStatus.DETECTED
-    confirmation_candle: Optional[Candle] = None
-
-@dataclass
-class PredictionResult:
-    probability: float
-    decision: bool
-    features: Dict[str, float]
+    symbol: str
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    reason: SignalReason
+    wall_price: float
+    spread: float
+    wall_volume: float
+    timestamp: datetime = field(default_factory=datetime.now)
 
 # ============================================================
 #                 КОНФИГУРАЦИЯ ЛОГИРОВАНИЯ
@@ -181,11 +189,11 @@ def setup_logging(config: Dict) -> logging.Logger:
         ],
     )
 
-    logger = logging.getLogger("VWAPScalper")
+    logger = logging.getLogger("OrderBookScalper")
     return logger
 
 # ============================================================
-#                 МОДУЛЬ 1: DATA COLLECTOR
+#                 DATA COLLECTOR (МНОГОВАЛЮТНЫЙ)
 # ============================================================
 
 class DataCollector:
@@ -194,9 +202,12 @@ class DataCollector:
         self.logger = logger
         self.exchange = self._init_exchange()
         self.ohlcv_data: Dict[str, pd.DataFrame] = {}
+        self.order_books: Dict[str, OrderBook] = {}
         self.ws_connections: Dict[str, websocket.WebSocket] = {}
         self.lock = threading.Lock()
         self.last_ohlcv_update: Dict[str, datetime] = {}
+        self.last_orderbook_update: Dict[str, datetime] = {}
+        self.wall_history: Dict[str, Dict[float, float]] = {}  # {symbol: {price: volume}}
 
     def _init_exchange(self) -> ccxt.Exchange:
         exchange_class = getattr(ccxt, self.config["exchange"])
@@ -209,7 +220,6 @@ class DataCollector:
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 1) -> Optional[pd.DataFrame]:
         try:
-            # Проверяем, не превысили ли мы лимит запросов
             if (datetime.now() - self.last_ohlcv_update.get(symbol, datetime.min)).total_seconds() < 0.1:
                 return self.ohlcv_data.get(symbol)
 
@@ -220,29 +230,38 @@ class DataCollector:
             self.ohlcv_data[symbol] = df
             self.last_ohlcv_update[symbol] = datetime.now()
             return df
-        except ccxt.RateLimitExceeded as e:
-            self.logger.warning(f"Rate limit exceeded for {symbol}. Waiting 1 second...")
+        except ccxt.RateLimitExceeded:
+            self.logger.warning(f"Rate limit for {symbol}. Waiting 1 second...")
             time.sleep(1)
             return self.fetch_ohlcv(symbol, timeframe, limit)
         except Exception as e:
             self.logger.error(f"Error fetching OHLCV for {symbol}: {e}")
             return None
 
-    def get_latest_candle(self, symbol: str) -> Optional[Candle]:
-        if symbol not in self.ohlcv_data or self.ohlcv_data[symbol].empty:
-            self.fetch_ohlcv(symbol, self.config["timeframe"], limit=1)
-            if symbol not in self.ohlcv_data or self.ohlcv_data[symbol].empty:
-                return None
+    def fetch_order_book(self, symbol: str, limit: int = 50) -> Optional[OrderBook]:
+        try:
+            if (datetime.now() - self.last_orderbook_update.get(symbol, datetime.min)).total_seconds() < 0.5:
+                return self.order_books.get(symbol)
 
-        last_candle = self.ohlcv_data[symbol].iloc[-1]
-        return Candle(
-            timestamp=last_candle.name,
-            open=last_candle["open"],
-            high=last_candle["high"],
-            low=last_candle["low"],
-            close=last_candle["close"],
-            volume=last_candle["volume"],
-        )
+            book = self.exchange.fetch_order_book(symbol, limit=limit)
+            bids = [OrderBookLevel(price=float(p[0]), volume=float(p[1])) for p in book["bids"]]
+            asks = [OrderBookLevel(price=float(p[0]), volume=float(p[1])) for p in book["asks"]]
+            order_book = OrderBook(bids=bids, asks=asks, timestamp=datetime.now())
+            self.order_books[symbol] = order_book
+            self.last_orderbook_update[symbol] = datetime.now()
+
+            # Сохраняем историю стен для детекции поглощения
+            if symbol not in self.wall_history:
+                self.wall_history[symbol] = {}
+            self.wall_history[symbol][order_book.timestamp] = {
+                'bids': {level.price: level.volume for level in bids},
+                'asks': {level.price: level.volume for level in asks}
+            }
+
+            return order_book
+        except Exception as e:
+            self.logger.error(f"Error fetching order book for {symbol}: {e}")
+            return None
 
     def get_current_price(self, symbol: str) -> float:
         try:
@@ -252,49 +271,62 @@ class DataCollector:
             self.logger.error(f"Error getting price for {symbol}: {e}")
             return 0.0
 
-    def start_websocket(self, symbol: str):
+    def get_tick_size(self, symbol: str) -> float:
+        """Получение размера тика для символа"""
+        try:
+            market = self.exchange.market(symbol)
+            return float(market.get("precision", {}).get("price", 0.0001))
+        except:
+            return 0.0001  # Дефолтное значение
+
+    def start_websockets(self):
+        """Запускаем WebSocket для всех символов"""
+        for symbol in self.config["symbols"]:
+            self._start_websocket_for_symbol(symbol)
+
+    def _start_websocket_for_symbol(self, symbol: str):
         def on_message(ws, message):
             try:
                 data = json.loads(message)
-                if "topic" in data and "kline" in data["topic"]:
-                    with self.lock:
-                        candle_data = data["data"]
-                        new_candle = Candle(
-                            timestamp=datetime.fromtimestamp(candle_data["start"] / 1000),
-                            open=float(candle_data["open"]),
-                            high=float(candle_data["high"]),
-                            low=float(candle_data["low"]),
-                            close=float(candle_data["close"]),
-                            volume=float(candle_data["volume"])
-                        )
-                        if symbol not in self.ohlcv_data:
-                            self.ohlcv_data[symbol] = pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
-                        new_row = pd.DataFrame([{
-                            "timestamp": new_candle.timestamp,
-                            "open": new_candle.open,
-                            "high": new_candle.high,
-                            "low": new_candle.low,
-                            "close": new_candle.close,
-                            "volume": new_candle.volume
-                        }])
-                        self.ohlcv_data[symbol] = pd.concat([self.ohlcv_data[symbol], new_row]).drop_duplicates("timestamp").sort_index()
+                if "topic" in data:
+                    if "orderbook" in data["topic"]:
+                        with self.lock:
+                            book_data = data["data"]
+                            bids = [OrderBookLevel(price=float(p["price"]), volume=float(p["qty"])) for p in book_data["b"]]
+                            asks = [OrderBookLevel(price=float(p["price"]), volume=float(p["qty"])) for p in book_data["a"]]
+                            order_book = OrderBook(bids=bids, asks=asks, timestamp=datetime.now())
+                            self.order_books[symbol] = order_book
+
+                            # Сохраняем историю для поглощения
+                            if symbol not in self.wall_history:
+                                self.wall_history[symbol] = {}
+                            self.wall_history[symbol][order_book.timestamp] = {
+                                'bids': {level.price: level.volume for level in bids},
+                                'asks': {level.price: level.volume for level in asks}
+                            }
+
+                            # Логируем лучшие лимитные заявки
+                            self._log_limit_orders(symbol, order_book)
+
             except Exception as e:
-                self.logger.error(f"WebSocket message error: {e}")
+                self.logger.error(f"WebSocket message error for {symbol}: {e}")
 
         def on_error(ws, error):
             self.logger.error(f"WebSocket error for {symbol}: {error}")
 
         def on_close(ws, close_status_code, close_msg):
-            self.logger.warning(f"WebSocket closed for {symbol}. Reconnecting in 5 seconds...")
-            time.sleep(5)
+            self.logger.warning(f"WebSocket closed for {symbol}. Reconnecting in 3 seconds...")
+            time.sleep(3)
             if self.config["mode"] == "live":
-                self.start_websocket(symbol)
+                self._start_websocket_for_symbol(symbol)
 
         def on_open(ws):
             self.logger.info(f"WebSocket connected for {symbol}")
             ws.send(json.dumps({
                 "op": "subscribe",
-                "args": [f"klineV2.1.{symbol.replace('/', '').replace(':', '')}"]
+                "args": [
+                    f"orderbook.50.{symbol.replace('/', '').replace(':', '')}"
+                ]
             }))
 
         ws_url = "wss://stream.bybit.com/v5/public/linear"
@@ -302,41 +334,354 @@ class DataCollector:
         self.ws_connections[symbol] = ws
         ws.run_forever()
 
-    def close_websocket(self, symbol: str):
-        if symbol in self.ws_connections:
+    def _log_limit_orders(self, symbol: str, order_book: OrderBook):
+        """Логируем лучшие лимитные заявки"""
+        if not order_book.bids or not order_book.asks:
+            return
+
+        mid_price = (order_book.bids[0].price + order_book.asks[0].price) / 2
+        depth = self.config["orderbook"]["depth"]
+        min_volume = self.config["orderbook"]["min_volume_threshold"]
+
+        # Логируем лучшие bid заявки
+        for i, bid in enumerate(order_book.bids[:depth]):
+            distance = (mid_price - bid.price) / mid_price * 100
+            if bid.volume >= min_volume:
+                self.logger.info(
+                    f"💎 BID {symbol}: Price={bid.price:.8f} | Volume={bid.volume:.2f} | "
+                    f"Distance={distance:.2f}%"
+                )
+
+        # Логируем лучшие ask заявки
+        for i, ask in enumerate(order_book.asks[:depth]):
+            distance = (ask.price - mid_price) / mid_price * 100
+            if ask.volume >= min_volume:
+                self.logger.info(
+                    f"💎 ASK {symbol}: Price={ask.price:.8f} | Volume={ask.volume:.2f} | "
+                    f"Distance={distance:.2f}%"
+                )
+
+    def close_all_websockets(self):
+        for symbol, ws in self.ws_connections.items():
             try:
-                self.ws_connections[symbol].close()
-                del self.ws_connections[symbol]
-            except Exception as e:
-                self.logger.error(f"Error closing WebSocket for {symbol}: {e}")
+                ws.close()
+            except:
+                pass
+        self.ws_connections.clear()
+
+    def get_wall_history(self, symbol: str, price: float, side: str) -> List[Dict]:
+        """Получаем историю объёмов для конкретной цены (для детекции поглощения)"""
+        if symbol not in self.wall_history:
+            return []
+
+        history = []
+        for timestamp, data in self.wall_history[symbol].items():
+            if side == "bid" and price in data['bids']:
+                history.append({"timestamp": timestamp, "volume": data['bids'][price]})
+            elif side == "ask" and price in data['asks']:
+                history.append({"timestamp": timestamp, "volume": data['asks'][price]})
+
+        return history
 
 # ============================================================
-#                 МОДУЛЬ 2: SETUP DETECTOR
+#                 ORDER BOOK STRATEGY (НОВАЯ ЛОГИКА)
 # ============================================================
 
-class SetupDetector:
+class OrderBookStrategy:
     def __init__(self, config: Dict, data_collector: DataCollector, logger: logging.Logger):
         self.config = config
         self.data_collector = data_collector
         self.logger = logger
-        self.pending_signals: Dict[str, Signal] = {}
+        self.last_trade_time: Dict[str, datetime] = {}  # Время последней сделки по символу
+        self.wall_detection_time: Dict[str, Dict] = {}  # Время обнаружения стен {symbol: {price: timestamp}}
 
-    def calculate_vwap(self, symbol: str, lookback: int = 100) -> Tuple[float, float]:
-        if symbol not in self.data_collector.ohlcv_data:
-            return 0.0, 0.0
+    def analyze(self, symbol: str, order_book: OrderBook) -> List[Signal]:
+        """Анализируем стакан и возвращаем список сигналов"""
+        signals = []
 
-        df = self.data_collector.ohlcv_data[symbol].tail(lookback)
-        if len(df) < lookback:
-            return 0.0, 0.0
+        if not order_book or not order_book.bids or not order_book.asks:
+            return signals
 
-        df["typical_price"] = (df["high"] + df["low"] + df["close"]) / 3
-        df["cumulative_volume"] = df["volume"].cumsum()
-        df["cumulative_typical_price_volume"] = (df["typical_price"] * df["volume"]).cumsum()
-        vwap = df["cumulative_typical_price_volume"].iloc[-1] / df["cumulative_volume"].iloc[-1]
-        std = df["typical_price"].std()
-        return vwap, std
+        # Проверяем минимальный интервал между сделками
+        if symbol in self.last_trade_time:
+            min_interval = self.config["orderbook_strategy"]["min_trade_interval_seconds"]
+            if (datetime.now() - self.last_trade_time[symbol]).total_seconds() < min_interval:
+                return signals
 
-    def calculate_atr(self, symbol: str, period: int = 14) -> float:
+        # 1. Ищем стены заявок
+        wall_signals = self._detect_walls(symbol, order_book)
+        signals.extend(wall_signals)
+
+        # 2. Ищем дисбаланс
+        imbalance_signal = self._detect_imbalance(symbol, order_book)
+        if imbalance_signal:
+            signals.append(imbalance_signal)
+
+        # 3. Ищем поглощение стен (если включено)
+        if self.config["orderbook_strategy"]["absorption_enabled"]:
+            absorption_signals = self._detect_absorption(symbol, order_book)
+            signals.extend(absorption_signals)
+
+        return signals
+
+    def _detect_walls(self, symbol: str, order_book: OrderBook) -> List[Signal]:
+        """Обнаружение стен заявок"""
+        signals = []
+        config = self.config["orderbook_strategy"]
+        tick_size = self.data_collector.get_tick_size(symbol)
+
+        # Анализируем bid-стены
+        best_bid = order_book.bids[0].price if order_book.bids else 0
+        bid_volumes = [level.volume for level in order_book.bids]
+        if bid_volumes:
+            median_bid_volume = np.median(bid_volumes)
+            for level in order_book.bids:
+                if level.volume >= config["wall_threshold"] * median_bid_volume:
+                    distance = (best_bid - level.price) / best_bid * 100
+                    if abs(distance) <= config["max_wall_distance_percent"]:
+                        # Проверяем, что это новая стена (не детектировали её раньше)
+                        if symbol not in self.wall_detection_time:
+                            self.wall_detection_time[symbol] = {}
+                        if level.price not in self.wall_detection_time[symbol]:
+                            self.wall_detection_time[symbol][level.price] = datetime.now()
+                            spread = (order_book.asks[0].price - order_book.bids[0].price) / order_book.bids[0].price * 100
+                            entry_price = order_book.asks[0].price  # Для LONG входим по best ask
+                            stop_loss = level.price - config["sl_offset_ticks"] * tick_size
+                            take_profit = self._calculate_tp(symbol, entry_price, TradeSide.LONG)
+
+                            signal = Signal(
+                                side=SignalType.LONG,
+                                symbol=symbol,
+                                entry_price=entry_price,
+                                stop_loss=stop_loss,
+                                take_profit=take_profit,
+                                reason=SignalReason.WALL,
+                                wall_price=level.price,
+                                spread=spread,
+                                wall_volume=level.volume
+                            )
+                            signals.append(signal)
+                            self.logger.info(
+                                f"🪨 BID WALL {symbol}: Price={level.price:.8f} | Volume={level.volume:.2f} | "
+                                f"Distance={distance:.2f}% | Entry={entry_price:.8f} | SL={stop_loss:.8f} | TP={take_profit:.8f}"
+                            )
+
+        # Анализируем ask-стены
+        best_ask = order_book.asks[0].price if order_book.asks else 0
+        ask_volumes = [level.volume for level in order_book.asks]
+        if ask_volumes:
+            median_ask_volume = np.median(ask_volumes)
+            for level in order_book.asks:
+                if level.volume >= config["wall_threshold"] * median_ask_volume:
+                    distance = (level.price - best_ask) / best_ask * 100
+                    if abs(distance) <= config["max_wall_distance_percent"]:
+                        if symbol not in self.wall_detection_time:
+                            self.wall_detection_time[symbol] = {}
+                        if level.price not in self.wall_detection_time[symbol]:
+                            self.wall_detection_time[symbol][level.price] = datetime.now()
+                            spread = (order_book.asks[0].price - order_book.bids[0].price) / order_book.bids[0].price * 100
+                            entry_price = order_book.bids[0].price  # Для SHORT входим по best bid
+                            stop_loss = level.price + config["sl_offset_ticks"] * tick_size
+                            take_profit = self._calculate_tp(symbol, entry_price, TradeSide.SHORT)
+
+                            signal = Signal(
+                                side=SignalType.SHORT,
+                                symbol=symbol,
+                                entry_price=entry_price,
+                                stop_loss=stop_loss,
+                                take_profit=take_profit,
+                                reason=SignalReason.WALL,
+                                wall_price=level.price,
+                                spread=spread,
+                                wall_volume=level.volume
+                            )
+                            signals.append(signal)
+                            self.logger.info(
+                                f"🪨 ASK WALL {symbol}: Price={level.price:.8f} | Volume={level.volume:.2f} | "
+                                f"Distance={distance:.2f}% | Entry={entry_price:.8f} | SL={stop_loss:.8f} | TP={take_profit:.8f}"
+                            )
+
+        return signals
+
+    def _detect_imbalance(self, symbol: str, order_book: OrderBook) -> Optional[Signal]:
+        """Обнаружение дисбаланса спроса/предложения"""
+        config = self.config["orderbook_strategy"]
+        depth = config["depth"]
+
+        if len(order_book.bids) < depth or len(order_book.asks) < depth:
+            return None
+
+        # Суммарный объём на первых depth уровнях
+        total_bid_volume = sum(level.volume for level in order_book.bids[:depth])
+        total_ask_volume = sum(level.volume for level in order_book.asks[:depth])
+
+        if total_bid_volume == 0 or total_ask_volume == 0:
+            return None
+
+        imbalance_ratio = total_bid_volume / total_ask_volume
+
+        spread = (order_book.asks[0].price - order_book.bids[0].price) / order_book.bids[0].price * 100
+
+        if imbalance_ratio >= config["imbalance_ratio"]:
+            # Бычий сигнал (больше покупок)
+            entry_price = order_book.asks[0].price
+            stop_loss = order_book.bids[0].price - config["sl_offset_ticks"] * self.data_collector.get_tick_size(symbol)
+            take_profit = self._calculate_tp(symbol, entry_price, TradeSide.LONG)
+
+            signal = Signal(
+                side=SignalType.LONG,
+                symbol=symbol,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                reason=SignalReason.IMBALANCE,
+                wall_price=0,
+                spread=spread,
+                wall_volume=total_bid_volume
+            )
+            self.logger.info(
+                f"⚖️ IMBALANCE {symbol}: Bid/Ask={imbalance_ratio:.2f} | "
+                f"Entry={entry_price:.8f} | SL={stop_loss:.8f} | TP={take_profit:.8f}"
+            )
+            return signal
+
+        elif imbalance_ratio <= 1 / config["imbalance_ratio"]:
+            # Медвежий сигнал (больше продаж)
+            entry_price = order_book.bids[0].price
+            stop_loss = order_book.asks[0].price + config["sl_offset_ticks"] * self.data_collector.get_tick_size(symbol)
+            take_profit = self._calculate_tp(symbol, entry_price, TradeSide.SHORT)
+
+            signal = Signal(
+                side=SignalType.SHORT,
+                symbol=symbol,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                reason=SignalReason.IMBALANCE,
+                wall_price=0,
+                spread=spread,
+                wall_volume=total_ask_volume
+            )
+            self.logger.info(
+                f"⚖️ IMBALANCE {symbol}: Bid/Ask={imbalance_ratio:.2f} | "
+                f"Entry={entry_price:.8f} | SL={stop_loss:.8f} | TP={take_profit:.8f}"
+            )
+            return signal
+
+        return None
+
+    def _detect_absorption(self, symbol: str, order_book: OrderBook) -> List[Signal]:
+        """Обнаружение поглощения стен"""
+        config = self.config["orderbook_strategy"]
+        signals = []
+        tick_size = self.data_collector.get_tick_size(symbol)
+        current_price = self.data_collector.get_current_price(symbol)
+
+        if symbol not in self.wall_detection_time:
+            return signals
+
+        # Проверяем bid-стены на поглощение
+        for wall_price, detection_time in list(self.wall_detection_time[symbol].items()):
+            if (datetime.now() - detection_time).total_seconds() > config["absorption_time_seconds"]:
+                del self.wall_detection_time[symbol][wall_price]
+                continue
+
+            # Получаем историю объёмов для этой стены
+            history = self.data_collector.get_wall_history(symbol, wall_price, "bid")
+            if len(history) < 2:
+                continue
+
+            # Проверяем уменьшение объёма
+            first_volume = history[0]["volume"]
+            last_volume = history[-1]["volume"]
+            volume_decrease_pct = (first_volume - last_volume) / first_volume * 100
+
+            if volume_decrease_pct >= config["absorption_pct"]:
+                # Проверяем, что цена сдвинулась в сторону стены (пробой)
+                if current_price > wall_price:
+                    # Пробой вверх → LONG
+                    entry_price = order_book.asks[0].price
+                    stop_loss = wall_price - config["sl_offset_ticks"] * tick_size
+                    take_profit = self._calculate_tp(symbol, entry_price, TradeSide.LONG)
+
+                    signal = Signal(
+                        side=SignalType.LONG,
+                        symbol=symbol,
+                        entry_price=entry_price,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        reason=SignalReason.ABSORPTION,
+                        wall_price=wall_price,
+                        spread=(order_book.asks[0].price - order_book.bids[0].price) / order_book.bids[0].price * 100,
+                        wall_volume=last_volume
+                    )
+                    signals.append(signal)
+                    del self.wall_detection_time[symbol][wall_price]  # Удаляем, чтобы не детектировать повторно
+                    self.logger.info(
+                        f"💥 ABSORPTION {symbol}: Wall at {wall_price:.8f} absorbed ({volume_decrease_pct:.1f}%) | "
+                        f"Entry={entry_price:.8f} | SL={stop_loss:.8f} | TP={take_profit:.8f}"
+                    )
+
+        # Проверяем ask-стены на поглощение
+        for wall_price, detection_time in list(self.wall_detection_time[symbol].items()):
+            if (datetime.now() - detection_time).total_seconds() > config["absorption_time_seconds"]:
+                del self.wall_detection_time[symbol][wall_price]
+                continue
+
+            history = self.data_collector.get_wall_history(symbol, wall_price, "ask")
+            if len(history) < 2:
+                continue
+
+            first_volume = history[0]["volume"]
+            last_volume = history[-1]["volume"]
+            volume_decrease_pct = (first_volume - last_volume) / first_volume * 100
+
+            if volume_decrease_pct >= config["absorption_pct"]:
+                if current_price < wall_price:
+                    # Пробой вниз → SHORT
+                    entry_price = order_book.bids[0].price
+                    stop_loss = wall_price + config["sl_offset_ticks"] * tick_size
+                    take_profit = self._calculate_tp(symbol, entry_price, TradeSide.SHORT)
+
+                    signal = Signal(
+                        side=SignalType.SHORT,
+                        symbol=symbol,
+                        entry_price=entry_price,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        reason=SignalReason.ABSORPTION,
+                        wall_price=wall_price,
+                        spread=(order_book.asks[0].price - order_book.bids[0].price) / order_book.bids[0].price * 100,
+                        wall_volume=last_volume
+                    )
+                    signals.append(signal)
+                    del self.wall_detection_time[symbol][wall_price]
+                    self.logger.info(
+                        f"💥 ABSORPTION {symbol}: Wall at {wall_price:.8f} absorbed ({volume_decrease_pct:.1f}%) | "
+                        f"Entry={entry_price:.8f} | SL={stop_loss:.8f} | TP={take_profit:.8f}"
+                    )
+
+        return signals
+
+    def _calculate_tp(self, symbol: str, entry_price: float, side: TradeSide) -> float:
+        """Расчёт тейк-профита"""
+        config = self.config["orderbook_strategy"]
+        tick_size = self.data_collector.get_tick_size(symbol)
+
+        if config["use_atr_for_tp"]:
+            atr = self._calculate_atr(symbol)
+            if side == TradeSide.LONG:
+                return entry_price + config["tp_atr_multiplier"] * atr
+            else:
+                return entry_price - config["tp_atr_multiplier"] * atr
+        else:
+            if side == TradeSide.LONG:
+                return entry_price + config["tp_ticks"] * tick_size
+            else:
+                return entry_price - config["tp_ticks"] * tick_size
+
+    def _calculate_atr(self, symbol: str, period: int = 14) -> float:
+        """Расчёт ATR для символа"""
         if symbol not in self.data_collector.ohlcv_data:
             return 0.0
 
@@ -354,304 +699,12 @@ class SetupDetector:
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         return tr.tail(period).mean()
 
-    def detect_candle_patterns(self, candle: Candle, prev_candle: Optional[Candle] = None) -> List[str]:
-        patterns = []
-        body_size = abs(candle.close - candle.open)
-        upper_shadow = candle.high - max(candle.open, candle.close)
-        lower_shadow = min(candle.open, candle.close) - candle.low
-
-        if prev_candle:
-            prev_body_size = abs(prev_candle.close - prev_candle.open)
-            if prev_body_size > 0:
-                body_coverage = min(
-                    abs(candle.close - prev_candle.open),
-                    abs(candle.close - prev_candle.close),
-                    abs(candle.open - prev_candle.open),
-                    abs(candle.open - prev_candle.close)
-                ) / prev_body_size
-            else:
-                body_coverage = 0
-        else:
-            body_coverage = 0
-
-        if lower_shadow >= 2 * body_size and upper_shadow <= 0.1 * body_size and candle.close > candle.open:
-            patterns.append("hammer")
-        if lower_shadow >= 2 * body_size and upper_shadow <= 0.1 * body_size and candle.close < candle.open:
-            patterns.append("hanging_man")
-        if upper_shadow >= 2 * body_size and lower_shadow <= 0.1 * body_size and candle.close < candle.open:
-            patterns.append("shooting_star")
-        if upper_shadow >= 2 * body_size and lower_shadow <= 0.1 * body_size and candle.close > candle.open:
-            patterns.append("inverted_hammer")
-        if prev_candle and candle.close > candle.open and prev_candle.close < prev_candle.open:
-            if body_coverage >= self.config["signal"]["min_body_coverage"]:
-                patterns.append("bullish_engulfing")
-        if prev_candle and candle.close < candle.open and prev_candle.close > prev_candle.open:
-            if body_coverage >= self.config["signal"]["min_body_coverage"]:
-                patterns.append("bearish_engulfing")
-
-        return patterns
-
-    def check_setup(self, symbol: str) -> Optional[Signal]:
-        last_candle = self.data_collector.get_latest_candle(symbol)
-        if not last_candle:
-            return None
-
-        # Получаем предыдущую свечу
-        df = self.data_collector.ohlcv_data[symbol]
-        if len(df) < 2:
-            return None
-        prev_candle_data = df.iloc[-2]
-        prev_candle = Candle(
-            timestamp=prev_candle_data.name,
-            open=prev_candle_data["open"],
-            high=prev_candle_data["high"],
-            low=prev_candle_data["low"],
-            close=prev_candle_data["close"],
-            volume=prev_candle_data["volume"]
-        )
-
-        vwap, std = self.calculate_vwap(symbol, self.config["vwap"]["lookback"])
-        atr = self.calculate_atr(symbol, self.config["atr"]["period"])
-        bb_upper = vwap + std * self.config["vwap"]["bbands_std"]
-        bb_lower = vwap - std * self.config["vwap"]["bbands_std"]
-        distance_from_vwap = (last_candle.close - vwap) / vwap * 100
-
-        avg_volume = df["volume"].tail(20).mean()
-        volume_ratio = last_candle.volume / avg_volume if avg_volume > 0 else 0
-
-        patterns = self.detect_candle_patterns(last_candle, prev_candle)
-        if not patterns:
-            return None
-
-        if (last_candle.close < bb_lower and
-            distance_from_vwap < -self.config["signal"]["min_distance_from_vwap"] and
-            volume_ratio > self.config["signal"]["volume_threshold"] and
-            any(p in ["hammer", "inverted_hammer", "bullish_engulfing"] for p in patterns)):
-
-            signal = Signal(
-                side=SignalType.LONG,
-                timestamp=last_candle.timestamp,
-                candle=last_candle,
-                vwap=vwap,
-                vwap_std=std,
-                atr=atr,
-                distance_from_vwap=distance_from_vwap,
-                volume_ratio=volume_ratio,
-                candle_pattern=patterns[0],
-                status=SignalStatus.DETECTED,
-            )
-            self.pending_signals[symbol] = signal
-            return signal
-
-        elif (last_candle.close > bb_upper and
-              distance_from_vwap > self.config["signal"]["min_distance_from_vwap"] and
-              volume_ratio > self.config["signal"]["volume_threshold"] and
-              any(p in ["shooting_star", "hanging_man", "bearish_engulfing"] for p in patterns)):
-
-            signal = Signal(
-                side=SignalType.SHORT,
-                timestamp=last_candle.timestamp,
-                candle=last_candle,
-                vwap=vwap,
-                vwap_std=std,
-                atr=atr,
-                distance_from_vwap=distance_from_vwap,
-                volume_ratio=volume_ratio,
-                candle_pattern=patterns[0],
-                status=SignalStatus.DETECTED,
-            )
-            self.pending_signals[symbol] = signal
-            return signal
-
-        return None
-
-    def confirm_signal(self, symbol: str) -> Optional[Signal]:
-        if symbol not in self.pending_signals:
-            return None
-
-        signal = self.pending_signals[symbol]
-
-        if (datetime.now() - signal.timestamp).total_seconds() > self.config["signal"]["signal_lifetime_seconds"]:
-            del self.pending_signals[symbol]
-            return None
-
-        current_candle = self.data_collector.get_latest_candle(symbol)
-        if not current_candle or current_candle.timestamp <= signal.candle.timestamp:
-            return None
-
-        if signal.side == SignalType.LONG and current_candle.close > signal.candle.close:
-            signal.status = SignalStatus.CONFIRMED
-            signal.confirmation_candle = current_candle
-            del self.pending_signals[symbol]
-            return signal
-        elif signal.side == SignalType.SHORT and current_candle.close < signal.candle.close:
-            signal.status = SignalStatus.CONFIRMED
-            signal.confirmation_candle = current_candle
-            del self.pending_signals[symbol]
-            return signal
-
-        return None
+    def record_trade(self, symbol: str):
+        """Записываем время последней сделки по символу"""
+        self.last_trade_time[symbol] = datetime.now()
 
 # ============================================================
-#                 МОДУЛЬ 3: PREDICTOR
-# ============================================================
-
-class Predictor:
-    def __init__(self, config: Dict, data_collector: DataCollector, logger: logging.Logger):
-        self.config = config
-        self.data_collector = data_collector
-        self.logger = logger
-        self.model = self._init_model()
-        self.scaler = StandardScaler()
-        self.is_trained = False
-        self.training_data: List[Dict] = []
-        self.confidence_threshold = config["predictor"]["initial_confidence_threshold"]
-        self.trade_outcomes: List[bool] = []
-        self.last_retrain_time = datetime.min
-
-    def _init_model(self):
-        if self.config["predictor"]["model_type"] == "mlp":
-            return MLPClassifier(
-                hidden_layer_sizes=tuple(self.config["predictor"]["hidden_layers"]),
-                learning_rate_init=self.config["predictor"].get("learning_rate", 0.01),
-                max_iter=500,
-                random_state=42,
-            )
-        else:
-            try:
-                from lightgbm import LGBMClassifier
-                return LGBMClassifier(
-                    max_depth=self.config["predictor"].get("max_depth", 3),
-                    n_estimators=self.config["predictor"].get("n_estimators", 100),
-                    learning_rate=self.config["predictor"].get("learning_rate", 0.01),
-                    random_state=42,
-                )
-            except ImportError:
-                self.logger.warning("LightGBM not installed. Using MLP.")
-                return MLPClassifier(
-                    hidden_layer_sizes=tuple(self.config["predictor"]["hidden_layers"]),
-                    max_iter=500,
-                    random_state=42,
-                )
-
-    def collect_features(self, signal: Signal, symbol: str) -> Dict[str, float]:
-        df = self.data_collector.ohlcv_data[symbol]
-        candle = signal.candle
-
-        ema9 = df["close"].ewm(span=9).mean().iloc[-1]
-        ema9_prev = df["close"].ewm(span=9).mean().iloc[-2] if len(df) >= 2 else ema9
-        ema9_slope = (ema9 - ema9_prev) / ema9_prev * 100 if ema9_prev > 0 else 0
-
-        rsi = self._calculate_rsi(df["close"], 14)
-        rsi_prev = self._calculate_rsi(df["close"].iloc[:-1], 14) if len(df) >= 15 else rsi
-        rsi_slope = rsi - rsi_prev
-
-        vwap_history = []
-        for i in range(1, min(6, len(df))):
-            vwap, _ = self.calculate_vwap(symbol, self.config["vwap"]["lookback"])
-            vwap_history.append(vwap)
-        vwap_slope = (vwap_history[0] - vwap_history[-1]) / vwap_history[-1] * 100 if len(vwap_history) >= 2 else 0
-
-        session_volume = df["volume"].max()
-        volume_pct = candle.volume / session_volume if session_volume > 0 else 0
-
-        body_size = abs(candle.close - candle.open)
-        upper_shadow = candle.high - max(candle.open, candle.close)
-        lower_shadow = min(candle.open, candle.close) - candle.low
-
-        atr_pct = signal.atr / candle.close * 100 if candle.close > 0 else 0
-
-        return {
-            "ema9_slope": ema9_slope,
-            "distance_from_vwap_std": abs(signal.distance_from_vwap) / signal.vwap_std if signal.vwap_std > 0 else 0,
-            "rsi": rsi,
-            "rsi_slope": rsi_slope,
-            "vwap_slope": vwap_slope,
-            "volume_pct": volume_pct,
-            "atr": signal.atr,
-            "atr_pct": atr_pct,
-            "body_size_pct": body_size / candle.open * 100 if candle.open > 0 else 0,
-            "upper_shadow_to_body": upper_shadow / body_size if body_size > 0 else 0,
-            "lower_shadow_to_body": lower_shadow / body_size if body_size > 0 else 0,
-            "volume_ratio": signal.volume_ratio,
-            "is_long": 1 if signal.side == SignalType.LONG else 0,
-        }
-
-    def _calculate_rsi(self, series: pd.Series, period: int = 14) -> float:
-        delta = series.diff()
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(lower=0)
-        avg_gain = gain.ewm(alpha=1/period, min_periods=period).mean()
-        avg_loss = loss.ewm(alpha=1/period, min_periods=period).mean()
-        rs = avg_gain / avg_loss.replace(0, float('nan'))
-        return 100 - (100 / (1 + rs))
-
-    def predict(self, signal: Signal, symbol: str) -> PredictionResult:
-        features = self.collect_features(signal, symbol)
-
-        if not self.is_trained:
-            return PredictionResult(probability=0.5, decision=False, features=features)
-
-        feature_values = np.array([list(features.values())])
-
-        if hasattr(self.scaler, "scale_"):
-            feature_values = self.scaler.transform(feature_values)
-
-        probability = self.model.predict_proba(feature_values)[0][1]
-        decision = probability >= self.confidence_threshold
-
-        return PredictionResult(probability=probability, decision=decision, features=features)
-
-    def add_training_example(self, signal: Signal, symbol: str, outcome: bool):
-        features = self.collect_features(signal, symbol)
-        features["target"] = 1 if outcome else 0
-        self.training_data.append(features)
-
-        if len(self.training_data) >= self.config["predictor"]["min_samples_for_training"]:
-            self.retrain()
-
-    def retrain(self):
-        if len(self.training_data) < self.config["predictor"]["min_samples_for_training"]:
-            return
-
-        self.logger.info(f"Retraining model with {len(self.training_data)} samples...")
-        df = pd.DataFrame(self.training_data)
-        X = df.drop(columns=["target"])
-        y = df["target"]
-
-        if not hasattr(self.scaler, "scale_"):
-            self.scaler.fit(X)
-
-        X_scaled = self.scaler.transform(X)
-        self.model.fit(X_scaled, y)
-        self.is_trained = True
-        self.last_retrain_time = datetime.now()
-        self.logger.info("Model retrained successfully.")
-
-    def adapt_confidence_threshold(self):
-        if len(self.trade_outcomes) < self.config["predictor"]["adaptation_window"]:
-            return
-
-        recent_outcomes = self.trade_outcomes[-self.config["predictor"]["adaptation_window"]:]
-        win_rate = sum(recent_outcomes) / len(recent_outcomes)
-
-        if win_rate < 0.5:
-            self.confidence_threshold = min(0.9, self.confidence_threshold + 0.03)
-            self.logger.info(f"Increased confidence threshold to {self.confidence_threshold:.2f} (win rate: {win_rate:.2f})")
-        elif win_rate > 0.6:
-            self.confidence_threshold = max(
-                self.config["predictor"]["min_confidence_threshold"],
-                self.confidence_threshold - 0.01
-            )
-            self.logger.info(f"Decreased confidence threshold to {self.confidence_threshold:.2f} (win rate: {win_rate:.2f})")
-
-    def record_trade_outcome(self, outcome: bool):
-        self.trade_outcomes.append(outcome)
-        if len(self.trade_outcomes) > self.config["predictor"]["adaptation_window"] * 2:
-            self.trade_outcomes = self.trade_outcomes[-self.config["predictor"]["adaptation_window"] * 2:]
-
-# ============================================================
-#                 МОДУЛЬ 4: RISK MANAGER
+#                 RISK MANAGER
 # ============================================================
 
 class RiskManager:
@@ -664,6 +717,7 @@ class RiskManager:
         self.consecutive_losses = 0
         self.trades: List[Trade] = []
         self.cool_down_until = datetime.min
+        self.active_positions: Dict[str, Trade] = {}  # symbol -> Trade
 
     def update_balance(self, balance: float):
         self.balance = balance
@@ -677,8 +731,9 @@ class RiskManager:
 
         qty = risk_amount / stop_loss_distance
 
+        # Ограничиваем максимальный размер позиции
         max_nominal_risk = self.balance * self.config["risk"]["max_risk_per_trade"]
-        max_qty = max_nominal_risk / (entry_price * 0.01)
+        max_qty = max_nominal_risk / (entry_price * 0.01)  # Примерная оценка
         qty = min(qty, max_qty)
 
         try:
@@ -705,16 +760,22 @@ class RiskManager:
 
     def check_daily_limit(self) -> bool:
         if abs(self.daily_loss) >= self.balance * self.config["risk"]["max_daily_loss"]:
-            self.logger.warning(f"Daily loss limit reached: {self.daily_loss:.2f} USDT")
+            self.logger.warning(f"🛑 Daily loss limit reached: {self.daily_loss:.2f} USDT")
             return False
         return True
 
     def check_cool_down(self) -> bool:
         if datetime.now() < self.cool_down_until:
             remaining = (self.cool_down_until - datetime.now()).total_seconds() / 60
-            self.logger.warning(f"Cooldown: {remaining:.1f} minutes remaining")
+            self.logger.warning(f"⏳ Cooldown: {remaining:.1f} minutes remaining")
             return False
         return True
+
+    def can_open_position(self, symbol: str) -> bool:
+        """Проверяем, можно ли открывать позицию для этого символа"""
+        if symbol in self.active_positions:
+            return False
+        return self.check_daily_limit() and self.check_cool_down()
 
     def record_trade(self, trade: Trade):
         self.trades.append(trade)
@@ -729,7 +790,7 @@ class RiskManager:
 
             if self.consecutive_losses >= self.config["risk"]["cool_down_after_losses"]:
                 self.cool_down_until = datetime.now() + timedelta(minutes=self.config["risk"]["cool_down_minutes"])
-                self.logger.warning(f"Cooldown activated for {self.config['risk']['cool_down_minutes']} minutes")
+                self.logger.warning(f"⏳ Cooldown activated for {self.config['risk']['cool_down_minutes']} minutes")
 
     def get_win_rate(self) -> float:
         closed_trades = [t for t in self.trades if t.status == TradeStatus.CLOSED and t.pnl is not None]
@@ -739,7 +800,7 @@ class RiskManager:
         return wins / len(closed_trades)
 
 # ============================================================
-#                 МОДУЛЬ 5: EXECUTOR
+#                 EXECUTOR
 # ============================================================
 
 class Executor:
@@ -758,16 +819,18 @@ class Executor:
         })
 
     def open_position(self, side: TradeSide, symbol: str, qty: float, entry_price: float,
-                     stop_loss: float, take_profit: float) -> Optional[Trade]:
+                     stop_loss: float, take_profit: float, signal_reason: SignalReason,
+                     wall_price: float, spread: float, wall_volume: float) -> Optional[Trade]:
         try:
             side_str = "buy" if side == TradeSide.LONG else "sell"
 
             market = self.exchange.market(symbol)
             min_qty = float(market.get("limits", {}).get("amount", {}).get("min", 0) or 0)
             if qty < min_qty:
-                self.logger.warning(f"Position size {qty} < minimum {min_qty} for {symbol}")
+                self.logger.warning(f"⚠️ Position size {qty} < minimum {min_qty} for {symbol}")
                 return None
 
+            # Открываем позицию с SL/TP
             order = self.exchange.create_order(
                 symbol=symbol,
                 type="market",
@@ -786,13 +849,22 @@ class Executor:
                 qty=qty,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
+                symbol=symbol,
+                signal_reason=signal_reason,
+                wall_price=wall_price,
+                spread=spread,
+                wall_volume=wall_volume,
             )
 
-            self.logger.info(f"Position opened: {side_str.upper()} {qty:.4f} {symbol} @ {entry_price:.2f} | SL={stop_loss:.2f} | TP={take_profit:.2f}")
+            self.logger.info(
+                f"🚀 OPENED {side_str.upper()} {qty:.4f} {symbol} @ {entry_price:.8f} | "
+                f"SL={stop_loss:.8f} | TP={take_profit:.8f} | "
+                f"Reason: {signal_reason.name} | Wall: {wall_price:.8f} ({wall_volume:.2f})"
+            )
             return trade
 
         except Exception as e:
-            self.logger.error(f"Error opening position: {e}")
+            self.logger.error(f"❌ Error opening position for {symbol}: {e}")
             return None
 
     def close_position(self, symbol: str, qty: float, side: TradeSide) -> bool:
@@ -805,44 +877,10 @@ class Executor:
                 amount=qty,
                 params={"reduceOnly": True},
             )
-            self.logger.info(f"Position closed: {side_str.upper()} {qty:.4f} {symbol}")
+            self.logger.info(f"🔒 CLOSED {side_str.upper()} {qty:.4f} {symbol}")
             return True
         except Exception as e:
-            self.logger.error(f"Error closing position: {e}")
-            return False
-
-    def update_stop_loss(self, symbol: str, new_stop_loss: float, side: TradeSide, qty: float) -> bool:
-        try:
-            side_str = "sell" if side == TradeSide.LONG else "buy"
-
-            # Отменяем старые стоп-ордера
-            open_orders = self.exchange.fetch_open_orders(symbol)
-            stop_orders = [
-                o for o in open_orders
-                if o.get("type") == "stop" and o.get("side") == side_str
-            ]
-
-            for order in stop_orders:
-                try:
-                    self.exchange.cancel_order(order["id"], symbol)
-                except Exception as e:
-                    self.logger.error(f"Error canceling stop order {order['id']}: {e}")
-
-            # Создаем новый стоп-ордер
-            new_order = self.exchange.create_order(
-                symbol=symbol,
-                type="stop",
-                side=side_str,
-                amount=qty,
-                price=new_stop_loss,
-                params={"reduceOnly": True},
-            )
-
-            self.logger.info(f"Stop loss updated to {new_stop_loss:.2f} | New order: {new_order.get('id')}")
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Error updating stop loss: {e}")
+            self.logger.error(f"❌ Error closing position for {symbol}: {e}")
             return False
 
     def get_balance(self) -> float:
@@ -853,55 +891,63 @@ class Executor:
             self.logger.error(f"Error getting balance: {e}")
             return 0.0
 
+    def get_current_price(self, symbol: str) -> float:
+        try:
+            ticker = self.exchange.fetch_ticker(symbol)
+            return float(ticker["last"])
+        except Exception as e:
+            self.logger.error(f"Error getting price for {symbol}: {e}")
+            return 0.0
+
 # ============================================================
-#                 ГЛАВНЫЙ КЛАСС: VWAP SCALPER BOT
+#                 ГЛАВНЫЙ КЛАСС
 # ============================================================
 
-class VWAPScalperBot:
+class OrderBookScalperBot:
     def __init__(self, config: Dict):
         self.config = config
         self.logger = setup_logging(config)
 
         self.data_collector = DataCollector(config, self.logger)
-        self.setup_detector = SetupDetector(config, self.data_collector, self.logger)
-        self.predictor = Predictor(config, self.data_collector, self.logger)
+        self.orderbook_strategy = OrderBookStrategy(config, self.data_collector, self.logger)
         self.risk_manager = RiskManager(config, self.logger)
         self.executor = Executor(config, self.logger)
 
         self.is_running = False
-        self.current_trade: Optional[Trade] = None
         self.ws_thread: Optional[threading.Thread] = None
-        self.last_ohlcv_update = datetime.min
-        self.last_retrain_check = datetime.min
+        self.last_orderbook_check = datetime.min
 
     def start(self):
         self.is_running = True
-        self.logger.info(f"Bot started in mode: {self.config['mode']}")
+        self.logger.info("🚀 ORDER BOOK SCALPER STARTED")
+        self.logger.info(f"📊 Monitoring symbols: {', '.join(self.config['symbols'])}")
+        self.logger.info(f"🎯 Strategy: Order Book Analysis (Walls, Imbalance, Absorption)")
 
         try:
-            if self.config["mode"] == "backtest":
-                self._run_backtest()
-            else:
-                self._run_live()
+            self._run_live()
         except KeyboardInterrupt:
             self.stop()
 
     def stop(self):
         self.is_running = False
+        self.logger.info("🛑 Stopping bot...")
 
         if self.ws_thread:
-            self.data_collector.close_websocket(self.config["symbol"])
+            self.data_collector.close_all_websockets()
             self.ws_thread.join(timeout=5)
 
-        if self.current_trade and self.current_trade.status == TradeStatus.OPEN:
-            self.logger.warning("Closing open position...")
-            self.executor.close_position(
-                self.config["symbol"],
-                self.current_trade.qty,
-                self.current_trade.side
-            )
+        # Закрываем все открытые позиции
+        for symbol, trade in list(self.risk_manager.active_positions.items()):
+            if trade.status == TradeStatus.OPEN:
+                self.logger.warning(f"🔒 Closing open position for {symbol}...")
+                self.executor.close_position(symbol, trade.qty, trade.side)
+                trade.status = TradeStatus.CLOSED
+                trade.close_time = datetime.now()
+                trade.close_price = self.executor.get_current_price(symbol)
+                trade.pnl = self._calculate_pnl(trade)
+                self.risk_manager.record_trade(trade)
 
-        self.logger.info("Bot stopped")
+        self.logger.info("✅ Bot stopped")
 
     def _calculate_pnl(self, trade: Trade) -> float:
         if trade.close_price is None:
@@ -912,216 +958,173 @@ class VWAPScalperBot:
             return (trade.entry_price - trade.close_price) * trade.qty
 
     def _run_live(self):
-        symbol = self.config["symbol"]
-
-        # Initial data load
-        self.data_collector.fetch_ohlcv(symbol, self.config["timeframe"], limit=100)
+        # Получаем начальный баланс
         self.risk_manager.update_balance(self.executor.get_balance())
+        self.logger.info(f"💰 Current balance: {self.risk_manager.balance:.2f} USDT")
 
-        # Start WebSocket in a separate thread
-        self.ws_thread = threading.Thread(target=self.data_collector.start_websocket, args=(symbol,))
+        # Запускаем WebSocket для всех символов
+        self.ws_thread = threading.Thread(target=self.data_collector.start_websockets)
         self.ws_thread.daemon = True
         self.ws_thread.start()
 
-        self.logger.info("Main loop started...")
+        # Даём время на подключение WebSocket
+        time.sleep(3)
+
+        self.logger.info("🔄 Main loop started...")
 
         while self.is_running:
             try:
-                # Check daily limit and cooldown
+                # Проверяем дневной лимит и кулдаун
                 if not self.risk_manager.check_daily_limit() or not self.risk_manager.check_cool_down():
                     time.sleep(5)
                     continue
 
-                # Update OHLCV data (max once per second)
-                if (datetime.now() - self.last_ohlcv_update).total_seconds() > 1:
-                    self.data_collector.fetch_ohlcv(symbol, self.config["timeframe"], limit=1)
-                    self.last_ohlcv_update = datetime.now()
+                # Анализируем стаканы для всех символов
+                for symbol in self.config["symbols"]:
+                    if symbol in self.data_collector.order_books:
+                        order_book = self.data_collector.order_books[symbol]
+                        signals = self.orderbook_strategy.analyze(symbol, order_book)
 
-                # Check for confirmed signals
-                if symbol in self.setup_detector.pending_signals:
-                    confirmed_signal = self.setup_detector.confirm_signal(symbol)
-                    if confirmed_signal:
-                        prediction = self.predictor.predict(confirmed_signal, symbol)
-                        if prediction.decision:
-                            self._open_position_from_signal(confirmed_signal)
-                        else:
-                            self.logger.info(f"Signal rejected by neural network (probability: {prediction.probability:.2f})")
+                        for signal in signals:
+                            self._process_signal(signal)
 
-                # Check for new setups (only if no open position)
-                if not self.current_trade or self.current_trade.status != TradeStatus.OPEN:
-                    self.setup_detector.check_setup(symbol)
+                # Мониторинг открытых позиций
+                self._monitor_positions()
 
-                # Monitor open position
-                if self.current_trade and self.current_trade.status == TradeStatus.OPEN:
-                    self._monitor_position()
-
-                # Adapt confidence threshold
-                self.predictor.adapt_confidence_threshold()
-
-                # Retrain model if needed
-                if (datetime.now() - self.last_retrain_check).total_seconds() > 3600:  # Once per hour
-                    if len(self.predictor.training_data) >= self.config["predictor"]["min_samples_for_training"]:
-                        self.predictor.retrain()
-                        self.last_retrain_check = datetime.now()
-
-                time.sleep(0.5)  # Reduced sleep time for better responsiveness
+                time.sleep(0.1)  # Минимальная задержка для обработки
 
             except KeyboardInterrupt:
                 self.stop()
                 break
             except Exception as e:
-                self.logger.error(f"Error in main loop: {e}")
+                self.logger.error(f"❌ Error in main loop: {e}")
                 time.sleep(5)
 
-    def _open_position_from_signal(self, signal: Signal):
-        symbol = self.config["symbol"]
-        atr = signal.atr
+    def _process_signal(self, signal: Signal):
+        """Обрабатываем сигнал от OrderBookStrategy"""
+        symbol = signal.symbol
 
-        if signal.side == SignalType.LONG:
-            stop_loss = signal.candle.low - self.config["atr"]["stop_loss_multiplier"] * atr
-            take_profit = signal.candle.close + self.config["atr"]["take_profit_multiplier"] * atr
-        else:
-            stop_loss = signal.candle.high + self.config["atr"]["stop_loss_multiplier"] * atr
-            take_profit = signal.candle.close - self.config["atr"]["take_profit_multiplier"] * atr
-
-        qty = self.risk_manager.calculate_position_size(signal.candle.close, stop_loss, symbol)
-        if qty <= 0:
-            self.logger.warning("Position size is 0. Skipping signal.")
+        # Проверяем, можно ли открывать позицию
+        if not self.risk_manager.can_open_position(symbol):
+            self.logger.warning(f"⚠️ Cannot open position for {symbol} (daily limit or cooldown)")
             return
 
+        # Рассчитываем размер позиции
+        qty = self.risk_manager.calculate_position_size(
+            signal.entry_price,
+            signal.stop_loss,
+            symbol
+        )
+        if qty <= 0:
+            self.logger.warning(f"⚠️ Position size is 0 for {symbol}. Skipping.")
+            return
+
+        # Открываем позицию
         trade_side = TradeSide.LONG if signal.side == SignalType.LONG else TradeSide.SHORT
         trade = self.executor.open_position(
             side=trade_side,
             symbol=symbol,
             qty=qty,
-            entry_price=signal.candle.close,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
+            entry_price=signal.entry_price,
+            stop_loss=signal.stop_loss,
+            take_profit=signal.take_profit,
+            signal_reason=signal.reason,
+            wall_price=signal.wall_price,
+            spread=signal.spread,
+            wall_volume=signal.wall_volume
         )
 
         if trade:
-            trade.signal = signal
-            self.current_trade = trade
+            self.risk_manager.active_positions[symbol] = trade
             self.risk_manager.record_trade(trade)
-            self.logger.info(f"Position opened based on signal: {signal.candle_pattern}")
+            self.orderbook_strategy.record_trade(symbol)  # Записываем время последней сделки
 
-    def _monitor_position(self):
-        if not self.current_trade:
-            return
+    def _monitor_positions(self):
+        """Мониторинг всех открытых позиций"""
+        for symbol, trade in list(self.risk_manager.active_positions.items()):
+            if trade.status != TradeStatus.OPEN:
+                continue
 
-        symbol = self.config["symbol"]
+            current_price = self.executor.get_current_price(symbol)
+            if current_price == 0:
+                continue
+
+            # Проверяем время жизни позиции
+            max_lifetime = timedelta(minutes=self.config["orderbook_strategy"]["max_trade_lifetime_minutes"])
+            if (datetime.now() - trade.entry_time) > max_lifetime:
+                self._close_position(trade, "timeout")
+                continue
+
+            # Проверяем SL/TP
+            if trade.side == TradeSide.LONG:
+                if current_price <= trade.stop_loss:
+                    self._close_position(trade, "stop_loss")
+                    continue
+                elif current_price >= trade.take_profit:
+                    self._close_position(trade, "take_profit")
+                    continue
+            else:  # SHORT
+                if current_price >= trade.stop_loss:
+                    self._close_position(trade, "stop_loss")
+                    continue
+                elif current_price <= trade.take_profit:
+                    self._close_position(trade, "take_profit")
+                    continue
+
+    def _close_position(self, trade: Trade, reason: str):
+        """Закрываем позицию"""
+        symbol = trade.symbol
         current_price = self.executor.get_current_price(symbol)
 
-        # Check position lifetime
-        max_lifetime = timedelta(minutes=self.config["risk"]["max_trade_lifetime_minutes"])
-        if (datetime.now() - self.current_trade.entry_time) > max_lifetime:
-            self._close_position("timeout")
+        success = self.executor.close_position(symbol, trade.qty, trade.side)
+        if not success:
+            self.logger.error(f"❌ Failed to close position for {symbol}")
             return
 
-        # Check SL/TP
-        if self.current_trade.side == TradeSide.LONG:
-            if current_price <= self.current_trade.stop_loss:
-                self._close_position("stop_loss")
-                return
-            elif current_price >= self.current_trade.take_profit:
-                self._close_position("take_profit")
-                return
-        else:
-            if current_price >= self.current_trade.stop_loss:
-                self._close_position("stop_loss")
-                return
-            elif current_price <= self.current_trade.take_profit:
-                self._close_position("take_profit")
-                return
+        trade.status = TradeStatus.CLOSED
+        trade.close_price = current_price
+        trade.close_time = datetime.now()
+        trade.pnl = self._calculate_pnl(trade)
 
-        # Check trailing stop (only on new candle)
-        last_candle = self.data_collector.get_latest_candle(symbol)
-        if last_candle and last_candle.timestamp > self.current_trade.entry_time:
-            if self.current_trade.trailing_stop is None:
-                trailing_start = self.current_trade.entry_price + (
-                    self.config["atr"]["stop_loss_multiplier"] + self.config["atr"]["trailing_step_multiplier"]
-                ) * self.current_trade.stop_loss if self.current_trade.side == TradeSide.LONG else (
-                    self.current_trade.entry_price - (
-                        self.config["atr"]["stop_loss_multiplier"] + self.config["atr"]["trailing_step_multiplier"]
-                    ) * self.current_trade.stop_loss
-                )
+        self.risk_manager.record_trade(trade)
+        del self.risk_manager.active_positions[symbol]
 
-                if (self.current_trade.side == TradeSide.LONG and current_price >= trailing_start) or \
-                   (self.current_trade.side == TradeSide.SHORT and current_price <= trailing_start):
-                    self.current_trade.trailing_stop = current_price - (
-                        self.config["atr"]["trailing_step_multiplier"] * self.current_trade.stop_loss
-                    ) if self.current_trade.side == TradeSide.LONG else current_price + (
-                        self.config["atr"]["trailing_step_multiplier"] * self.current_trade.stop_loss
-                    )
-                    self.logger.info(f"Trailing stop activated: {self.current_trade.trailing_stop:.2f}")
-            else:
-                new_trailing_stop = current_price - (
-                    self.config["atr"]["trailing_step_multiplier"] * self.current_trade.stop_loss
-                ) if self.current_trade.side == TradeSide.LONG else current_price + (
-                    self.config["atr"]["trailing_step_multiplier"] * self.current_trade.stop_loss
-                )
-
-                if (self.current_trade.side == TradeSide.LONG and new_trailing_stop > self.current_trade.trailing_stop) or \
-                   (self.current_trade.side == TradeSide.SHORT and new_trailing_stop < self.current_trade.trailing_stop):
-                    self.current_trade.trailing_stop = new_trailing_stop
-                    self.current_trade.stop_loss = new_trailing_stop
-                    self.executor.update_stop_loss(
-                        symbol, new_trailing_stop, self.current_trade.side, self.current_trade.qty
-                    )
-                    self.logger.info(f"Trailing stop updated to: {new_trailing_stop:.2f}")
-
-    def _close_position(self, reason: str):
-        if not self.current_trade:
-            return
-
-        symbol = self.config["symbol"]
-        current_price = self.executor.get_current_price(symbol)
-
-        self.executor.close_position(symbol, self.current_trade.qty, self.current_trade.side)
-
-        self.current_trade.status = TradeStatus.CLOSED
-        self.current_trade.close_price = current_price
-        self.current_trade.close_time = datetime.now()
-        self.current_trade.pnl = self._calculate_pnl(self.current_trade)
-
-        # Record outcome for neural network training
-        if self.current_trade.signal:
-            outcome = self.current_trade.pnl > 0 if self.current_trade.pnl else False
-            self.predictor.add_training_example(self.current_trade.signal, symbol, outcome)
-            self.predictor.record_trade_outcome(outcome)
-
-        self.risk_manager.record_trade(self.current_trade)
-        self.logger.info(f"Position closed due to: {reason} | PnL: {self.current_trade.pnl:.2f} USDT")
-        self.current_trade = None
-
-    def _run_backtest(self):
-        # Backtest implementation would go here
-        self.logger.info("Backtest mode not implemented in this version")
-        self.stop()
+        self.logger.info(
+            f"💰 CLOSED {trade.side.name} {symbol} | "
+            f"Entry={trade.entry_price:.8f} | Exit={current_price:.8f} | "
+            f"PnL={trade.pnl:.2f} USDT | Reason: {reason} | "
+            f"Signal: {trade.signal_reason.name}"
+        )
 
 # ============================================================
-#                 ЗАПУСК БОТА
+#                 ЗАПУСК
 # ============================================================
 
 if __name__ == "__main__":
+    # Проверяем наличие API ключей
+    if not os.getenv("BYBIT_API_KEY") or not os.getenv("BYBIT_API_SECRET"):
+        print("❌ ERROR: BYBIT_API_KEY and BYBIT_API_SECRET must be set in environment variables")
+        exit(1)
+
     config = DEFAULT_CONFIG.copy()
 
-    # Try to load config from file
-    config_path = "config.json"
+    # Пробуем загрузить конфиг из файла
+    config_path = "orderbook_scalper_config.json"
     if os.path.exists(config_path):
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 file_config = json.load(f)
-                # Merge with default config
+                # Объединяем конфиги
                 for key, value in file_config.items():
                     if key in config and isinstance(value, dict):
                         config[key].update(value)
                     else:
                         config[key] = value
         except Exception as e:
-            print(f"Error loading config: {e}")
+            print(f"⚠️ Warning: Error loading config file: {e}. Using defaults.")
 
-    bot = VWAPScalperBot(config)
+    # Создаём и запускаем бота
+    bot = OrderBookScalperBot(config)
 
     try:
         bot.start()
