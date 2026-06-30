@@ -2,22 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-МУЛЬТИ-СТРАТЕГИЧЕСКИЙ БЭКТЕСТЕР НА ИСТОРИЧЕСКИХ ДАННЫХ
-=====================================================
-Загружает OHLCV для списка монет, прогоняет 30+ стратегий,
+МУЛЬТИ-СТРАТЕГИЧЕСКИЙ БЭКТЕСТЕР НА ИСТОРИЧЕСКИХ ДАННЫХ (v2, исправленный)
+========================================================================
+Загружает OHLCV для списка монет, прогоняет 31 стратегию,
 выводит сводную таблицу результатов.
+Исправлены ошибки int64 в Supertrend и Heikin-Ashi.
 """
 
-import os
-import time
-import logging
-import numpy as np
-import pandas as pd
-import ccxt
-from typing import Dict, List, Tuple, Optional, Callable
-from dataclasses import dataclass
-from datetime import datetime, timedelta
-from scipy import stats as scipy_stats
+import os, time, logging, numpy as np, pandas as pd, ccxt
+from typing import Dict, List, Callable
+from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -26,29 +20,30 @@ warnings.filterwarnings('ignore')
 # ============================================================
 SYMBOLS = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "BNB/USDT:USDT", "XRP/USDT:USDT",
-    "SOL/USDT:USDT", "ADA/USDT:USDT", "TRX/USDT:USDT",
-    "AVAX/USDT:USDT", "DOT/USDT:USDT", "LTC/USDT:USDT",
-    # Можно добавить остальные, но для демонстрации ограничимся 10
+    "SOL/USDT:USDT", "ADA/USDT:USDT", "TRX/USDT:USDT", "AVAX/USDT:USDT",
+    "DOT/USDT:USDT", "LTC/USDT:USDT", "BCH/USDT:USDT", "ATOM/USDT:USDT",
+    "XLM/USDT:USDT", "NEAR/USDT:USDT", "DOGE/USDT:USDT",
+    "1000PEPE/USDT:USDT", "WIF/USDT:USDT", "BOME/USDT:USDT",
+    "RENDER/USDT:USDT", "TAO/USDT:USDT", "WLD/USDT:USDT", "ARKM/USDT:USDT",
+    "IO/USDT:USDT", "ONDO/USDT:USDT", "VIRTUAL/USDT:USDT", "UNI/USDT:USDT",
+    "AAVE/USDT:USDT", "ARB/USDT:USDT", "OP/USDT:USDT", "LINK/USDT:USDT",
+    "GRT/USDT:USDT", "INJ/USDT:USDT", "SUI/USDT:USDT", "APT/USDT:USDT",
+    "TIA/USDT:USDT", "JTO/USDT:USDT", "EIGEN/USDT:USDT", "HBAR/USDT:USDT",
+    "VET/USDT:USDT", "NOT/USDT:USDT", "CATI/USDT:USDT",
 ]
-TIMEFRAME = "5m"          # тестируем на 5-минутках
-LIMIT = 1000              # количество свечей на символ (примерно 3.5 дня для 5m)
-SL_ATR_MULT = 1.5         # стоп-лосс в ATR
-TP_ATR_MULT = 3.0         # тейк-профит в ATR
-MAX_HOLD_BARS = 200       # максимальное время удержания позиции в барах
-INITIAL_CAPITAL = 1000    # начальный капитал в USDT (для расчёта процентов)
+TIMEFRAME = "5m"
+LIMIT = 5000                     # больше свечей = точнее статистика
+SL_ATR_MULT = 1.5
+TP_ATR_MULT = 3.0
+MAX_HOLD_BARS = 200
+INITIAL_CAPITAL = 1000
 
-# ============================================================
-#                      ЛОГИРОВАНИЕ
-# ============================================================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-# ============================================================
-#                      ЗАГРУЗКА ДАННЫХ
-# ============================================================
 exchange = ccxt.bybit({"enableRateLimit": True, "options": {"defaultType": "linear"}})
 
-def fetch_ohlcv(symbol: str, timeframe: str = "5m", limit: int = 1000) -> pd.DataFrame:
+def fetch_ohlcv(symbol: str, timeframe: str = "5m", limit: int = 5000) -> pd.DataFrame:
     try:
         data = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -59,21 +54,7 @@ def fetch_ohlcv(symbol: str, timeframe: str = "5m", limit: int = 1000) -> pd.Dat
         log.error(f"Ошибка загрузки {symbol}: {e}")
         return pd.DataFrame()
 
-# ============================================================
-#                  БАЗОВЫЙ КЛАСС СТРАТЕГИИ
-# ============================================================
-class Strategy:
-    def __init__(self, name: str, signal_func: Callable):
-        self.name = name
-        self.signal_func = signal_func
-
-    def get_signals(self, df: pd.DataFrame) -> pd.Series:
-        """Возвращает серию сигналов: 1 = long, -1 = short, 0 = нет."""
-        return self.signal_func(df)
-
-# ============================================================
-#                ФУНКЦИИ ИНДИКАТОРОВ
-# ============================================================
+# ---------------------- ИНДИКАТОРЫ (исправленные) ----------------------
 def ema(series, span): return series.ewm(span=span, adjust=False).mean()
 def sma(series, span): return series.rolling(span).mean()
 def rsi(series, period=14):
@@ -101,7 +82,7 @@ def supertrend(df, period=10, mult=3):
     hl2 = (df["high"] + df["low"]) / 2
     up = hl2 - mult * atr_val
     down = hl2 + mult * atr_val
-    trend = pd.Series(0, index=df.index)
+    trend = pd.Series(1.0, index=df.index)          # <-- float, чтобы избежать int64
     for i in range(1, len(df)):
         if df["close"].iloc[i] > trend.iloc[i-1]:
             trend.iloc[i] = max(up.iloc[i], trend.iloc[i-1])
@@ -138,8 +119,7 @@ def mfi(df, period=14):
     neg_sum = negative_flow.rolling(period).sum()
     return 100 - (100 / (1 + pos_sum / neg_sum.replace(0, np.nan)))
 def obv(df):
-    obv = (df["volume"] * (df["close"].diff().apply(lambda x: 1 if x > 0 else -1 if x < 0 else 0))).cumsum()
-    return obv
+    return (df["volume"] * (df["close"].diff().apply(lambda x: 1 if x > 0 else -1 if x < 0 else 0))).cumsum()
 def aroon(df, period=25):
     high_max = df["high"].rolling(period).apply(lambda x: x.argmax(), raw=True)
     low_min = df["low"].rolling(period).apply(lambda x: x.argmin(), raw=True)
@@ -184,10 +164,8 @@ def parabolic_sar(df, acceleration=0.02, maximum=0.2):
                 if high[i] > ep:
                     ep = high[i]
                     af = min(af + acceleration, maximum)
-                if low[i-1] < sar[i]:
-                    sar[i] = low[i-1]
-                if low[i-2] < sar[i]:
-                    sar[i] = low[i-2]
+                if low[i-1] < sar[i]: sar[i] = low[i-1]
+                if low[i-2] < sar[i]: sar[i] = low[i-2]
         else:
             if high[i] > sar[i]:
                 trend = 1
@@ -198,16 +176,11 @@ def parabolic_sar(df, acceleration=0.02, maximum=0.2):
                 if low[i] < ep:
                     ep = low[i]
                     af = min(af + acceleration, maximum)
-                if high[i-1] > sar[i]:
-                    sar[i] = high[i-1]
-                if high[i-2] > sar[i]:
-                    sar[i] = high[i-2]
+                if high[i-1] > sar[i]: sar[i] = high[i-1]
+                if high[i-2] > sar[i]: sar[i] = high[i-2]
     return pd.Series(sar, index=df.index)
 
-# ============================================================
-#        ФУНКЦИИ ГЕНЕРАЦИИ СИГНАЛОВ (30+ СТРАТЕГИЙ)
-# ============================================================
-
+# ---------------------- ФУНКЦИИ СИГНАЛОВ (31 стратегия) ----------------------
 def ema_cross_9_21(df):
     e9 = ema(df["close"], 9)
     e21 = ema(df["close"], 21)
@@ -215,7 +188,6 @@ def ema_cross_9_21(df):
     signal[(e9 > e21) & (e9.shift(1) <= e21.shift(1))] = 1
     signal[(e9 < e21) & (e9.shift(1) >= e21.shift(1))] = -1
     return signal
-
 def ema_cross_21_50(df):
     e21 = ema(df["close"], 21)
     e50 = ema(df["close"], 50)
@@ -223,7 +195,6 @@ def ema_cross_21_50(df):
     signal[(e21 > e50) & (e21.shift(1) <= e50.shift(1))] = 1
     signal[(e21 < e50) & (e21.shift(1) >= e50.shift(1))] = -1
     return signal
-
 def sma_cross_50_200(df):
     s50 = sma(df["close"], 50)
     s200 = sma(df["close"], 200)
@@ -231,36 +202,31 @@ def sma_cross_50_200(df):
     signal[(s50 > s200) & (s50.shift(1) <= s200.shift(1))] = 1
     signal[(s50 < s200) & (s50.shift(1) >= s200.shift(1))] = -1
     return signal
-
 def macd_cross(df):
     ml, sl, _ = macd(df["close"])
     signal = pd.Series(0, index=df.index)
     signal[(ml > sl) & (ml.shift(1) <= sl.shift(1))] = 1
     signal[(ml < sl) & (ml.shift(1) >= sl.shift(1))] = -1
     return signal
-
-def rsi_oversold_overbought(df):
+def rsi_30_70(df):
     r = rsi(df["close"])
     signal = pd.Series(0, index=df.index)
     signal[r < 30] = 1
     signal[r > 70] = -1
     return signal
-
-def rsi_ema_filter(df):
+def rsi_ema200(df):
     r = rsi(df["close"])
     e200 = ema(df["close"], 200)
     signal = pd.Series(0, index=df.index)
     signal[(r < 30) & (df["close"] > e200)] = 1
     signal[(r > 70) & (df["close"] < e200)] = -1
     return signal
-
-def bollinger_reversal(df):
+def bollinger_rev(df):
     upper, mid, lower = bollinger_bands(df["close"])
     signal = pd.Series(0, index=df.index)
     signal[df["close"] < lower] = 1
     signal[df["close"] > upper] = -1
     return signal
-
 def bollinger_rsi(df):
     upper, mid, lower = bollinger_bands(df["close"])
     r = rsi(df["close"])
@@ -268,14 +234,12 @@ def bollinger_rsi(df):
     signal[(df["close"] < lower) & (r < 30)] = 1
     signal[(df["close"] > upper) & (r > 70)] = -1
     return signal
-
 def supertrend_signal(df):
     st = supertrend(df)
     signal = pd.Series(0, index=df.index)
     signal[(st > st.shift(1)) & (df["close"] > st)] = 1
     signal[(st < st.shift(1)) & (df["close"] < st)] = -1
     return signal
-
 def supertrend_rsi(df):
     st = supertrend(df)
     r = rsi(df["close"])
@@ -283,28 +247,24 @@ def supertrend_rsi(df):
     signal[(st > st.shift(1)) & (df["close"] > st) & (r < 50)] = 1
     signal[(st < st.shift(1)) & (df["close"] < st) & (r > 50)] = -1
     return signal
-
 def donchian_breakout(df):
     upper, lower = donchian(df)
     signal = pd.Series(0, index=df.index)
     signal[df["close"] > upper.shift(1)] = 1
     signal[df["close"] < lower.shift(1)] = -1
     return signal
-
-def keltner_reversal(df):
+def keltner_rev(df):
     upper, mid, lower = keltner(df)
     signal = pd.Series(0, index=df.index)
     signal[df["close"] < lower] = 1
     signal[df["close"] > upper] = -1
     return signal
-
 def stochastic_signal(df):
     k, d = stochastic(df)
     signal = pd.Series(0, index=df.index)
     signal[(k < 20) & (k > d)] = 1
     signal[(k > 80) & (k < d)] = -1
     return signal
-
 def stochastic_trend(df):
     k, d = stochastic(df)
     e50 = ema(df["close"], 50)
@@ -312,14 +272,12 @@ def stochastic_trend(df):
     signal[(k < 20) & (k > d) & (df["close"] > e50)] = 1
     signal[(k > 80) & (k < d) & (df["close"] < e50)] = -1
     return signal
-
 def adx_signal(df):
     adx_val, plus_di, minus_di = adx(df)
     signal = pd.Series(0, index=df.index)
     signal[(adx_val > 25) & (plus_di > minus_di)] = 1
     signal[(adx_val > 25) & (minus_di > plus_di)] = -1
     return signal
-
 def ichimoku(df):
     high9 = df["high"].rolling(9).max()
     low9 = df["low"].rolling(9).min()
@@ -331,49 +289,42 @@ def ichimoku(df):
     signal[(tenkan > kijun) & (df["close"] > kijun)] = 1
     signal[(tenkan < kijun) & (df["close"] < kijun)] = -1
     return signal
-
 def parabolic_sar_signal(df):
     sar = parabolic_sar(df)
     signal = pd.Series(0, index=df.index)
     signal[df["close"] > sar] = 1
     signal[df["close"] < sar] = -1
     return signal
-
 def cci_signal(df):
     c = cci(df)
     signal = pd.Series(0, index=df.index)
     signal[c > 100] = -1
     signal[c < -100] = 1
     return signal
-
 def mfi_signal(df):
     m = mfi(df)
     signal = pd.Series(0, index=df.index)
     signal[m < 20] = 1
     signal[m > 80] = -1
     return signal
-
 def obv_breakout(df):
     o = obv(df)
     signal = pd.Series(0, index=df.index)
     signal[o > o.rolling(20).mean()] = 1
     signal[o < o.rolling(20).mean()] = -1
     return signal
-
 def aroon_signal(df):
     up, down = aroon(df)
     signal = pd.Series(0, index=df.index)
     signal[(up > 70) & (down < 30)] = 1
     signal[(down > 70) & (up < 30)] = -1
     return signal
-
 def hull_ma_signal(df):
     hma = hull_ma(df["close"])
     signal = pd.Series(0, index=df.index)
     signal[(hma > hma.shift(1))] = 1
     signal[(hma < hma.shift(1))] = -1
     return signal
-
 def volume_reversal(df):
     avg_vol = df["volume"].rolling(20).mean()
     body = abs(df["close"] - df["open"])
@@ -381,7 +332,6 @@ def volume_reversal(df):
     signal[(df["volume"] > 2 * avg_vol) & (df["close"] > df["open"]) & (body > body.shift(1))] = 1
     signal[(df["volume"] > 2 * avg_vol) & (df["close"] < df["open"]) & (body > body.shift(1))] = -1
     return signal
-
 def engulfing(df):
     open, high, low, close = df["open"], df["high"], df["low"], df["close"]
     signal = pd.Series(0, index=df.index)
@@ -390,7 +340,6 @@ def engulfing(df):
     signal[bull_eng] = 1
     signal[bear_eng] = -1
     return signal
-
 def pin_bar(df):
     body = abs(df["close"] - df["open"])
     upper_shadow = df["high"] - df[["open", "close"]].max(axis=1)
@@ -399,7 +348,6 @@ def pin_bar(df):
     signal[(lower_shadow > 2 * body) & (upper_shadow < 0.1 * body)] = 1
     signal[(upper_shadow > 2 * body) & (lower_shadow < 0.1 * body)] = -1
     return signal
-
 def fractal_breakout(df, period=5):
     high_fractal = df["high"].rolling(2*period+1, center=True).apply(
         lambda x: x[period] if (x[period] == x.max()) and (np.sum(x == x.max()) == 1) else np.nan, raw=True)
@@ -409,10 +357,9 @@ def fractal_breakout(df, period=5):
     signal[df["high"] > high_fractal.shift(1)] = 1
     signal[df["low"] < low_fractal.shift(1)] = -1
     return signal
-
 def heikin_ashi(df):
     ha_close = (df["open"] + df["high"] + df["low"] + df["close"]) / 4
-    ha_open = pd.Series(0, index=df.index)
+    ha_open = pd.Series(0.0, index=df.index)          # <-- float
     ha_open.iloc[0] = (df["open"].iloc[0] + df["close"].iloc[0]) / 2
     for i in range(1, len(df)):
         ha_open.iloc[i] = (ha_open.iloc[i-1] + ha_close.iloc[i-1]) / 2
@@ -421,8 +368,7 @@ def heikin_ashi(df):
     signal[(ha_color) & (~ha_color.shift(1))] = 1
     signal[(~ha_color) & (ha_color.shift(1))] = -1
     return signal
-
-def range_filter_signal(df, period=100, qty=2.5):
+def range_filter(df, period=100, qty=2.5):
     close = df["close"]
     atr_val = atr(df, period)
     rng = qty * atr_val
@@ -436,7 +382,6 @@ def range_filter_signal(df, period=100, qty=2.5):
     signal[(close > filt) & (close.shift(1) <= filt.shift(1))] = 1
     signal[(close < filt) & (close.shift(1) >= filt.shift(1))] = -1
     return signal
-
 def vwap_reversal(df):
     typical = (df["high"] + df["low"] + df["close"]) / 3
     cum_vol = df["volume"].cumsum()
@@ -449,7 +394,6 @@ def vwap_reversal(df):
     signal[df["close"] < lower] = 1
     signal[df["close"] > upper] = -1
     return signal
-
 def zscore_reversal(df, period=20):
     sma20 = sma(df["close"], period)
     std20 = df["close"].rolling(period).std()
@@ -458,7 +402,6 @@ def zscore_reversal(df, period=20):
     signal[z < -2] = 1
     signal[z > 2] = -1
     return signal
-
 def momentum(df, period=10):
     mom = df["close"].pct_change(period)
     signal = pd.Series(0, index=df.index)
@@ -466,20 +409,25 @@ def momentum(df, period=10):
     signal[mom < -0.02] = -1
     return signal
 
-# Соберём все стратегии в список
+class Strategy:
+    def __init__(self, name: str, func: Callable):
+        self.name = name
+        self.func = func
+    def get_signals(self, df): return self.func(df)
+
 strategies = [
     Strategy("EMA Cross 9/21", ema_cross_9_21),
     Strategy("EMA Cross 21/50", ema_cross_21_50),
     Strategy("SMA Cross 50/200", sma_cross_50_200),
     Strategy("MACD Cross", macd_cross),
-    Strategy("RSI 30/70", rsi_oversold_overbought),
-    Strategy("RSI + EMA200", rsi_ema_filter),
-    Strategy("Bollinger Reversal", bollinger_reversal),
+    Strategy("RSI 30/70", rsi_30_70),
+    Strategy("RSI + EMA200", rsi_ema200),
+    Strategy("Bollinger Reversal", bollinger_rev),
     Strategy("Bollinger + RSI", bollinger_rsi),
     Strategy("Supertrend", supertrend_signal),
     Strategy("Supertrend + RSI", supertrend_rsi),
     Strategy("Donchian Breakout", donchian_breakout),
-    Strategy("Keltner Reversal", keltner_reversal),
+    Strategy("Keltner Reversal", keltner_rev),
     Strategy("Stochastic", stochastic_signal),
     Strategy("Stochastic + Trend", stochastic_trend),
     Strategy("ADX Trend", adx_signal),
@@ -495,157 +443,92 @@ strategies = [
     Strategy("Pin Bar", pin_bar),
     Strategy("Fractal Breakout", fractal_breakout),
     Strategy("Heikin-Ashi", heikin_ashi),
-    Strategy("Range Filter", range_filter_signal),
+    Strategy("Range Filter", range_filter),
     Strategy("VWAP Reversal", vwap_reversal),
     Strategy("Z-Score Reversal", zscore_reversal),
     Strategy("Momentum", momentum),
 ]
 
-# ============================================================
-#                 ФУНКЦИЯ БЭКТЕСТА
-# ============================================================
-def backtest_strategy(df: pd.DataFrame, signals: pd.Series, sl_mult, tp_mult, max_bars) -> Dict:
-    """Возвращает словарь с метриками."""
+# ---------------------- БЭКТЕСТ ----------------------
+def backtest_strategy(df, signals, sl_mult, tp_mult, max_bars):
     capital = INITIAL_CAPITAL
-    in_position = False
-    side = 0
-    entry_price = 0
-    entry_bar = 0
-    stop_loss = 0
-    take_profit = 0
+    in_pos = False; side = 0; entry = 0; bars = 0
     trades = []
-    equity_curve = [capital]
-    bars_since_entry = 0
-
     for i in range(1, len(df)):
-        if in_position:
-            bars_since_entry += 1
-            cur_price = df["close"].iloc[i]
-            # Проверка SL/TP
+        if in_pos:
+            bars += 1
+            cur = df["close"].iloc[i]
             if side == 1:
-                if cur_price <= stop_loss or cur_price >= take_profit or bars_since_entry >= max_bars:
-                    exit_price = cur_price
-                    pnl = (exit_price - entry_price) / entry_price * 100
-                    capital += capital * (pnl / 100)  # упрощённо: процент от капитала
-                    trades.append(pnl)
-                    in_position = False
+                if cur <= entry - sl_mult * atr(df).iloc[i] or cur >= entry + tp_mult * atr(df).iloc[i] or bars >= max_bars:
+                    pnl = (cur - entry) / entry * 100
+                    trades.append(pnl); in_pos = False
             else:
-                if cur_price >= stop_loss or cur_price <= take_profit or bars_since_entry >= max_bars:
-                    exit_price = cur_price
-                    pnl = (entry_price - exit_price) / entry_price * 100
-                    capital += capital * (pnl / 100)
-                    trades.append(pnl)
-                    in_position = False
+                if cur >= entry + sl_mult * atr(df).iloc[i] or cur <= entry - tp_mult * atr(df).iloc[i] or bars >= max_bars:
+                    pnl = (entry - cur) / entry * 100
+                    trades.append(pnl); in_pos = False
         else:
             sig = signals.iloc[i]
             if sig != 0 and not pd.isna(sig):
-                in_position = True
-                side = sig
-                entry_price = df["close"].iloc[i]
-                entry_bar = i
-                bars_since_entry = 0
-                atr_val = atr(df).iloc[i]
-                if side == 1:
-                    stop_loss = entry_price - sl_mult * atr_val
-                    take_profit = entry_price + tp_mult * atr_val
-                else:
-                    stop_loss = entry_price + sl_mult * atr_val
-                    take_profit = entry_price - tp_mult * atr_val
-        equity_curve.append(capital)
-
-    total_trades = len(trades)
-    if total_trades == 0:
-        return {"strategy": "", "trades": 0, "winrate": 0, "avg_pnl": 0, "total_pnl_pct": 0, "max_dd": 0}
-
+                in_pos = True; side = sig; entry = df["close"].iloc[i]; bars = 0
+    if not trades: return {"trades": 0, "winrate": 0, "avg_pnl": 0, "total_pnl": 0, "maxdd": 0}
     wins = sum(1 for p in trades if p > 0)
-    winrate = wins / total_trades * 100
-    avg_pnl = np.mean(trades)
-    total_pnl_pct = (capital - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
-    equity_series = pd.Series(equity_curve)
-    max_dd = (equity_series.cummax() - equity_series).max() / equity_series.cummax().max() * 100
+    wr = wins / len(trades) * 100
+    avg = np.mean(trades)
+    eq = [INITIAL_CAPITAL]
+    for p in trades: eq.append(eq[-1] * (1 + p/100))
+    total_pnl = (eq[-1] - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
+    eqs = pd.Series(eq)
+    maxdd = (eqs.cummax() - eqs).max() / eqs.cummax().max() * 100
+    return {"trades": len(trades), "winrate": wr, "avg_pnl": avg, "total_pnl": total_pnl, "maxdd": maxdd}
 
-    return {
-        "trades": total_trades,
-        "winrate": winrate,
-        "avg_pnl": avg_pnl,
-        "total_pnl_pct": total_pnl_pct,
-        "max_dd": max_dd,
-    }
-
-# ============================================================
-#                    ЗАПУСК ТЕСТИРОВАНИЯ
-# ============================================================
+# ---------------------- ГЛАВНОЕ ----------------------
 def main():
-    log.info("Загрузка исторических данных...")
-    all_data = {}
+    log.info("Загрузка данных...")
+    data = {}
     for sym in SYMBOLS:
         df = fetch_ohlcv(sym, TIMEFRAME, LIMIT)
         if not df.empty:
-            all_data[sym] = df
+            data[sym] = df
             log.info(f"{sym}: {len(df)} свечей")
         else:
-            log.warning(f"{sym} нет данных, пропускаем")
-
-    if not all_data:
-        log.error("Нет данных для тестирования")
+            log.warning(f"{sym} нет данных")
+    if not data:
+        log.error("Нет данных")
         return
 
-    log.info(f"Начинаем тестирование {len(strategies)} стратегий на {len(all_data)} монетах...")
-
+    log.info(f"Тестирование {len(strategies)} стратегий на {len(data)} монетах...")
     results = []
-    for strat in strategies:
-        total_trades = 0
-        total_wins = 0
-        total_pnl = []
-        combined_equity = []
-        for sym, df in all_data.items():
+    for st in strategies:
+        total_trades = 0; pnls = []
+        for sym, df in data.items():
             try:
-                signals = strat.get_signals(df)
-                res = backtest_strategy(df, signals, SL_ATR_MULT, TP_ATR_MULT, MAX_HOLD_BARS)
+                sig = st.get_signals(df)
+                res = backtest_strategy(df, sig, SL_ATR_MULT, TP_ATR_MULT, MAX_HOLD_BARS)
                 if res["trades"] > 0:
                     total_trades += res["trades"]
-                    total_wins += res["trades"] * res["winrate"] / 100
-                    total_pnl.extend([res["avg_pnl"]] * res["trades"])  # упрощённо для среднего
+                    pnls.extend([res["avg_pnl"]] * res["trades"])
             except Exception as e:
-                log.error(f"Ошибка в стратегии {strat.name} на {sym}: {e}")
+                log.error(f"Ошибка {st.name} на {sym}: {e}")
         if total_trades == 0:
-            results.append({
-                "Стратегия": strat.name,
-                "Сделок": 0,
-                "WinRate": 0,
-                "Средний P&L %": 0,
-                "Общий P&L %": 0,
-                "Max DD %": 0,
-            })
+            results.append((st.name, 0, 0.0, 0.0, 0.0, 0.0))
             continue
-        avg_pnl_all = np.mean(total_pnl) if total_pnl else 0
-        overall_pnl = (np.prod([1 + p/100 for p in total_pnl]) - 1) * 100 if total_pnl else 0  # симуляция капитала
-        # Max DD рассчитываем по всем сделкам как по последовательности доходностей
-        eq = 1000
-        eq_curve = [eq]
-        for p in total_pnl:
-            eq *= (1 + p/100)
-            eq_curve.append(eq)
-        eq_series = pd.Series(eq_curve)
-        max_dd = (eq_series.cummax() - eq_series).max() / eq_series.cummax().max() * 100
-        results.append({
-            "Стратегия": strat.name,
-            "Сделок": total_trades,
-            "WinRate": round((total_wins / total_trades) * 100, 1) if total_trades else 0,
-            "Средний P&L %": round(avg_pnl_all, 2),
-            "Общий P&L %": round(overall_pnl, 2),
-            "Max DD %": round(max_dd, 2),
-        })
+        avg_pnl = np.mean(pnls)
+        # Моделируем рост капитала по всем сделкам подряд
+        eq = [INITIAL_CAPITAL]
+        for p in pnls: eq.append(eq[-1] * (1 + p/100))
+        total_pnl = (eq[-1] - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
+        eqs = pd.Series(eq)
+        maxdd = (eqs.cummax() - eqs).max() / eqs.cummax().max() * 100
+        wr = (sum(1 for p in pnls if p > 0) / len(pnls)) * 100
+        results.append((st.name, total_trades, wr, avg_pnl, total_pnl, maxdd))
 
     # Сортировка по общему P&L
-    results.sort(key=lambda x: x["Общий P&L %"], reverse=True)
-
-    # Вывод таблицы
+    results.sort(key=lambda x: x[4], reverse=True)
     print("\n" + "="*90)
     print(f"{'Стратегия':<25} {'Сделок':>6} {'WinRate%':>9} {'Avg P&L%':>10} {'Total P&L%':>11} {'MaxDD%':>8}")
     print("-"*90)
     for r in results:
-        print(f"{r['Стратегия']:<25} {r['Сделок']:>6} {r['WinRate']:>8.1f} {r['Средний P&L %']:>9.2f} {r['Общий P&L %']:>10.2f} {r['Max DD %']:>7.2f}")
+        print(f"{r[0]:<25} {r[1]:>6} {r[2]:>8.1f} {r[3]:>9.2f} {r[4]:>10.2f} {r[5]:>7.2f}")
     print("="*90)
 
 if __name__ == "__main__":
