@@ -2,37 +2,29 @@
 # -*- coding: utf-8 -*-
 
 """
-МУЛЬТИ-СТРАТЕГИЧЕСКИЙ БЭКТЕСТЕР НА ИСТОРИЧЕСКИХ ДАННЫХ (v2, исправленный)
+МУЛЬТИ-СТРАТЕГИЧЕСКИЙ БЭКТЕСТЕР (оптимизированный, с контролем времени)
 ========================================================================
-Загружает OHLCV для списка монет, прогоняет 31 стратегию,
-выводит сводную таблицу результатов.
-Исправлены ошибки int64 в Supertrend и Heikin-Ashi.
+Быстро прогоняет 31 стратегию на 10 основных монетах (500 свечей).
+Если какая-то стратегия занимает >30 сек, она пропускается.
+Результат — сводная таблица.
 """
 
-import os, time, logging, numpy as np, pandas as pd, ccxt
+import os, time, logging, numpy as np, pandas as pd, ccxt, signal
 from typing import Dict, List, Callable
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
 # ============================================================
-#               КОНФИГУРАЦИЯ БЭКТЕСТА
+#               КОНФИГУРАЦИЯ
 # ============================================================
 SYMBOLS = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "BNB/USDT:USDT", "XRP/USDT:USDT",
     "SOL/USDT:USDT", "ADA/USDT:USDT", "TRX/USDT:USDT", "AVAX/USDT:USDT",
-    "DOT/USDT:USDT", "LTC/USDT:USDT", "BCH/USDT:USDT", "ATOM/USDT:USDT",
-    "XLM/USDT:USDT", "NEAR/USDT:USDT", "DOGE/USDT:USDT",
-    "1000PEPE/USDT:USDT", "WIF/USDT:USDT", "BOME/USDT:USDT",
-    "RENDER/USDT:USDT", "TAO/USDT:USDT", "WLD/USDT:USDT", "ARKM/USDT:USDT",
-    "IO/USDT:USDT", "ONDO/USDT:USDT", "VIRTUAL/USDT:USDT", "UNI/USDT:USDT",
-    "AAVE/USDT:USDT", "ARB/USDT:USDT", "OP/USDT:USDT", "LINK/USDT:USDT",
-    "GRT/USDT:USDT", "INJ/USDT:USDT", "SUI/USDT:USDT", "APT/USDT:USDT",
-    "TIA/USDT:USDT", "JTO/USDT:USDT", "EIGEN/USDT:USDT", "HBAR/USDT:USDT",
-    "VET/USDT:USDT", "NOT/USDT:USDT", "CATI/USDT:USDT",
+    "DOT/USDT:USDT", "LTC/USDT:USDT",
 ]
 TIMEFRAME = "5m"
-LIMIT = 5000                     # больше свечей = точнее статистика
+LIMIT = 500                     # 500 свечей ~ 1.7 дня на 5m
 SL_ATR_MULT = 1.5
 TP_ATR_MULT = 3.0
 MAX_HOLD_BARS = 200
@@ -43,7 +35,7 @@ log = logging.getLogger(__name__)
 
 exchange = ccxt.bybit({"enableRateLimit": True, "options": {"defaultType": "linear"}})
 
-def fetch_ohlcv(symbol: str, timeframe: str = "5m", limit: int = 5000) -> pd.DataFrame:
+def fetch_ohlcv(symbol: str, timeframe: str = "5m", limit: int = 500) -> pd.DataFrame:
     try:
         data = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -82,7 +74,7 @@ def supertrend(df, period=10, mult=3):
     hl2 = (df["high"] + df["low"]) / 2
     up = hl2 - mult * atr_val
     down = hl2 + mult * atr_val
-    trend = pd.Series(1.0, index=df.index)          # <-- float, чтобы избежать int64
+    trend = pd.Series(1.0, index=df.index)
     for i in range(1, len(df)):
         if df["close"].iloc[i] > trend.iloc[i-1]:
             trend.iloc[i] = max(up.iloc[i], trend.iloc[i-1])
@@ -359,7 +351,7 @@ def fractal_breakout(df, period=5):
     return signal
 def heikin_ashi(df):
     ha_close = (df["open"] + df["high"] + df["low"] + df["close"]) / 4
-    ha_open = pd.Series(0.0, index=df.index)          # <-- float
+    ha_open = pd.Series(0.0, index=df.index)
     ha_open.iloc[0] = (df["open"].iloc[0] + df["close"].iloc[0]) / 2
     for i in range(1, len(df)):
         ha_open.iloc[i] = (ha_open.iloc[i-1] + ha_close.iloc[i-1]) / 2
@@ -449,7 +441,13 @@ strategies = [
     Strategy("Momentum", momentum),
 ]
 
-# ---------------------- БЭКТЕСТ ----------------------
+# ---------------------- БЭКТЕСТ с таймаутом ----------------------
+class TimeoutException(Exception):
+    pass
+
+def handler(signum, frame):
+    raise TimeoutException("Стратегия превысила лимит времени")
+
 def backtest_strategy(df, signals, sl_mult, tp_mult, max_bars):
     capital = INITIAL_CAPITAL
     in_pos = False; side = 0; entry = 0; bars = 0
@@ -458,24 +456,27 @@ def backtest_strategy(df, signals, sl_mult, tp_mult, max_bars):
         if in_pos:
             bars += 1
             cur = df["close"].iloc[i]
+            atr_val = atr(df).iloc[i]
             if side == 1:
-                if cur <= entry - sl_mult * atr(df).iloc[i] or cur >= entry + tp_mult * atr(df).iloc[i] or bars >= max_bars:
+                if cur <= entry - sl_mult * atr_val or cur >= entry + tp_mult * atr_val or bars >= max_bars:
                     pnl = (cur - entry) / entry * 100
                     trades.append(pnl); in_pos = False
             else:
-                if cur >= entry + sl_mult * atr(df).iloc[i] or cur <= entry - tp_mult * atr(df).iloc[i] or bars >= max_bars:
+                if cur >= entry + sl_mult * atr_val or cur <= entry - tp_mult * atr_val or bars >= max_bars:
                     pnl = (entry - cur) / entry * 100
                     trades.append(pnl); in_pos = False
         else:
             sig = signals.iloc[i]
             if sig != 0 and not pd.isna(sig):
                 in_pos = True; side = sig; entry = df["close"].iloc[i]; bars = 0
-    if not trades: return {"trades": 0, "winrate": 0, "avg_pnl": 0, "total_pnl": 0, "maxdd": 0}
+    if not trades:
+        return {"trades": 0, "winrate": 0, "avg_pnl": 0, "total_pnl": 0, "maxdd": 0}
     wins = sum(1 for p in trades if p > 0)
     wr = wins / len(trades) * 100
     avg = np.mean(trades)
     eq = [INITIAL_CAPITAL]
-    for p in trades: eq.append(eq[-1] * (1 + p/100))
+    for p in trades:
+        eq.append(eq[-1] * (1 + p/100))
     total_pnl = (eq[-1] - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
     eqs = pd.Series(eq)
     maxdd = (eqs.cummax() - eqs).max() / eqs.cummax().max() * 100
@@ -498,31 +499,40 @@ def main():
 
     log.info(f"Тестирование {len(strategies)} стратегий на {len(data)} монетах...")
     results = []
-    for st in strategies:
+    for idx, st in enumerate(strategies, 1):
+        log.info(f"[{idx}/{len(strategies)}] {st.name}...")
         total_trades = 0; pnls = []
         for sym, df in data.items():
             try:
+                # Устанавливаем таймаут 30 секунд на обработку одной пары
+                signal.signal(signal.SIGALRM, handler)
+                signal.alarm(30)
                 sig = st.get_signals(df)
+                signal.alarm(0)  # отключаем таймаут
                 res = backtest_strategy(df, sig, SL_ATR_MULT, TP_ATR_MULT, MAX_HOLD_BARS)
                 if res["trades"] > 0:
                     total_trades += res["trades"]
                     pnls.extend([res["avg_pnl"]] * res["trades"])
+            except TimeoutException:
+                log.warning(f"   ⏰ Пропуск {sym} (дольше 30с)")
+                signal.alarm(0)
             except Exception as e:
-                log.error(f"Ошибка {st.name} на {sym}: {e}")
+                log.error(f"   Ошибка {sym}: {e}")
+                signal.alarm(0)
+
         if total_trades == 0:
             results.append((st.name, 0, 0.0, 0.0, 0.0, 0.0))
             continue
         avg_pnl = np.mean(pnls)
-        # Моделируем рост капитала по всем сделкам подряд
         eq = [INITIAL_CAPITAL]
-        for p in pnls: eq.append(eq[-1] * (1 + p/100))
+        for p in pnls:
+            eq.append(eq[-1] * (1 + p/100))
         total_pnl = (eq[-1] - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
         eqs = pd.Series(eq)
         maxdd = (eqs.cummax() - eqs).max() / eqs.cummax().max() * 100
         wr = (sum(1 for p in pnls if p > 0) / len(pnls)) * 100
         results.append((st.name, total_trades, wr, avg_pnl, total_pnl, maxdd))
 
-    # Сортировка по общему P&L
     results.sort(key=lambda x: x[4], reverse=True)
     print("\n" + "="*90)
     print(f"{'Стратегия':<25} {'Сделок':>6} {'WinRate%':>9} {'Avg P&L%':>10} {'Total P&L%':>11} {'MaxDD%':>8}")
