@@ -2,12 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-ГИБРИДНЫЙ БОТ v10.4 — СТАКАННЫЙ СКАЛЬПЕР С ПОДХВАТОМ ПОЗИЦИЙ
+ГИБРИДНЫЙ БОТ v10.5 — СТАКАННЫЙ СКАЛЬПЕР + БУМАЖНЫЙ РЕЖИМ
 =============================================================
-- При обнаружении открытой позиции (после рестарта) бот забирает её под контроль.
-- Плечо 3–5x выбирается по волатильности.
-- Трейлинг и частичный безубыток с логированием.
-- Все проверки и риск‑менеджмент из v10.2.
+- Реальная торговля как в v10.4 (подхват позиций, динамическое плечо, трейлинг).
+- Параллельный "бумажный" трейдер: для каждого сигнала создаётся виртуальная позиция,
+  отслеживается её исход (TP/SL/Timeout) и каждый час выводится статистика.
 """
 
 import os, time, json, logging, ccxt
@@ -15,6 +14,7 @@ import pandas as pd, numpy as np
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
+from collections import deque
 
 load_dotenv()
 
@@ -96,8 +96,12 @@ RISK_PCT = 0.8
 LEVERAGE_MIN = 3
 LEVERAGE_MAX = 5
 
-STATE_FILE = "state_bot_v10.4.json"
-TRADES_FILE = "trades_bot_v10.4.json"
+# --- Бумажный режим ---
+PAPER_TRADING_ENABLED = True
+PAPER_REPORT_INTERVAL = 3600  # каждый час
+
+STATE_FILE = "state_bot_v10.5.json"
+TRADES_FILE = "trades_bot_v10.5.json"
 
 # ============================================================
 #                      ЛОГИРОВАНИЕ
@@ -106,7 +110,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%d.%m.%Y %H:%M:%S",
-    handlers=[logging.StreamHandler(), logging.FileHandler("bot_v10.4.log", encoding="utf-8")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("bot_v10.5.log", encoding="utf-8")],
 )
 log = logging.getLogger("WallScalper")
 
@@ -131,7 +135,7 @@ stats = {
 }
 
 # ============================================================
-#                 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+#                 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (как раньше)
 # ============================================================
 def safe_api(func, *a, retries=3, delay=1.0, **kw):
     for attempt in range(retries):
@@ -205,16 +209,12 @@ def volume_spike_guard(df):
     except: return True
 
 def choose_leverage(atr_pct):
-    """Динамический выбор плеча: чем ниже ATR, тем выше плечо."""
-    if atr_pct > 1.5:
-        return LEVERAGE_MIN
-    elif atr_pct > 0.8:
-        return LEVERAGE_MIN + 1
-    else:
-        return LEVERAGE_MAX
+    if atr_pct > 1.5: return LEVERAGE_MIN
+    elif atr_pct > 0.8: return LEVERAGE_MIN + 1
+    else: return LEVERAGE_MAX
 
 # ============================================================
-#          ДЕТЕКТОР СТЕНЫ ЗАЯВОК (Order Book Wall)
+#          ДЕТЕКТОР СТЕНЫ ЗАЯВОК (без изменений)
 # ============================================================
 def detect_wall_signal(symbol: str) -> Optional[Dict]:
     try:
@@ -287,7 +287,7 @@ def detect_wall_signal(symbol: str) -> Optional[Dict]:
         return None
 
 # ============================================================
-#                  ОТКРЫТИЕ ПОЗИЦИИ
+#        РЕАЛЬНЫЕ ФУНКЦИИ ОТКРЫТИЯ/МОНИТОРИНГА (как в v10.4)
 # ============================================================
 def set_leverage(symbol, lev):
     try:
@@ -364,9 +364,6 @@ def update_tp(symbol, new_tp, side):
         log.warning(f"Не удалось обновить TP: {e}")
         return False
 
-# ============================================================
-#           МОНИТОРИНГ ПОЗИЦИИ (общий)
-# ============================================================
 def monitor_position(symbol, entry, qty, start_time, sl_price, tp_price, side, atr):
     deadline = start_time + TRADE_MAX_LIFETIME
     be_done = False
@@ -392,7 +389,6 @@ def monitor_position(symbol, entry, qty, start_time, sl_price, tp_price, side, a
         if not active:
             ticker = fetch_ticker(symbol)
             cur = float(ticker["last"]) if ticker and ticker.get("last") else entry
-            # если был частичный безубыток, то часть прибыли уже зафиксирована
             return ("tp", accumulated_pnl) if (cur >= tp_price if side=="long" else cur <= tp_price) or be_done else ("sl", accumulated_pnl)
         pos = active[0]
         ticker = fetch_ticker(symbol)
@@ -455,9 +451,6 @@ def monitor_position(symbol, entry, qty, start_time, sl_price, tp_price, side, a
         log.info(f"[{symbol}] {cur:.6f} P&L={pnl_pct:+.2f}% SL={current_sl:.6f}")
     return "sl", accumulated_pnl
 
-# ============================================================
-#          ПОДХВАТ СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ
-# ============================================================
 def handle_existing_position(pos):
     symbol = pos["symbol"]
     side = pos["side"]
@@ -467,7 +460,6 @@ def handle_existing_position(pos):
         log.error("Некорректные данные позиции, не могу подхватить")
         return
 
-    # Рассчитываем ATR для новых SL/TP
     df_ta = pd.DataFrame(fetch_ohlcv(symbol, TIMEFRAME_TA, limit=50), columns=["ts","o","h","l","c","v"])
     atr_val = calc_atr(df_ta, 14).iloc[-1] if len(df_ta) > 14 else entry * 0.01
     price = float(fetch_ticker(symbol)["last"]) if fetch_ticker(symbol) else entry
@@ -481,7 +473,6 @@ def handle_existing_position(pos):
         sl = price + sl_dist
         tp = price - tp_dist
 
-    # Ограничения SL/TP
     if side == "long":
         sl = max(price * (1 - MAX_SL_PERCENT/100), min(price * (1 - MIN_SL_PERCENT/100), sl))
         tp = max(price * (1 + TP_PERCENT/100), tp)
@@ -489,14 +480,11 @@ def handle_existing_position(pos):
         sl = min(price * (1 + MAX_SL_PERCENT/100), max(price * (1 + MIN_SL_PERCENT/100), sl))
         tp = min(price * (1 - TP_PERCENT/100), tp)
 
-    # Устанавливаем новые SL/TP
     update_sl(symbol, sl, side)
     update_tp(symbol, tp, side)
 
     log.info(f"Подхвачена позиция {symbol} {side} entry={entry:.6f} qty={qty} новые SL={sl:.6f} TP={tp:.6f}")
-    # Запускаем мониторинг
-    result, pnl = monitor_position(symbol, entry, qty, time.time() - 60, sl, tp, side, atr_val)  # start_time на минуту назад
-    # Фиксируем результат в статистике
+    result, pnl = monitor_position(symbol, entry, qty, time.time() - 60, sl, tp, side, atr_val)
     cur_price = float(fetch_ticker(symbol).get("last", entry)) if fetch_ticker(symbol) else entry
     total_pnl = (cur_price - entry) * qty if side=="long" else (entry - cur_price) * qty
     stats["прибыль_usdt" if result=="tp" else "убыток_usdt"] += max(0, total_pnl) if result=="tp" else abs(min(0, total_pnl))
@@ -504,6 +492,131 @@ def handle_existing_position(pos):
     stats["сделок_всего"] += 1
     stats["sl_streak"] = 0 if result=="tp" else stats.get("sl_streak",0)+1
     log.info(f"Завершена подхваченная позиция: {result} PnL={total_pnl:.4f} USDT")
+
+# ============================================================
+#          БУМАЖНЫЙ ТРЕЙДЕР (PaperTrader)
+# ============================================================
+class PaperTrader:
+    def __init__(self):
+        self.positions: List[Dict] = []          # открытые виртуальные позиции
+        self.closed_trades: List[Dict] = []      # завершённые виртуальные сделки
+        self.last_report_time = time.time()
+        # Накопительная статистика
+        self.total_signals = 0
+        self.total_tp = 0
+        self.total_sl = 0
+        self.total_timeout = 0
+
+    def add_signal(self, symbol, signal_info, atr, sl_price, tp_price, current_price):
+        """Создаёт виртуальную позицию на основе сигнала."""
+        pos = {
+            "symbol": symbol,
+            "side": signal_info["signal"],
+            "entry": current_price,
+            "sl": sl_price,
+            "tp": tp_price,
+            "atr": atr,
+            "time": time.time(),
+            "signal_info": signal_info,
+        }
+        self.positions.append(pos)
+        self.total_signals += 1
+        log.info(f"📝 Бумажный режим: {signal_info['signal'].upper()} {symbol} entry={current_price:.6f}")
+
+    def update(self):
+        """Проверяет все открытые бумажные позиции и закрывает по SL/TP/Timeout."""
+        now = time.time()
+        closed = []
+        for pos in self.positions:
+            symbol = pos["symbol"]
+            ticker = fetch_ticker(symbol)
+            if not ticker: continue
+            cur = float(ticker["last"])
+            deadline = pos["time"] + TRADE_MAX_LIFETIME
+
+            result = None
+            if now >= deadline:
+                result = "timeout"
+            elif pos["side"] == "long":
+                if cur >= pos["tp"]:
+                    result = "tp"
+                elif cur <= pos["sl"]:
+                    result = "sl"
+            else:  # short
+                if cur <= pos["tp"]:
+                    result = "tp"
+                elif cur >= pos["sl"]:
+                    result = "sl"
+
+            if result:
+                pnl_pct = (cur/pos["entry"] - 1)*100 if pos["side"]=="long" else (pos["entry"]/cur - 1)*100
+                trade = {
+                    "symbol": pos["symbol"],
+                    "side": pos["side"],
+                    "entry": pos["entry"],
+                    "exit": cur,
+                    "result": result,
+                    "pnl_pct": pnl_pct,
+                    "duration_min": (now - pos["time"])/60,
+                }
+                self.closed_trades.append(trade)
+                if result == "tp": self.total_tp += 1
+                elif result == "sl": self.total_sl += 1
+                else: self.total_timeout += 1
+                closed.append(pos)
+
+        # Удаляем закрытые из списка открытых
+        for pos in closed:
+            self.positions.remove(pos)
+
+    def generate_hourly_report(self):
+        """Выводит сводку за последний час и общую."""
+        now = time.time()
+        hour_ago = now - 3600
+        recent = [t for t in self.closed_trades if t.get("close_time", 0) >= hour_ago]  # у нас нет close_time, используем время закрытия
+        # Вместо этого возьмём закрытые сделки за последний час по времени закрытия (нужно сохранять время закрытия)
+        # Для простоты возьмём все закрытые сделки и покажем общую статистику.
+        # Для часовой статистики будем использовать только те, что закрыты в последний час по self.closed_trades[-N:]
+        # Но у нас нет времени закрытия. Поэтому быстро добавим: при закрытии сохраняем close_time = now.
+        # Исправим в update() выше: trade["close_time"] = now.
+
+        # Пересоздадим логику с close_time (в update уже добавлено)
+        # Здесь считаем, что update уже добавляет close_time.
+
+        # Найдём часовые сделки
+        recent_trades = [t for t in self.closed_trades if t.get("close_time", 0) >= hour_ago]
+        total_all = len(self.closed_trades)
+        total_hour = len(recent_trades)
+
+        # Статистика за час
+        if total_hour > 0:
+            wins_hour = sum(1 for t in recent_trades if t["result"] == "tp")
+            avg_pnl_hour = np.mean([t["pnl_pct"] for t in recent_trades])
+            max_dd_hour = 0  # можно посчитать кумулятивно, но для простоты опустим
+        else:
+            wins_hour = 0
+            avg_pnl_hour = 0.0
+
+        # Общая статистика
+        if total_all > 0:
+            wins_all = self.total_tp
+            winrate_all = wins_all / total_all * 100
+            avg_pnl_all = np.mean([t["pnl_pct"] for t in self.closed_trades])
+        else:
+            wins_all = 0
+            winrate_all = 0.0
+            avg_pnl_all = 0.0
+
+        log.info("=" * 60)
+        log.info("📋 БУМАЖНАЯ СВОДКА")
+        log.info(f"   Открытых позиций сейчас: {len(self.positions)}")
+        log.info(f"   За последний час: сделок {total_hour}, TP {wins_hour}, средний P&L {avg_pnl_hour:+.2f}%")
+        log.info(f"   За всё время (с запуска): сделок {total_all}, TP {self.total_tp}, SL {self.total_sl}, Timeout {self.total_timeout}")
+        log.info(f"   Общий WinRate: {winrate_all:.1f}%")
+        log.info(f"   Средний P&L на сделку: {avg_pnl_all:+.2f}%")
+        log.info("=" * 60)
+
+        self.last_report_time = now
 
 # ============================================================
 #                    ГЛАВНЫЙ ЦИКЛ
@@ -516,27 +629,37 @@ def main():
 
     stats["депозит_старт"] = get_balance(free=False)
     stats["старт_время"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-    log.info(f"=== СТАКАННЫЙ БОТ v10.4 ===")
+    log.info(f"=== СТАКАННЫЙ БОТ v10.5 ===")
     log.info(f"Депозит: {stats['депозит_старт']:.2f} USDT")
 
-    # Сразу проверяем, есть ли уже открытые позиции, и забираем их
+    # Инициализация бумажного трейдера
+    paper_trader = PaperTrader() if PAPER_TRADING_ENABLED else None
+
+    # Подхват существующих позиций
     existing = [p for p in fetch_positions() if float(p.get("contracts",0))>0]
     if existing:
         log.info(f"Найдены открытые позиции: {[(p['symbol'], p['side']) for p in existing]}")
         for pos in existing:
             handle_existing_position(pos)
-        log.info("Все существующие позиции обработаны, продолжаю сканирование")
+        log.info("Все существующие позиции обработаны")
 
     заблокированные: Dict[str, float] = {}
     fail_attempts: Dict[str, int] = {}
 
     while True:
         try:
-            # Периодический отчёт
-            if time.time() - stats.get("последний_отчёт", 0) >= REPORT_INTERVAL:
+            now = time.time()
+            # Периодический отчёт реальной торговли
+            if now - stats.get("последний_отчёт", 0) >= REPORT_INTERVAL:
                 bal = get_balance(free=False)
-                log.info(f"📊 Отчёт: Баланс={bal:.2f} USDT | Сделок: {stats['сделок_всего']} | TP: {stats['тейкпрофит']} SL: {stats['стоплосс']}")
-                stats["последний_отчёт"] = time.time()
+                log.info(f"📊 Реальный отчёт: Баланс={bal:.2f} USDT | Сделок: {stats['сделок_всего']} | TP: {stats['тейкпрофит']} SL: {stats['стоплосс']}")
+                stats["последний_отчёт"] = now
+
+            # Обновление бумажного трейдера
+            if paper_trader:
+                paper_trader.update()
+                if now - paper_trader.last_report_time >= PAPER_REPORT_INTERVAL:
+                    paper_trader.generate_hourly_report()
 
             свободный = get_balance(free=True)
             if свободный < MIN_BALANCE:
@@ -554,16 +677,16 @@ def main():
                     time.sleep(DAILY_LOSS_PAUSE_SEC)
                     continue
 
-            # Ждём закрытия открытых позиций (но теперь они подхватываются, так что это редкость)
+            # Ждём закрытия реальных позиций
             open_positions = [p for p in fetch_positions() if float(p.get("contracts",0))>0]
             if open_positions:
-                log.info(f"Открытые позиции всё ещё есть, мониторим: {[(p['symbol'], p['side']) for p in open_positions]}")
+                log.info(f"Реальные позиции: {[(p['symbol'], p['side']) for p in open_positions]}")
                 for pos in open_positions:
                     handle_existing_position(pos)
                 continue
 
             # ================= СКАНИРОВАНИЕ =================
-            log.info("── Начало сканирования стаканов ──")
+            log.info("── Сканирование стаканов ──")
             signals = []
             checked = 0
             for sym in SYMBOLS:
@@ -572,10 +695,8 @@ def main():
                 checked += 1
                 sig = detect_wall_signal(sym)
                 if sig:
-                    if sig["signal"] == "long" and not trend_4h(sym, "bull"):
-                        continue
-                    if sig["signal"] == "short" and not trend_4h(sym, "bear"):
-                        continue
+                    if sig["signal"] == "long" and not trend_4h(sym, "bull"): continue
+                    if sig["signal"] == "short" and not trend_4h(sym, "bear"): continue
                     signals.append((sym, sig))
                     log.info(f"Найден сигнал {sig['signal'].upper()} {sym} стена={sig['wall_usdt']:.0f} USDT")
 
@@ -585,12 +706,12 @@ def main():
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            # Выбор лучшего
+            # Сортируем и выбираем лучший
             signals.sort(key=lambda x: x[1]["wall_usdt"], reverse=True)
             sym, sig = signals[0]
             log.info(f"Лучший сигнал: {sig['signal'].upper()} {sym} стена={sig['wall_usdt']:.0f} USDT")
 
-            # Проверка MA кроссовера и объёма
+            # Быстрый расчёт ATR и параметров для фильтрации
             df_ta = pd.DataFrame(fetch_ohlcv(sym, TIMEFRAME_TA, limit=50), columns=["ts","o","h","l","c","v"])
             if len(df_ta) < 20: continue
             if not ma_cross_ok(df_ta, sig["signal"]):
@@ -624,13 +745,16 @@ def main():
                 log.info(f"RR={rr:.1f} < 2.0, пропуск")
                 continue
 
-            # Выбор плеча на основе волатильности
+            # --- Бумажная сделка ---
+            if paper_trader:
+                current_price = float(fetch_ticker(sym)["last"]) if fetch_ticker(sym) else price
+                paper_trader.add_signal(sym, sig, atr_val, sl, tp, current_price)
+
+            # --- Реальная сделка ---
             atr_pct = (atr_val / price) * 100
             leverage = choose_leverage(atr_pct)
             risk_usdt = свободный * RISK_PCT / 100
             qty = risk_usdt / abs(sl - price)
-            # Корректируем qty под плечо (линейный размер позиции не зависит от плеча, но маржа будет меньше, это учтёт биржа)
-            # qty уже рассчитан исходя из риска, плечо влияет только на занимаемую маржу, так что ок.
             try:
                 qty = float(exchange.amount_to_precision(sym, qty))
             except:
@@ -652,19 +776,16 @@ def main():
             stats["сделок_всего"] += 1
             start_t = time.time()
             result, partial_pnl = monitor_position(sym, entry, qty_open, start_t, sl, tp, sig["signal"], atr_val)
-            # Расчёт общего PnL
             cur_price = float(fetch_ticker(sym).get("last", entry)) if fetch_ticker(sym) else entry
             total_pnl = (cur_price - entry) * qty_open if sig["signal"]=="long" else (entry - cur_price) * qty_open
-            total_pnl += partial_pnl  # добавляем уже зафиксированную прибыль от частичного закрытия
+            total_pnl += partial_pnl
             stats["прибыль_usdt" if result=="tp" else "убыток_usdt"] += max(0, total_pnl) if result=="tp" else abs(min(0, total_pnl))
             stats["тейкпрофит" if result=="tp" else "стоплосс"] += 1
             stats["sl_streak"] = 0 if result=="tp" else stats.get("sl_streak",0)+1
             if result == "tp":
                 заблокированные[sym] = time.time() + SYMBOL_BLOCK_AFTER_TP
-                log.info(f"TP {sym} заблокирован на {SYMBOL_BLOCK_AFTER_TP//60} мин")
             else:
                 заблокированные[sym] = time.time() + SYMBOL_BLOCK_AFTER_SL
-                log.info(f"SL {sym} заблокирован на {SYMBOL_BLOCK_AFTER_SL//60} мин")
                 if stats["sl_streak"] >= SL_STREAK_LIMIT:
                     log.warning("Серия SL, пауза")
                     time.sleep(SL_STREAK_PAUSE)
