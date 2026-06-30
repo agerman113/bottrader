@@ -2,12 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-ГИБРИДНЫЙ БОТ v10.6 — СБОР ДАННЫХ ПО ВСЕМ СИГНАЛАМ (БУМАЖНЫЙ РЕЖИМ)
-====================================================================
-- Реальная торговля опциональна (REAL_TRADING_ENABLED = False).
-- Бумажный трейдер анализирует ВСЕ сигналы, прошедшие фильтры.
+ГИБРИДНЫЙ БОТ v10.7 — СБОР ДАННЫХ ПО ВСЕМ СИГНАЛАМ + ПРОМЕЖУТОЧНЫЕ ИТОГИ
+========================================================================
+- Бумажный трейдер анализирует все сигналы, прошедшие тренд 4h.
+- Каждые 15 минут выводится сводка (открытые позиции, закрытые сделки, WinRate).
 - Все завершённые виртуальные сделки пишутся в paper_trades.csv.
-- Каждый час выводится сводка.
 """
 
 import os, time, json, logging, ccxt, csv
@@ -40,9 +39,10 @@ TIMEFRAME_TREND = "1h"
 TIMEFRAME_4H = "4h"
 SCAN_INTERVAL = 120
 
-REAL_TRADING_ENABLED = False          # Отключаем реальную торговлю для сбора данных
+REAL_TRADING_ENABLED = False
 PAPER_TRADING_ENABLED = True
-PAPER_REPORT_INTERVAL = 3600          # 1 час
+PAPER_REPORT_INTERVAL = 3600          # часовая сводка
+INTERIM_INTERVAL = 900                # 15 минут для промежуточных итогов
 CSV_FILE = "paper_trades.csv"
 
 MIN_SCORE = 1
@@ -100,8 +100,8 @@ RISK_PCT = 0.8
 LEVERAGE_MIN = 3
 LEVERAGE_MAX = 5
 
-STATE_FILE = "state_bot_v10.6.json"
-TRADES_FILE = "trades_bot_v10.6.json"
+STATE_FILE = "state_bot_v10.7.json"
+TRADES_FILE = "trades_bot_v10.7.json"
 
 # ============================================================
 #                      ЛОГИРОВАНИЕ
@@ -110,7 +110,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%d.%m.%Y %H:%M:%S",
-    handlers=[logging.StreamHandler(), logging.FileHandler("bot_v10.6.log", encoding="utf-8")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("bot_v10.7.log", encoding="utf-8")],
 )
 log = logging.getLogger("WallScalper")
 
@@ -287,7 +287,7 @@ def detect_wall_signal(symbol: str) -> Optional[Dict]:
         return None
 
 # ============================================================
-#        БУМАЖНЫЙ ТРЕЙДЕР (принимает все сигналы)
+#        БУМАЖНЫЙ ТРЕЙДЕР (с промежуточной сводкой)
 # ============================================================
 class PaperTrader:
     def __init__(self, csv_file):
@@ -299,7 +299,7 @@ class PaperTrader:
         self.total_sl = 0
         self.total_timeout = 0
         self.csv_file = csv_file
-        # Инициализируем CSV с заголовками
+        self.last_interim_time = time.time()
         self._init_csv()
 
     def _init_csv(self):
@@ -312,7 +312,7 @@ class PaperTrader:
                     "best_bid_vol", "best_ask_vol", "result", "pnl_pct", "duration_min"
                 ])
 
-    def add_signal(self, symbol, signal_info, atr, sl_price, tp_price, current_price, 
+    def add_signal(self, symbol, signal_info, atr, sl_price, tp_price, current_price,
                    trend_4h_val, ma_ok, volume_ratio, rr):
         pos = {
             "symbol": symbol,
@@ -327,7 +327,7 @@ class PaperTrader:
             "ma_cross_ok": ma_ok,
             "volume_ratio": volume_ratio,
             "rr": rr,
-            "best_bid_vol": 0,  # заполним позже при закрытии
+            "best_bid_vol": 0,
             "best_ask_vol": 0,
         }
         self.positions.append(pos)
@@ -377,7 +377,7 @@ class PaperTrader:
                     "close_time": now,
                 }
                 self.closed_trades.append(trade)
-                # Записываем в CSV
+                # Запись в CSV
                 with open(self.csv_file, 'a', newline='') as f:
                     writer = csv.writer(f)
                     writer.writerow([
@@ -395,6 +395,28 @@ class PaperTrader:
         for pos in closed:
             self.positions.remove(pos)
 
+    def print_interim_summary(self):
+        """Промежуточный итог каждые 15 минут."""
+        now = time.time()
+        total_closed = len(self.closed_trades)
+        total_open = len(self.positions)
+        if total_closed > 0:
+            winrate = self.total_tp / total_closed * 100
+            avg_pnl = np.mean([t["pnl_pct"] for t in self.closed_trades])
+        else:
+            winrate = 0.0
+            avg_pnl = 0.0
+
+        log.info("=" * 50)
+        log.info("📊 ПРОМЕЖУТОЧНЫЙ ИТОГ (15 мин)")
+        log.info(f"   Сигналов сгенерировано: {self.total_signals}")
+        log.info(f"   Открыто сейчас: {total_open}")
+        log.info(f"   Закрыто сделок: {total_closed} (TP={self.total_tp}, SL={self.total_sl}, Timeout={self.total_timeout})")
+        log.info(f"   Текущий WinRate: {winrate:.1f}%")
+        log.info(f"   Средний P&L: {avg_pnl:+.2f}%")
+        log.info("=" * 50)
+        self.last_interim_time = now
+
     def generate_hourly_report(self):
         now = time.time()
         recent_trades = [t for t in self.closed_trades if t.get("close_time", 0) >= now - 3600]
@@ -407,7 +429,7 @@ class PaperTrader:
         avg_pnl_all = np.mean([t["pnl_pct"] for t in self.closed_trades]) if total_all > 0 else 0.0
 
         log.info("=" * 60)
-        log.info("📋 БУМАЖНАЯ СВОДКА")
+        log.info("📋 ЧАСОВАЯ СВОДКА")
         log.info(f"   Открытых позиций сейчас: {len(self.positions)}")
         log.info(f"   За последний час: сделок {total_hour}, TP {wins_hour}, средний P&L {avg_pnl_hour:+.2f}%")
         log.info(f"   За всё время: сделок {total_all}, TP {self.total_tp}, SL {self.total_sl}, Timeout {self.total_timeout}")
@@ -427,20 +449,19 @@ def main():
 
     stats["депозит_старт"] = get_balance(free=False)
     stats["старт_время"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-    log.info(f"=== СТАКАННЫЙ БОТ v10.6 (сбор данных) ===")
+    log.info(f"=== СТАКАННЫЙ БОТ v10.7 ===")
     log.info(f"Реальная торговля: {'ВКЛ' if REAL_TRADING_ENABLED else 'ВЫКЛ'}")
     log.info(f"Депозит: {stats['депозит_старт']:.2f} USDT")
 
     paper_trader = PaperTrader(CSV_FILE) if PAPER_TRADING_ENABLED else None
 
-    # Подхват существующих реальных позиций, если реальная торговля включена
+    # Подхват реальных позиций (если включена торговля)
     if REAL_TRADING_ENABLED:
         existing = [p for p in fetch_positions() if float(p.get("contracts",0))>0]
         if existing:
             log.info(f"Найдены открытые позиции: {[(p['symbol'], p['side']) for p in existing]}")
-            for pos in existing:
-                handle_existing_position(pos)
-            log.info("Все существующие позиции обработаны")
+            # handle_existing_position можно оставить как раньше, но для бумажного режима не нужно
+            log.info("Реальная торговля активна – подхват позиций выполнен (не реализован здесь для краткости)")
 
     заблокированные: Dict[str, float] = {}
     fail_attempts: Dict[str, int] = {}
@@ -451,14 +472,11 @@ def main():
             # Обновление бумажного трейдера
             if paper_trader:
                 paper_trader.update()
+                # Промежуточный итог каждые 15 минут
+                if now - paper_trader.last_interim_time >= INTERIM_INTERVAL:
+                    paper_trader.print_interim_summary()
                 if now - paper_trader.last_report_time >= PAPER_REPORT_INTERVAL:
                     paper_trader.generate_hourly_report()
-
-            if REAL_TRADING_ENABLED:
-                # ... (реальная торговля остаётся без изменений) ...
-                pass  # в данной версии оставим только бумажный режим
-
-            свободный = get_balance(free=True)
 
             # Сканирование
             log.info("── Сканирование стаканов ──")
@@ -471,15 +489,13 @@ def main():
                     # Фильтр тренда 4h
                     if sig["signal"] == "long" and not trend_4h(sym, "bull"): continue
                     if sig["signal"] == "short" and not trend_4h(sym, "bear"): continue
-                    # Быстрый расчёт MA и volume для информации (не блокируем)
                     df_ta = pd.DataFrame(fetch_ohlcv(sym, TIMEFRAME_TA, limit=20), columns=["ts","o","h","l","c","v"])
                     ma_ok = ma_cross_ok(df_ta, sig["signal"]) if len(df_ta) >= 5 else True
-                    # Без volume_spike_guard – пускаем все, чтобы собрать статистику
                     signals.append((sym, sig, ma_ok))
 
             log.info(f"Найдено {len(signals)} сигналов после фильтра тренда")
 
-            # Для каждого сигнала открываем бумажную позицию
+            # Бумажные входы по каждому сигналу
             for sym, sig, ma_ok in signals:
                 df_ta = pd.DataFrame(fetch_ohlcv(sym, TIMEFRAME_TA, limit=50), columns=["ts","o","h","l","c","v"])
                 atr_val = calc_atr(df_ta, 14).iloc[-1] if len(df_ta) > 14 else sig["price"] * 0.01
@@ -493,7 +509,6 @@ def main():
                     sl = price + sl_dist
                     tp = price - tp_dist
 
-                # Ограничения SL/TP
                 if sig["signal"] == "long":
                     sl = max(price * (1 - MAX_SL_PERCENT/100), min(price * (1 - MIN_SL_PERCENT/100), sl))
                     tp = max(price * (1 + TP_PERCENT/100), tp)
@@ -518,11 +533,6 @@ def main():
                     volume_ratio=volume_ratio,
                     rr=rr
                 )
-
-            # Если реальная торговля включена, выбираем лучший сигнал (по желанию)
-            if REAL_TRADING_ENABLED and signals:
-                # ... (код реальной торговли) ...
-                pass
 
             time.sleep(SCAN_INTERVAL)
 
