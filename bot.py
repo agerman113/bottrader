@@ -2,15 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-ГЛУБОКИЙ АНАЛИЗ ЛИДЕРОВ БЭКТЕСТА
-=================================
-Тестируем отобранные стратегии на расширенной истории (2000 свечей 5m),
-с разбивкой по периодам и расчётом дополнительных метрик.
+УГЛУБЛЁННЫЙ АНАЛИЗ СТРАТЕГИЙ-ЛИДЕРОВ (TRAIN/TEST)
+==================================================
+Проверяет робастность стратегий на разделённых исторических данных.
 """
 
-import os, time, logging, numpy as np, pandas as pd, ccxt
+import os, time, logging, numpy as np, pandas as pd, ccxt, signal
 from typing import Dict, List, Callable
-from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -22,23 +20,12 @@ SYMBOLS = [
     "SOL/USDT:USDT", "ADA/USDT:USDT", "TRX/USDT:USDT", "AVAX/USDT:USDT",
     "DOT/USDT:USDT", "LTC/USDT:USDT",
 ]
-TIMEFRAME = "5m"           # можно заменить на "15m" или "1h"
-LIMIT = 2000               # 2000 свечей 5m ≈ 7 дней
+TIMEFRAME = "5m"
+LIMIT = 2000
 SL_ATR_MULT = 1.5
 TP_ATR_MULT = 3.0
 MAX_HOLD_BARS = 200
 INITIAL_CAPITAL = 1000
-
-# Стратегии-лидеры (название и функция сигнала)
-STRATEGIES = {
-    "Keltner Reversal": keltner_rev,
-    "Stochastic": stochastic_signal,
-    "CCI": cci_signal,
-    "MFI": mfi_signal,
-    "Aroon": aroon_signal,
-    "VWAP Reversal": vwap_reversal,
-    "Stochastic + Trend": stochastic_trend,
-}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -56,9 +43,207 @@ def fetch_ohlcv(symbol, timeframe, limit):
         log.error(f"Ошибка загрузки {symbol}: {e}")
         return pd.DataFrame()
 
+# ---------------------- ИНДИКАТОРЫ ----------------------
+def ema(series, span): return series.ewm(span=span, adjust=False).mean()
+def sma(series, span): return series.rolling(span).mean()
+def rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(lower=0)
+    avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+def macd(series, fast=12, slow=26, signal=9):
+    ml = ema(series, fast) - ema(series, slow)
+    sl = ema(ml, signal)
+    return ml, sl, ml - sl
+def atr(df, period=14):
+    high, low, close = df["high"], df["low"], df["close"].shift(1)
+    tr = pd.concat([high - low, (high - close).abs(), (low - close).abs()], axis=1).max(axis=1)
+    return tr.ewm(alpha=1/period, adjust=False).mean()
+def bollinger_bands(series, period=20, std=2):
+    mb = sma(series, period)
+    std_dev = series.rolling(period).std()
+    return mb + std*std_dev, mb, mb - std*std_dev
+def supertrend(df, period=10, mult=3):
+    atr_val = atr(df, period)
+    hl2 = (df["high"] + df["low"]) / 2
+    up = hl2 - mult * atr_val
+    down = hl2 + mult * atr_val
+    trend = pd.Series(1.0, index=df.index)
+    for i in range(1, len(df)):
+        if df["close"].iloc[i] > trend.iloc[i-1]:
+            trend.iloc[i] = max(up.iloc[i], trend.iloc[i-1])
+        else:
+            trend.iloc[i] = min(down.iloc[i], trend.iloc[i-1])
+    return trend
+def stochastic(df, k_period=14, d_period=3):
+    low_min = df["low"].rolling(k_period).min()
+    high_max = df["high"].rolling(k_period).max()
+    k = 100 * (df["close"] - low_min) / (high_max - low_min + 1e-10)
+    d = k.rolling(d_period).mean()
+    return k, d
+def adx(df, period=14):
+    atr_val = atr(df, period)
+    high, low, close = df["high"], df["low"], df["close"]
+    plus_dm = high.diff().clip(lower=0)
+    minus_dm = -low.diff().clip(upper=0)
+    plus_di = 100 * (plus_dm.ewm(alpha=1/period, adjust=False).mean() / atr_val.replace(0, np.nan))
+    minus_di = 100 * (minus_dm.ewm(alpha=1/period, adjust=False).mean() / atr_val.replace(0, np.nan))
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)) * 100
+    adx_val = dx.ewm(alpha=1/period, adjust=False).mean()
+    return adx_val, plus_di, minus_di
+def cci(df, period=20):
+    tp = (df["high"] + df["low"] + df["close"]) / 3
+    sma_tp = sma(tp, period)
+    mad = tp.rolling(period).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
+    return (tp - sma_tp) / (0.015 * mad)
+def mfi(df, period=14):
+    tp = (df["high"] + df["low"] + df["close"]) / 3
+    money_flow = tp * df["volume"]
+    positive_flow = money_flow.where(tp > tp.shift(1), 0)
+    negative_flow = money_flow.where(tp < tp.shift(1), 0)
+    pos_sum = positive_flow.rolling(period).sum()
+    neg_sum = negative_flow.rolling(period).sum()
+    return 100 - (100 / (1 + pos_sum / neg_sum.replace(0, np.nan)))
+def obv(df):
+    return (df["volume"] * (df["close"].diff().apply(lambda x: 1 if x > 0 else -1 if x < 0 else 0))).cumsum()
+def aroon(df, period=25):
+    high_max = df["high"].rolling(period).apply(lambda x: x.argmax(), raw=True)
+    low_min = df["low"].rolling(period).apply(lambda x: x.argmin(), raw=True)
+    aroon_up = 100 * (period - high_max) / period
+    aroon_down = 100 * (period - low_min) / period
+    return aroon_up, aroon_down
+def hull_ma(series, period=55):
+    half = period // 2
+    sqrt = int(np.sqrt(period))
+    wma1 = 2 * ema(series, half) - ema(series, period)
+    hma = ema(wma1, sqrt)
+    return hma
+def donchian(df, period=20):
+    upper = df["high"].rolling(period).max()
+    lower = df["low"].rolling(period).min()
+    return upper, lower
+def keltner(df, period=20, atr_mult=1.5):
+    typical = (df["high"] + df["low"] + df["close"]) / 3
+    mb = ema(typical, period)
+    atr_val = atr(df, period)
+    upper = mb + atr_mult * atr_val
+    lower = mb - atr_mult * atr_val
+    return upper, mb, lower
+def parabolic_sar(df, acceleration=0.02, maximum=0.2):
+    high = df["high"].values
+    low = df["low"].values
+    close = df["close"].values
+    sar = np.zeros(len(df))
+    sar[0] = low[0]
+    ep = high[0]
+    af = acceleration
+    trend = 1
+    for i in range(1, len(df)):
+        sar[i] = sar[i-1] + af * (ep - sar[i-1])
+        if trend == 1:
+            if low[i] < sar[i]:
+                trend = -1
+                sar[i] = ep
+                ep = low[i]
+                af = acceleration
+            else:
+                if high[i] > ep:
+                    ep = high[i]
+                    af = min(af + acceleration, maximum)
+                if low[i-1] < sar[i]: sar[i] = low[i-1]
+                if low[i-2] < sar[i]: sar[i] = low[i-2]
+        else:
+            if high[i] > sar[i]:
+                trend = 1
+                sar[i] = ep
+                ep = high[i]
+                af = acceleration
+            else:
+                if low[i] < ep:
+                    ep = low[i]
+                    af = min(af + acceleration, maximum)
+                if high[i-1] > sar[i]: sar[i] = high[i-1]
+                if high[i-2] > sar[i]: sar[i] = high[i-2]
+    return pd.Series(sar, index=df.index)
+
+# ---------------------- ФУНКЦИИ СИГНАЛОВ ----------------------
+def keltner_rev(df):
+    upper, mid, lower = keltner(df)
+    signal = pd.Series(0, index=df.index)
+    signal[df["close"] < lower] = 1
+    signal[df["close"] > upper] = -1
+    return signal
+
+def stochastic_signal(df):
+    k, d = stochastic(df)
+    signal = pd.Series(0, index=df.index)
+    signal[(k < 20) & (k > d)] = 1
+    signal[(k > 80) & (k < d)] = -1
+    return signal
+
+def cci_signal(df):
+    c = cci(df)
+    signal = pd.Series(0, index=df.index)
+    signal[c > 100] = -1
+    signal[c < -100] = 1
+    return signal
+
+def mfi_signal(df):
+    m = mfi(df)
+    signal = pd.Series(0, index=df.index)
+    signal[m < 20] = 1
+    signal[m > 80] = -1
+    return signal
+
+def aroon_signal(df):
+    up, down = aroon(df)
+    signal = pd.Series(0, index=df.index)
+    signal[(up > 70) & (down < 30)] = 1
+    signal[(down > 70) & (up < 30)] = -1
+    return signal
+
+def vwap_reversal(df):
+    typical = (df["high"] + df["low"] + df["close"]) / 3
+    cum_vol = df["volume"].cumsum()
+    cum_vp = (typical * df["volume"]).cumsum()
+    vwap = cum_vp / cum_vol
+    std = (typical - vwap).rolling(100).std()
+    upper = vwap + 2 * std
+    lower = vwap - 2 * std
+    signal = pd.Series(0, index=df.index)
+    signal[df["close"] < lower] = 1
+    signal[df["close"] > upper] = -1
+    return signal
+
+def stochastic_trend(df):
+    k, d = stochastic(df)
+    e50 = ema(df["close"], 50)
+    signal = pd.Series(0, index=df.index)
+    signal[(k < 20) & (k > d) & (df["close"] > e50)] = 1
+    signal[(k > 80) & (k < d) & (df["close"] < e50)] = -1
+    return signal
+
+STRATEGIES = {
+    "Keltner Reversal": keltner_rev,
+    "Stochastic": stochastic_signal,
+    "CCI": cci_signal,
+    "MFI": mfi_signal,
+    "Aroon": aroon_signal,
+    "VWAP Reversal": vwap_reversal,
+    "Stochastic + Trend": stochastic_trend,
+}
+
 # ---------------------- БЭКТЕСТ С РАЗБИВКОЙ ----------------------
+class TimeoutException(Exception):
+    pass
+
+def handler(signum, frame):
+    raise TimeoutException("Стратегия превысила лимит времени")
+
 def backtest_split(df, signals, sl_mult, tp_mult, max_bars, split_date):
-    """Делит данные на train и test по дате split_date, возвращает метрики для каждого."""
     train_df = df[df.index < split_date]
     test_df = df[df.index >= split_date]
     def run(data):
@@ -113,14 +298,11 @@ def main():
         log.error("Нет данных")
         return
 
-    # Общий split_date: 70% времени в train, 30% в test
     all_dates = pd.concat([df.index for df in data.values()])
     split_date = all_dates.quantile(0.7)
-
     log.info(f"Дата разделения train/test: {split_date}")
     log.info(f"Тестируем {len(STRATEGIES)} стратегий на {len(data)} монетах...")
 
-    # Таблица результатов
     results = []
     for name, func in STRATEGIES.items():
         log.info(f"--- {name} ---")
@@ -128,20 +310,25 @@ def main():
         all_test_trades = []
         for sym, df in data.items():
             try:
+                signal.signal(signal.SIGALRM, handler)
+                signal.alarm(30)
                 signals = func(df)
+                signal.alarm(0)
                 train_m, test_m = backtest_split(df, signals, SL_ATR_MULT, TP_ATR_MULT, MAX_HOLD_BARS, split_date)
                 if train_m["trades"] > 0:
-                    all_train_trades.extend([train_m["avg_pnl"]] * train_m["trades"])  # упрощённо для сводки
+                    all_train_trades.extend([train_m["avg_pnl"]] * train_m["trades"])
                 if test_m["trades"] > 0:
                     all_test_trades.extend([test_m["avg_pnl"]] * test_m["trades"])
+            except TimeoutException:
+                log.warning(f"   ⏰ Пропуск {sym} (дольше 30с)")
+                signal.alarm(0)
             except Exception as e:
                 log.error(f"   Ошибка {sym}: {e}")
-        if len(all_train_trades) + len(all_test_trades) == 0:
+                signal.alarm(0)
+
+        if not all_train_trades and not all_test_trades:
             results.append((name, 0,0,0,0,0,0,0,0,0))
             continue
-        # Общие метрики train
-        train_pnls = all_train_trades
-        test_pnls = all_test_trades
         def agg_metrics(pnls):
             if not pnls: return (0,0,0,0)
             avg = np.mean(pnls)
@@ -152,15 +339,15 @@ def main():
             dd = (eqs.cummax() - eqs).max() / eqs.cummax().max() * 100
             wr = sum(1 for p in pnls if p > 0) / len(pnls) * 100
             return (len(pnls), wr, avg, total, dd)
-        tr_t, tr_wr, tr_avg, tr_pnl, tr_dd = agg_metrics(train_pnls)
-        te_t, te_wr, te_avg, te_pnl, te_dd = agg_metrics(test_pnls)
+        tr_t, tr_wr, tr_avg, tr_pnl, tr_dd = agg_metrics(all_train_trades)
+        te_t, te_wr, te_avg, te_pnl, te_dd = agg_metrics(all_test_trades)
         results.append((name, tr_t, tr_wr, tr_pnl, tr_dd, te_t, te_wr, te_pnl, te_dd))
 
     # Вывод
     print("\n" + "="*120)
     print(f"{'Стратегия':<20} {'Train сделок':>11} {'Train WR%':>9} {'Train P&L%':>11} {'Train DD%':>9} {'Test сделок':>11} {'Test WR%':>9} {'Test P&L%':>11} {'Test DD%':>9}")
     print("-"*120)
-    for r in sorted(results, key=lambda x: x[6], reverse=True):  # сортировка по Test P&L
+    for r in sorted(results, key=lambda x: x[6] if x[6] else 0, reverse=True):
         print(f"{r[0]:<20} {r[1]:>11} {r[2]:>8.1f} {r[3]:>10.2f} {r[4]:>8.2f} {r[5]:>11} {r[6]:>8.1f} {r[7]:>10.2f} {r[8]:>8.2f}")
     print("="*120)
 
