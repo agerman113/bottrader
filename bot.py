@@ -2,15 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-ГИБРИДНЫЙ БОТ v10.3 — СТАКАННЫЙ СКАЛЬПЕР НА ОСНОВЕ МОНСТРА
-(с расширенным логгированием этапов)
+ГИБРИДНЫЙ БОТ v10.4 — СТАКАННЫЙ СКАЛЬПЕР С ПОДХВАТОМ ПОЗИЦИЙ
+=============================================================
+- При обнаружении открытой позиции (после рестарта) бот забирает её под контроль.
+- Плечо 3–5x выбирается по волатильности.
+- Трейлинг и частичный безубыток с логированием.
+- Все проверки и риск‑менеджмент из v10.2.
 """
 
 import os, time, json, logging, ccxt
 import pandas as pd, numpy as np
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 load_dotenv()
 
@@ -31,7 +35,6 @@ SYMBOLS = [
     "VET/USDT:USDT", "NOT/USDT:USDT", "CATI/USDT:USDT",
 ]
 
-LEVERAGE = 3
 TIMEFRAME_TA = "5m"
 TIMEFRAME_TREND = "1h"
 TIMEFRAME_4H = "4h"
@@ -89,8 +92,12 @@ REPORT_INTERVAL = 1800
 BYBIT_FEE = 0.00055
 RISK_PCT = 0.8
 
-STATE_FILE = "state_bot_v10.3.json"
-TRADES_FILE = "trades_bot_v10.3.json"
+# --- Динамическое плечо ---
+LEVERAGE_MIN = 3
+LEVERAGE_MAX = 5
+
+STATE_FILE = "state_bot_v10.4.json"
+TRADES_FILE = "trades_bot_v10.4.json"
 
 # ============================================================
 #                      ЛОГИРОВАНИЕ
@@ -99,7 +106,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%d.%m.%Y %H:%M:%S",
-    handlers=[logging.StreamHandler(), logging.FileHandler("bot_v10.3.log", encoding="utf-8")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("bot_v10.4.log", encoding="utf-8")],
 )
 log = logging.getLogger("WallScalper")
 
@@ -197,6 +204,15 @@ def volume_spike_guard(df):
         return (df["v"].iloc[-1] / (avg+1e-10)) <= VOLUME_SPIKE_MULT
     except: return True
 
+def choose_leverage(atr_pct):
+    """Динамический выбор плеча: чем ниже ATR, тем выше плечо."""
+    if atr_pct > 1.5:
+        return LEVERAGE_MIN
+    elif atr_pct > 0.8:
+        return LEVERAGE_MIN + 1
+    else:
+        return LEVERAGE_MAX
+
 # ============================================================
 #          ДЕТЕКТОР СТЕНЫ ЗАЯВОК (Order Book Wall)
 # ============================================================
@@ -271,7 +287,7 @@ def detect_wall_signal(symbol: str) -> Optional[Dict]:
         return None
 
 # ============================================================
-#                  ОТКРЫТИЕ ПОЗИЦИИ (исправлено)
+#                  ОТКРЫТИЕ ПОЗИЦИИ
 # ============================================================
 def set_leverage(symbol, lev):
     try:
@@ -291,8 +307,8 @@ def set_leverage(symbol, lev):
     log.warning(f"Плечо не удалось установить для {symbol}")
     return True
 
-def open_position(symbol, side, qty, tp_price, sl_price):
-    set_leverage(symbol, LEVERAGE)
+def open_position(symbol, side, qty, tp_price, sl_price, leverage):
+    set_leverage(symbol, leverage)
     ticker = fetch_ticker(symbol)
     if not ticker or ticker.get("last") is None:
         log.error(f"Не удалось получить цену для {symbol}")
@@ -305,7 +321,7 @@ def open_position(symbol, side, qty, tp_price, sl_price):
             "stopLoss": float(exchange.price_to_precision(symbol, sl_price)),
         })
         entry = float(order.get("average", price))
-        log.info(f"{side.upper()} открыт: {qty} @ {entry:.6f}")
+        log.info(f"{side.upper()} открыт: {qty} @ {entry:.6f} (плечо {leverage}x)")
         return entry, qty
     except Exception as e:
         log.error(f"Ошибка открытия {side} {symbol}: {e}")
@@ -328,13 +344,28 @@ def update_sl(symbol, new_sl, side):
             "stopLoss": str(exchange.price_to_precision(symbol, new_sl)),
             "slTriggerBy": "MarkPrice", "positionIdx": "0",
         })
+        log.info(f"SL обновлён → {new_sl:.6f}")
         return True
     except Exception as e:
         log.warning(f"Не удалось обновить SL: {e}")
         return False
 
+def update_tp(symbol, new_tp, side):
+    try:
+        coin = symbol.replace("/", "").replace(":USDT", "")
+        exchange.private_post_v5_position_trading_stop({
+            "category": "linear", "symbol": coin,
+            "takeProfit": str(exchange.price_to_precision(symbol, new_tp)),
+            "tpTriggerBy": "MarkPrice", "positionIdx": "0",
+        })
+        log.info(f"TP обновлён → {new_tp:.6f}")
+        return True
+    except Exception as e:
+        log.warning(f"Не удалось обновить TP: {e}")
+        return False
+
 # ============================================================
-#           МОНИТОРИНГ ПОЗИЦИИ (взят из v10.2)
+#           МОНИТОРИНГ ПОЗИЦИИ (общий)
 # ============================================================
 def monitor_position(symbol, entry, qty, start_time, sl_price, tp_price, side, atr):
     deadline = start_time + TRADE_MAX_LIFETIME
@@ -346,6 +377,7 @@ def monitor_position(symbol, entry, qty, start_time, sl_price, tp_price, side, a
     trailing_step = max(MIN_TRAILING_STEP/100, atr/entry * TRAILING_ATR_MULT)
     rr_trigger = entry + (tp_price - entry) * RR_EXIT_TRIGGER if side == "long" else entry - (entry - tp_price) * RR_EXIT_TRIGGER
     partial_done = False
+    accumulated_pnl = 0.0
 
     log.info(f"Мониторинг {symbol} {side} вход={entry:.6f} SL={sl_price:.6f} TP={tp_price:.6f}")
     while True:
@@ -353,14 +385,15 @@ def monitor_position(symbol, entry, qty, start_time, sl_price, tp_price, side, a
         if now >= deadline:
             log.warning("Дедлайн — закрытие")
             close_position(symbol, qty, side)
-            return "timeout"
+            return "timeout", accumulated_pnl
         time.sleep(15)
         pos_list = fetch_positions([symbol])
         active = [p for p in pos_list if float(p.get("contracts", 0) or 0) > 0 and p.get("side") == side]
         if not active:
             ticker = fetch_ticker(symbol)
             cur = float(ticker["last"]) if ticker and ticker.get("last") else entry
-            return "tp" if (cur >= tp_price if side=="long" else cur <= tp_price) or be_done else "sl"
+            # если был частичный безубыток, то часть прибыли уже зафиксирована
+            return ("tp", accumulated_pnl) if (cur >= tp_price if side=="long" else cur <= tp_price) or be_done else ("sl", accumulated_pnl)
         pos = active[0]
         ticker = fetch_ticker(symbol)
         if not ticker or ticker.get("last") is None: continue
@@ -375,7 +408,9 @@ def monitor_position(symbol, entry, qty, start_time, sl_price, tp_price, side, a
                 close_s = "sell" if side=="long" else "buy"
                 try:
                     exchange.create_market_order(symbol, close_s, close_qty, params={"reduceOnly": True})
-                    log.info(f"Частичный безубыток: {close_qty:.4f}")
+                    partial_pnl = (cur - entry) * close_qty if side=="long" else (entry - cur) * close_qty
+                    accumulated_pnl += partial_pnl
+                    log.info(f"Частичный безубыток: {close_qty:.4f} PnL≈{partial_pnl:+.4f}U")
                     qty_act -= close_qty
                     new_sl = entry * (1 + BYBIT_FEE*2 + 0.0003) if side=="long" else entry * (1 - BYBIT_FEE*2 - 0.0003)
                     if update_sl(symbol, new_sl, side):
@@ -388,7 +423,7 @@ def monitor_position(symbol, entry, qty, start_time, sl_price, tp_price, side, a
             if (side == "long" and not trend_4h(symbol, "bull")) or (side == "short" and not trend_4h(symbol, "bear")):
                 log.info("Signal exit по 4h тренду")
                 close_position(symbol, qty_act, side)
-                return "tp"
+                return "tp", accumulated_pnl
 
         if not partial_done and not be_done and pnl_pct >= 0.3:
             new_sl = entry * (1 + BYBIT_FEE*2 + 0.0003) if side=="long" else entry * (1 - BYBIT_FEE*2 - 0.0003)
@@ -409,17 +444,69 @@ def monitor_position(symbol, entry, qty, start_time, sl_price, tp_price, side, a
                     new_sl = peak * (1 - trailing_offset)
                     if new_sl > current_sl and update_sl(symbol, new_sl, side):
                         current_sl = new_sl
+                        log.info(f"Трейлинг LONG: пик={peak:.6f} → SL={new_sl:.6f}")
                 else:
                     if cur < peak: peak = cur
                     new_sl = peak * (1 + trailing_offset)
                     if new_sl < current_sl and update_sl(symbol, new_sl, side):
                         current_sl = new_sl
+                        log.info(f"Трейлинг SHORT: пик={peak:.6f} → SL={new_sl:.6f}")
 
         log.info(f"[{symbol}] {cur:.6f} P&L={pnl_pct:+.2f}% SL={current_sl:.6f}")
-    return "sl"
+    return "sl", accumulated_pnl
 
 # ============================================================
-#                    ГЛАВНЫЙ ЦИКЛ (с детальными логами)
+#          ПОДХВАТ СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ
+# ============================================================
+def handle_existing_position(pos):
+    symbol = pos["symbol"]
+    side = pos["side"]
+    entry = float(pos["entryPrice"] or pos["avgCost"] or 0)
+    qty = abs(float(pos["contracts"]))
+    if entry <= 0 or qty <= 0:
+        log.error("Некорректные данные позиции, не могу подхватить")
+        return
+
+    # Рассчитываем ATR для новых SL/TP
+    df_ta = pd.DataFrame(fetch_ohlcv(symbol, TIMEFRAME_TA, limit=50), columns=["ts","o","h","l","c","v"])
+    atr_val = calc_atr(df_ta, 14).iloc[-1] if len(df_ta) > 14 else entry * 0.01
+    price = float(fetch_ticker(symbol)["last"]) if fetch_ticker(symbol) else entry
+
+    sl_dist = atr_val * ATR_SL_MULT
+    tp_dist = atr_val * ATR_TP_MULT
+    if side == "long":
+        sl = price - sl_dist
+        tp = price + tp_dist
+    else:
+        sl = price + sl_dist
+        tp = price - tp_dist
+
+    # Ограничения SL/TP
+    if side == "long":
+        sl = max(price * (1 - MAX_SL_PERCENT/100), min(price * (1 - MIN_SL_PERCENT/100), sl))
+        tp = max(price * (1 + TP_PERCENT/100), tp)
+    else:
+        sl = min(price * (1 + MAX_SL_PERCENT/100), max(price * (1 + MIN_SL_PERCENT/100), sl))
+        tp = min(price * (1 - TP_PERCENT/100), tp)
+
+    # Устанавливаем новые SL/TP
+    update_sl(symbol, sl, side)
+    update_tp(symbol, tp, side)
+
+    log.info(f"Подхвачена позиция {symbol} {side} entry={entry:.6f} qty={qty} новые SL={sl:.6f} TP={tp:.6f}")
+    # Запускаем мониторинг
+    result, pnl = monitor_position(symbol, entry, qty, time.time() - 60, sl, tp, side, atr_val)  # start_time на минуту назад
+    # Фиксируем результат в статистике
+    cur_price = float(fetch_ticker(symbol).get("last", entry)) if fetch_ticker(symbol) else entry
+    total_pnl = (cur_price - entry) * qty if side=="long" else (entry - cur_price) * qty
+    stats["прибыль_usdt" if result=="tp" else "убыток_usdt"] += max(0, total_pnl) if result=="tp" else abs(min(0, total_pnl))
+    stats["тейкпрофит" if result=="tp" else "стоплосс"] += 1
+    stats["сделок_всего"] += 1
+    stats["sl_streak"] = 0 if result=="tp" else stats.get("sl_streak",0)+1
+    log.info(f"Завершена подхваченная позиция: {result} PnL={total_pnl:.4f} USDT")
+
+# ============================================================
+#                    ГЛАВНЫЙ ЦИКЛ
 # ============================================================
 def main():
     global stats
@@ -429,11 +516,16 @@ def main():
 
     stats["депозит_старт"] = get_balance(free=False)
     stats["старт_время"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-    log.info(f"=== СТАКАННЫЙ БОТ v10.3 ===")
+    log.info(f"=== СТАКАННЫЙ БОТ v10.4 ===")
     log.info(f"Депозит: {stats['депозит_старт']:.2f} USDT")
-    
-    # Сразу выводим первый отчёт, чтобы видеть, что бот работает
-    stats["последний_отчёт"] = 0  # чтобы сработал при первой итерации
+
+    # Сразу проверяем, есть ли уже открытые позиции, и забираем их
+    existing = [p for p in fetch_positions() if float(p.get("contracts",0))>0]
+    if existing:
+        log.info(f"Найдены открытые позиции: {[(p['symbol'], p['side']) for p in existing]}")
+        for pos in existing:
+            handle_existing_position(pos)
+        log.info("Все существующие позиции обработаны, продолжаю сканирование")
 
     заблокированные: Dict[str, float] = {}
     fail_attempts: Dict[str, int] = {}
@@ -462,11 +554,12 @@ def main():
                     time.sleep(DAILY_LOSS_PAUSE_SEC)
                     continue
 
-            # Ждём закрытия открытых позиций
+            # Ждём закрытия открытых позиций (но теперь они подхватываются, так что это редкость)
             open_positions = [p for p in fetch_positions() if float(p.get("contracts",0))>0]
             if open_positions:
-                log.info(f"Открытые позиции: {[p['symbol'] for p in open_positions]}, жду 30с")
-                time.sleep(30)
+                log.info(f"Открытые позиции всё ещё есть, мониторим: {[(p['symbol'], p['side']) for p in open_positions]}")
+                for pos in open_positions:
+                    handle_existing_position(pos)
                 continue
 
             # ================= СКАНИРОВАНИЕ =================
@@ -480,10 +573,8 @@ def main():
                 sig = detect_wall_signal(sym)
                 if sig:
                     if sig["signal"] == "long" and not trend_4h(sym, "bull"):
-                        log.debug(f"{sym}: LONG сигнал, но тренд 4h не бычий")
                         continue
                     if sig["signal"] == "short" and not trend_4h(sym, "bear"):
-                        log.debug(f"{sym}: SHORT сигнал, но тренд 4h не медвежий")
                         continue
                     signals.append((sym, sig))
                     log.info(f"Найден сигнал {sig['signal'].upper()} {sym} стена={sig['wall_usdt']:.0f} USDT")
@@ -494,16 +585,14 @@ def main():
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            # Сортируем и выбираем лучший
+            # Выбор лучшего
             signals.sort(key=lambda x: x[1]["wall_usdt"], reverse=True)
             sym, sig = signals[0]
             log.info(f"Лучший сигнал: {sig['signal'].upper()} {sym} стена={sig['wall_usdt']:.0f} USDT")
 
             # Проверка MA кроссовера и объёма
             df_ta = pd.DataFrame(fetch_ohlcv(sym, TIMEFRAME_TA, limit=50), columns=["ts","o","h","l","c","v"])
-            if len(df_ta) < 20:
-                log.warning(f"Недостаточно данных для {sym}")
-                continue
+            if len(df_ta) < 20: continue
             if not ma_cross_ok(df_ta, sig["signal"]):
                 log.info(f"MA кроссовер не пройден для {sym}")
                 continue
@@ -535,18 +624,21 @@ def main():
                 log.info(f"RR={rr:.1f} < 2.0, пропуск")
                 continue
 
+            # Выбор плеча на основе волатильности
+            atr_pct = (atr_val / price) * 100
+            leverage = choose_leverage(atr_pct)
             risk_usdt = свободный * RISK_PCT / 100
             qty = risk_usdt / abs(sl - price)
+            # Корректируем qty под плечо (линейный размер позиции не зависит от плеча, но маржа будет меньше, это учтёт биржа)
+            # qty уже рассчитан исходя из риска, плечо влияет только на занимаемую маржу, так что ок.
             try:
                 qty = float(exchange.amount_to_precision(sym, qty))
             except:
                 pass
-            if qty <= 0:
-                log.warning("Размер позиции 0, пропуск")
-                continue
+            if qty <= 0: continue
 
-            log.info(f"✅ Вход {sig['signal'].upper()} {sym} цена={price:.6f} SL={sl:.6f} TP={tp:.6f}")
-            entry, qty_open = open_position(sym, sig["signal"], qty, tp, sl)
+            log.info(f"✅ Вход {sig['signal'].upper()} {sym} цена={price:.6f} SL={sl:.6f} TP={tp:.6f} плечо={leverage}x")
+            entry, qty_open = open_position(sym, sig["signal"], qty, tp, sl, leverage)
             if not entry:
                 log.warning("Не удалось открыть позицию")
                 fail_attempts[sym] = fail_attempts.get(sym, 0) + 1
@@ -559,10 +651,12 @@ def main():
 
             stats["сделок_всего"] += 1
             start_t = time.time()
-            result = monitor_position(sym, entry, qty_open, start_t, sl, tp, sig["signal"], atr_val)
+            result, partial_pnl = monitor_position(sym, entry, qty_open, start_t, sl, tp, sig["signal"], atr_val)
+            # Расчёт общего PnL
             cur_price = float(fetch_ticker(sym).get("last", entry)) if fetch_ticker(sym) else entry
-            pnl = (cur_price - entry) * qty_open if sig["signal"]=="long" else (entry - cur_price) * qty_open
-            stats["прибыль_usdt" if result=="tp" else "убыток_usdt"] += max(0, pnl) if result=="tp" else abs(min(0, pnl))
+            total_pnl = (cur_price - entry) * qty_open if sig["signal"]=="long" else (entry - cur_price) * qty_open
+            total_pnl += partial_pnl  # добавляем уже зафиксированную прибыль от частичного закрытия
+            stats["прибыль_usdt" if result=="tp" else "убыток_usdt"] += max(0, total_pnl) if result=="tp" else abs(min(0, total_pnl))
             stats["тейкпрофит" if result=="tp" else "стоплосс"] += 1
             stats["sl_streak"] = 0 if result=="tp" else stats.get("sl_streak",0)+1
             if result == "tp":
@@ -575,7 +669,7 @@ def main():
                     log.warning("Серия SL, пауза")
                     time.sleep(SL_STREAK_PAUSE)
                     stats["sl_streak"] = 0
-            log.info(f"Сделка закрыта: {result} PnL={pnl:.4f} USDT")
+            log.info(f"Сделка закрыта: {result} PnL={total_pnl:.4f} USDT")
             time.sleep(30)
 
         except Exception as e:
