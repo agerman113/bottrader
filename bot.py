@@ -2,543 +2,651 @@
 # -*- coding: utf-8 -*-
 
 """
-ГИБРИДНЫЙ БОТ v10.7 — СБОР ДАННЫХ ПО ВСЕМ СИГНАЛАМ + ПРОМЕЖУТОЧНЫЕ ИТОГИ
-========================================================================
-- Бумажный трейдер анализирует все сигналы, прошедшие тренд 4h.
-- Каждые 15 минут выводится сводка (открытые позиции, закрытые сделки, WinRate).
-- Все завершённые виртуальные сделки пишутся в paper_trades.csv.
+МУЛЬТИ-СТРАТЕГИЧЕСКИЙ БЭКТЕСТЕР НА ИСТОРИЧЕСКИХ ДАННЫХ
+=====================================================
+Загружает OHLCV для списка монет, прогоняет 30+ стратегий,
+выводит сводную таблицу результатов.
 """
 
-import os, time, json, logging, ccxt, csv
-import pandas as pd, numpy as np
-from dotenv import load_dotenv
-from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Tuple
-
-load_dotenv()
+import os
+import time
+import logging
+import numpy as np
+import pandas as pd
+import ccxt
+from typing import Dict, List, Tuple, Optional, Callable
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from scipy import stats as scipy_stats
+import warnings
+warnings.filterwarnings('ignore')
 
 # ============================================================
-#                      КОНФИГУРАЦИЯ
+#               КОНФИГУРАЦИЯ БЭКТЕСТА
 # ============================================================
 SYMBOLS = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "BNB/USDT:USDT", "XRP/USDT:USDT",
     "SOL/USDT:USDT", "ADA/USDT:USDT", "TRX/USDT:USDT",
-    "AVAX/USDT:USDT", "DOT/USDT:USDT", "LTC/USDT:USDT", "BCH/USDT:USDT",
-    "ATOM/USDT:USDT", "XLM/USDT:USDT", "NEAR/USDT:USDT", "DOGE/USDT:USDT",
-    "1000PEPE/USDT:USDT", "WIF/USDT:USDT", "BOME/USDT:USDT",
-    "RENDER/USDT:USDT", "TAO/USDT:USDT", "WLD/USDT:USDT", "ARKM/USDT:USDT",
-    "IO/USDT:USDT", "ONDO/USDT:USDT", "VIRTUAL/USDT:USDT", "UNI/USDT:USDT",
-    "AAVE/USDT:USDT", "ARB/USDT:USDT", "OP/USDT:USDT", "LINK/USDT:USDT",
-    "GRT/USDT:USDT", "INJ/USDT:USDT", "SUI/USDT:USDT", "APT/USDT:USDT",
-    "TIA/USDT:USDT", "JTO/USDT:USDT", "EIGEN/USDT:USDT", "HBAR/USDT:USDT",
-    "VET/USDT:USDT", "NOT/USDT:USDT", "CATI/USDT:USDT",
+    "AVAX/USDT:USDT", "DOT/USDT:USDT", "LTC/USDT:USDT",
+    # Можно добавить остальные, но для демонстрации ограничимся 10
 ]
-
-TIMEFRAME_TA = "5m"
-TIMEFRAME_TREND = "1h"
-TIMEFRAME_4H = "4h"
-SCAN_INTERVAL = 120
-
-REAL_TRADING_ENABLED = False
-PAPER_TRADING_ENABLED = True
-PAPER_REPORT_INTERVAL = 3600          # часовая сводка
-INTERIM_INTERVAL = 900                # 15 минут для промежуточных итогов
-CSV_FILE = "paper_trades.csv"
-
-MIN_SCORE = 1
-ENTRY_CONFIRM_BARS = 0
-MA_CROSSOVER_ENABLED = True
-MA1_TYPE, MA2_TYPE = "EMA", "EMA"
-MA1_LENGTH, MA2_LENGTH = 21, 50
-
-# --- Стаканные сигналы ---
-ORDER_BOOK_DEPTH = 20
-WALL_THRESHOLD_VOL_RATIO = 3.0
-MIN_WALL_VOLUME_USDT = 500
-MAX_WALL_DISTANCE_PCT = 2.0
-IMBALANCE_RATIO_LONG = 1.5
-IMBALANCE_RATIO_SHORT = 1 / 1.5
-
-# --- TP/SL на основе ATR ---
-ATR_SL_MULT = 1.5
-ATR_TP_MULT = 3.0
-MIN_SL_PERCENT = 0.8
-MAX_SL_PERCENT = 2.0
-TP_PERCENT = 3.0
-
-# --- Частичный безубыток, трейлинг, фильтры ---
-PARTIAL_BE_ENABLED = True
-PARTIAL_BE_CLOSE_PCT = 50.0
-PARTIAL_BE_PROFIT = 0.2
-TRAILING_ATR_PERIOD = 14
-TRAILING_ATR_MULT = 2.0
-TRAILING_OFFSET_MULT = 1.5
-MIN_TRAILING_STEP = 0.4
-MIN_TRAILING_OFFSET = 0.6
-MIN_PROFIT_FOR_TRAIL = 1.0
-RR_EXIT_TRIGGER = 0.6
-SIGNAL_EXIT_ENABLED = True
-VOLUME_SPIKE_MULT = 5.0
-VOLUME_AVG_PERIOD = 20
-
-DAILY_LOSS_LIMIT_PCT = 3.0
-DAILY_LOSS_PAUSE_SEC = 10800
-SYMBOL_BLOCK_AFTER_TP = 90 * 60
-SYMBOL_BLOCK_AFTER_SL = 180 * 60
-SYMBOL_MAX_FAIL_ATTEMPTS = 3
-SYMBOL_BLOCK_AFTER_FAIL = 120 * 60
-SL_STREAK_LIMIT = 3
-SL_STREAK_PAUSE = 1800
-SL_STREAK_EXTRA_PAUSE = 300
-MIN_BALANCE = 5.0
-MAX_DRAWDOWN_PCT = 15.0
-TRADE_MAX_LIFETIME = 7200
-REPORT_INTERVAL = 1800
-BYBIT_FEE = 0.00055
-RISK_PCT = 0.8
-
-LEVERAGE_MIN = 3
-LEVERAGE_MAX = 5
-
-STATE_FILE = "state_bot_v10.7.json"
-TRADES_FILE = "trades_bot_v10.7.json"
+TIMEFRAME = "5m"          # тестируем на 5-минутках
+LIMIT = 1000              # количество свечей на символ (примерно 3.5 дня для 5m)
+SL_ATR_MULT = 1.5         # стоп-лосс в ATR
+TP_ATR_MULT = 3.0         # тейк-профит в ATR
+MAX_HOLD_BARS = 200       # максимальное время удержания позиции в барах
+INITIAL_CAPITAL = 1000    # начальный капитал в USDT (для расчёта процентов)
 
 # ============================================================
 #                      ЛОГИРОВАНИЕ
 # ============================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%d.%m.%Y %H:%M:%S",
-    handlers=[logging.StreamHandler(), logging.FileHandler("bot_v10.7.log", encoding="utf-8")],
-)
-log = logging.getLogger("WallScalper")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger(__name__)
 
 # ============================================================
-#                      БИРЖА
+#                      ЗАГРУЗКА ДАННЫХ
 # ============================================================
-exchange = ccxt.bybit({
-    "apiKey": os.getenv("BYBIT_API_KEY"),
-    "secret": os.getenv("BYBIT_API_SECRET"),
-    "enableRateLimit": True,
-    "options": {"defaultType": "linear"},
-})
+exchange = ccxt.bybit({"enableRateLimit": True, "options": {"defaultType": "linear"}})
 
-# ============================================================
-#                      СТАТИСТИКА
-# ============================================================
-stats = {
-    "запусков": 0, "сделок_всего": 0, "тейкпрофит": 0, "стоплосс": 0,
-    "таймаут": 0, "прибыль_usdt": 0.0, "убыток_usdt": 0.0,
-    "депозит_старт": 0.0, "баланс_начало_дня": 0.0, "дата_дня": "",
-    "старт_время": "", "последний_отчёт": 0.0, "sl_streak": 0,
-}
-
-# ============================================================
-#                 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ============================================================
-def safe_api(func, *a, retries=3, delay=1.0, **kw):
-    for attempt in range(retries):
-        try:
-            return func(*a, **kw)
-        except ccxt.RateLimitExceeded:
-            log.warning("Rate limit, пауза 5с"); time.sleep(5)
-        except ccxt.NetworkError as e:
-            log.warning(f"Сеть: {e}"); time.sleep(delay); delay *= 2
-        except Exception as e:
-            if attempt == retries-1: raise
-            time.sleep(delay); delay *= 2
-    return None
-
-def fetch_ohlcv(symbol, tf, limit=150):
-    try: return safe_api(exchange.fetch_ohlcv, symbol, tf, limit=limit) or []
-    except: return []
-
-def fetch_ticker(symbol):
-    try: return safe_api(exchange.fetch_ticker, symbol)
-    except: return None
-
-def fetch_positions(symbols=None):
+def fetch_ohlcv(symbol: str, timeframe: str = "5m", limit: int = 1000) -> pd.DataFrame:
     try:
-        if symbols: return safe_api(exchange.fetch_positions, symbols) or []
-        return safe_api(exchange.fetch_positions) or []
-    except: return []
-
-def get_balance(free=True):
-    try:
-        bal = exchange.fetch_balance({"type": "linear"})
-        return float(bal.get("USDT", {}).get("free" if free else "total", 0))
-    except: return 0.0
-
-def _ema(s, span): return s.ewm(span=span, adjust=False).mean()
-def _rma(s, span): return s.ewm(alpha=1/span, adjust=False).mean()
-
-def calc_atr(df, period=14):
-    hi, lo, pc = df["h"], df["l"], df["c"].shift(1)
-    tr = pd.concat([hi-lo, (hi-pc).abs(), (lo-pc).abs()], axis=1).max(axis=1)
-    return _rma(tr, period)
-
-def calc_ma(df, ma_type, length):
-    s = df["c"]
-    if ma_type.upper() == "EMA": return _ema(s, length)
-    elif ma_type.upper() == "SMA": return s.rolling(length).mean()
-    else: return _ema(s, length)
-
-def ma_cross_ok(df, side):
-    if not MA_CROSSOVER_ENABLED: return True
-    try:
-        ma1 = calc_ma(df, MA1_TYPE, MA1_LENGTH)
-        ma2 = calc_ma(df, MA2_TYPE, MA2_LENGTH)
-        return bool(ma1.iloc[-1] > ma2.iloc[-1]) if side == "long" else bool(ma1.iloc[-1] < ma2.iloc[-1])
-    except: return True
-
-def trend_4h(symbol, direction="bull"):
-    try:
-        raw = fetch_ohlcv(symbol, TIMEFRAME_4H, limit=60)
-        if len(raw) < 55: return False
-        df = pd.DataFrame(raw, columns=["ts","o","h","l","c","v"])
-        ema20 = _ema(df["c"], 20).iloc[-1]
-        ema50 = _ema(df["c"], 50).iloc[-1]
-        return ema20 > ema50 if direction == "bull" else ema20 < ema50
-    except: return False
-
-def volume_spike_guard(df):
-    try:
-        avg = df["v"].rolling(VOLUME_AVG_PERIOD).mean().iloc[-1]
-        return (df["v"].iloc[-1] / (avg+1e-10)) <= VOLUME_SPIKE_MULT
-    except: return True
-
-def choose_leverage(atr_pct):
-    if atr_pct > 1.5: return LEVERAGE_MIN
-    elif atr_pct > 0.8: return LEVERAGE_MIN + 1
-    else: return LEVERAGE_MAX
-
-# ============================================================
-#          ДЕТЕКТОР СТЕНЫ ЗАЯВОК
-# ============================================================
-def detect_wall_signal(symbol: str) -> Optional[Dict]:
-    try:
-        book = safe_api(exchange.fetch_order_book, symbol, ORDER_BOOK_DEPTH)
-        if not book: return None
-        bids = book["bids"]
-        asks = book["asks"]
-        if len(bids) < 5 or len(asks) < 5: return None
-
-        bid_volumes = [v for _, v in bids[1:]]
-        ask_volumes = [v for _, v in asks[1:]]
-        med_bid_vol = np.median(bid_volumes) if bid_volumes else 0
-        med_ask_vol = np.median(ask_volumes) if ask_volumes else 0
-
-        best_bid, best_bid_vol = bids[0]
-        best_ask, best_ask_vol = asks[0]
-
-        bid_wall_vol = best_bid_vol
-        bid_wall_price = best_bid
-        for price, vol in bids[:5]:
-            if vol >= WALL_THRESHOLD_VOL_RATIO * med_bid_vol and vol >= best_bid_vol * 0.8:
-                dist_pct = (best_bid - price) / best_bid * 100 if best_bid > 0 else 0
-                if dist_pct <= MAX_WALL_DISTANCE_PCT:
-                    bid_wall_vol = vol
-                    bid_wall_price = price
-                    break
-
-        ask_wall_vol = best_ask_vol
-        ask_wall_price = best_ask
-        for price, vol in asks[:5]:
-            if vol >= WALL_THRESHOLD_VOL_RATIO * med_ask_vol and vol >= best_ask_vol * 0.8:
-                dist_pct = (price - best_ask) / best_ask * 100 if best_ask > 0 else 0
-                if dist_pct <= MAX_WALL_DISTANCE_PCT:
-                    ask_wall_vol = vol
-                    ask_wall_price = price
-                    break
-
-        total_bid = sum(v for _, v in bids[:ORDER_BOOK_DEPTH])
-        total_ask = sum(v for _, v in asks[:ORDER_BOOK_DEPTH])
-        imbalance = total_bid / (total_ask + 1e-10)
-        spread_pct = (best_ask - best_bid) / best_bid * 100 if best_bid > 0 else 0
-
-        signal = None
-        wall_usdt = 0
-        if imbalance > IMBALANCE_RATIO_LONG and spread_pct < 1.0:
-            signal = "long"
-            wall_usdt = bid_wall_vol * bid_wall_price
-        elif imbalance < IMBALANCE_RATIO_SHORT and spread_pct < 1.0:
-            signal = "short"
-            wall_usdt = ask_wall_vol * ask_wall_price
-        else:
-            if bid_wall_vol * best_bid > MIN_WALL_VOLUME_USDT * 5 and imbalance > 1.2:
-                signal = "long"
-                wall_usdt = bid_wall_vol * best_bid
-            elif ask_wall_vol * best_ask > MIN_WALL_VOLUME_USDT * 5 and imbalance < 0.8:
-                signal = "short"
-                wall_usdt = ask_wall_vol * best_ask
-
-        if signal and wall_usdt >= MIN_WALL_VOLUME_USDT:
-            return {
-                "signal": signal,
-                "wall_usdt": wall_usdt,
-                "price": best_ask if signal == "long" else best_bid,
-                "spread_pct": spread_pct,
-                "imbalance": imbalance,
-            }
-        return None
+        data = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df.set_index("timestamp", inplace=True)
+        return df
     except Exception as e:
-        log.debug(f"Ошибка стакана {symbol}: {e}")
-        return None
+        log.error(f"Ошибка загрузки {symbol}: {e}")
+        return pd.DataFrame()
 
 # ============================================================
-#        БУМАЖНЫЙ ТРЕЙДЕР (с промежуточной сводкой)
+#                  БАЗОВЫЙ КЛАСС СТРАТЕГИИ
 # ============================================================
-class PaperTrader:
-    def __init__(self, csv_file):
-        self.positions: List[Dict] = []
-        self.closed_trades: List[Dict] = []
-        self.last_report_time = time.time()
-        self.total_signals = 0
-        self.total_tp = 0
-        self.total_sl = 0
-        self.total_timeout = 0
-        self.csv_file = csv_file
-        self.last_interim_time = time.time()
-        self._init_csv()
+class Strategy:
+    def __init__(self, name: str, signal_func: Callable):
+        self.name = name
+        self.signal_func = signal_func
 
-    def _init_csv(self):
-        if not os.path.exists(self.csv_file):
-            with open(self.csv_file, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "timestamp", "symbol", "signal", "price", "wall_usdt", "imbalance", "spread_pct",
-                    "atr_pct", "trend_4h", "ma_cross_ok", "volume_ratio", "rr",
-                    "best_bid_vol", "best_ask_vol", "result", "pnl_pct", "duration_min"
-                ])
+    def get_signals(self, df: pd.DataFrame) -> pd.Series:
+        """Возвращает серию сигналов: 1 = long, -1 = short, 0 = нет."""
+        return self.signal_func(df)
 
-    def add_signal(self, symbol, signal_info, atr, sl_price, tp_price, current_price,
-                   trend_4h_val, ma_ok, volume_ratio, rr):
-        pos = {
-            "symbol": symbol,
-            "side": signal_info["signal"],
-            "entry": current_price,
-            "sl": sl_price,
-            "tp": tp_price,
-            "atr": atr,
-            "time": time.time(),
-            "signal_info": signal_info,
-            "trend_4h": trend_4h_val,
-            "ma_cross_ok": ma_ok,
-            "volume_ratio": volume_ratio,
-            "rr": rr,
-            "best_bid_vol": 0,
-            "best_ask_vol": 0,
-        }
-        self.positions.append(pos)
-        self.total_signals += 1
-        log.info(f"📝 Бумажный вход: {signal_info['signal'].upper()} {symbol} цена={current_price:.6f} wall={signal_info['wall_usdt']:.0f}")
-
-    def update(self):
-        now = time.time()
-        closed = []
-        for pos in self.positions:
-            symbol = pos["symbol"]
-            ticker = fetch_ticker(symbol)
-            if not ticker: continue
-            cur = float(ticker["last"])
-            deadline = pos["time"] + TRADE_MAX_LIFETIME
-
-            result = None
-            if now >= deadline:
-                result = "timeout"
-            elif pos["side"] == "long":
-                if cur >= pos["tp"]: result = "tp"
-                elif cur <= pos["sl"]: result = "sl"
-            else:
-                if cur <= pos["tp"]: result = "tp"
-                elif cur >= pos["sl"]: result = "sl"
-
-            if result:
-                pnl_pct = (cur/pos["entry"] - 1)*100 if pos["side"]=="long" else (pos["entry"]/cur - 1)*100
-                trade = {
-                    "timestamp": datetime.now().isoformat(),
-                    "symbol": pos["symbol"],
-                    "signal": pos["side"],
-                    "price": pos["entry"],
-                    "wall_usdt": pos["signal_info"]["wall_usdt"],
-                    "imbalance": pos["signal_info"]["imbalance"],
-                    "spread_pct": pos["signal_info"]["spread_pct"],
-                    "atr_pct": (pos["atr"] / pos["entry"]) * 100,
-                    "trend_4h": pos["trend_4h"],
-                    "ma_cross_ok": pos["ma_cross_ok"],
-                    "volume_ratio": pos["volume_ratio"],
-                    "rr": pos["rr"],
-                    "best_bid_vol": pos["best_bid_vol"],
-                    "best_ask_vol": pos["best_ask_vol"],
-                    "result": result,
-                    "pnl_pct": pnl_pct,
-                    "duration_min": (now - pos["time"]) / 60,
-                    "close_time": now,
-                }
-                self.closed_trades.append(trade)
-                # Запись в CSV
-                with open(self.csv_file, 'a', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow([
-                        trade["timestamp"], trade["symbol"], trade["signal"], trade["price"],
-                        trade["wall_usdt"], trade["imbalance"], trade["spread_pct"],
-                        trade["atr_pct"], trade["trend_4h"], trade["ma_cross_ok"],
-                        trade["volume_ratio"], trade["rr"], trade["best_bid_vol"], trade["best_ask_vol"],
-                        trade["result"], trade["pnl_pct"], trade["duration_min"]
-                    ])
-                if result == "tp": self.total_tp += 1
-                elif result == "sl": self.total_sl += 1
-                else: self.total_timeout += 1
-                closed.append(pos)
-
-        for pos in closed:
-            self.positions.remove(pos)
-
-    def print_interim_summary(self):
-        """Промежуточный итог каждые 15 минут."""
-        now = time.time()
-        total_closed = len(self.closed_trades)
-        total_open = len(self.positions)
-        if total_closed > 0:
-            winrate = self.total_tp / total_closed * 100
-            avg_pnl = np.mean([t["pnl_pct"] for t in self.closed_trades])
+# ============================================================
+#                ФУНКЦИИ ИНДИКАТОРОВ
+# ============================================================
+def ema(series, span): return series.ewm(span=span, adjust=False).mean()
+def sma(series, span): return series.rolling(span).mean()
+def rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(lower=0)
+    avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+def macd(series, fast=12, slow=26, signal=9):
+    ml = ema(series, fast) - ema(series, slow)
+    sl = ema(ml, signal)
+    return ml, sl, ml - sl
+def atr(df, period=14):
+    high, low, close = df["high"], df["low"], df["close"].shift(1)
+    tr = pd.concat([high - low, (high - close).abs(), (low - close).abs()], axis=1).max(axis=1)
+    return tr.ewm(alpha=1/period, adjust=False).mean()
+def bollinger_bands(series, period=20, std=2):
+    mb = sma(series, period)
+    std_dev = series.rolling(period).std()
+    return mb + std*std_dev, mb, mb - std*std_dev
+def supertrend(df, period=10, mult=3):
+    atr_val = atr(df, period)
+    hl2 = (df["high"] + df["low"]) / 2
+    up = hl2 - mult * atr_val
+    down = hl2 + mult * atr_val
+    trend = pd.Series(0, index=df.index)
+    for i in range(1, len(df)):
+        if df["close"].iloc[i] > trend.iloc[i-1]:
+            trend.iloc[i] = max(up.iloc[i], trend.iloc[i-1])
         else:
-            winrate = 0.0
-            avg_pnl = 0.0
-
-        log.info("=" * 50)
-        log.info("📊 ПРОМЕЖУТОЧНЫЙ ИТОГ (15 мин)")
-        log.info(f"   Сигналов сгенерировано: {self.total_signals}")
-        log.info(f"   Открыто сейчас: {total_open}")
-        log.info(f"   Закрыто сделок: {total_closed} (TP={self.total_tp}, SL={self.total_sl}, Timeout={self.total_timeout})")
-        log.info(f"   Текущий WinRate: {winrate:.1f}%")
-        log.info(f"   Средний P&L: {avg_pnl:+.2f}%")
-        log.info("=" * 50)
-        self.last_interim_time = now
-
-    def generate_hourly_report(self):
-        now = time.time()
-        recent_trades = [t for t in self.closed_trades if t.get("close_time", 0) >= now - 3600]
-        total_hour = len(recent_trades)
-        wins_hour = sum(1 for t in recent_trades if t["result"] == "tp") if total_hour > 0 else 0
-        avg_pnl_hour = np.mean([t["pnl_pct"] for t in recent_trades]) if total_hour > 0 else 0.0
-
-        total_all = len(self.closed_trades)
-        winrate_all = self.total_tp / total_all * 100 if total_all > 0 else 0.0
-        avg_pnl_all = np.mean([t["pnl_pct"] for t in self.closed_trades]) if total_all > 0 else 0.0
-
-        log.info("=" * 60)
-        log.info("📋 ЧАСОВАЯ СВОДКА")
-        log.info(f"   Открытых позиций сейчас: {len(self.positions)}")
-        log.info(f"   За последний час: сделок {total_hour}, TP {wins_hour}, средний P&L {avg_pnl_hour:+.2f}%")
-        log.info(f"   За всё время: сделок {total_all}, TP {self.total_tp}, SL {self.total_sl}, Timeout {self.total_timeout}")
-        log.info(f"   WinRate: {winrate_all:.1f}% | Средний P&L: {avg_pnl_all:+.2f}%")
-        log.info(f"   Данные сохранены в {self.csv_file}")
-        log.info("=" * 60)
-        self.last_report_time = now
+            trend.iloc[i] = min(down.iloc[i], trend.iloc[i-1])
+    return trend
+def stochastic(df, k_period=14, d_period=3):
+    low_min = df["low"].rolling(k_period).min()
+    high_max = df["high"].rolling(k_period).max()
+    k = 100 * (df["close"] - low_min) / (high_max - low_min + 1e-10)
+    d = k.rolling(d_period).mean()
+    return k, d
+def adx(df, period=14):
+    atr_val = atr(df, period)
+    high, low, close = df["high"], df["low"], df["close"]
+    plus_dm = high.diff().clip(lower=0)
+    minus_dm = -low.diff().clip(upper=0)
+    plus_di = 100 * (plus_dm.ewm(alpha=1/period, adjust=False).mean() / atr_val.replace(0, np.nan))
+    minus_di = 100 * (minus_dm.ewm(alpha=1/period, adjust=False).mean() / atr_val.replace(0, np.nan))
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)) * 100
+    adx_val = dx.ewm(alpha=1/period, adjust=False).mean()
+    return adx_val, plus_di, minus_di
+def cci(df, period=20):
+    tp = (df["high"] + df["low"] + df["close"]) / 3
+    sma_tp = sma(tp, period)
+    mad = tp.rolling(period).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
+    return (tp - sma_tp) / (0.015 * mad)
+def mfi(df, period=14):
+    tp = (df["high"] + df["low"] + df["close"]) / 3
+    money_flow = tp * df["volume"]
+    positive_flow = money_flow.where(tp > tp.shift(1), 0)
+    negative_flow = money_flow.where(tp < tp.shift(1), 0)
+    pos_sum = positive_flow.rolling(period).sum()
+    neg_sum = negative_flow.rolling(period).sum()
+    return 100 - (100 / (1 + pos_sum / neg_sum.replace(0, np.nan)))
+def obv(df):
+    obv = (df["volume"] * (df["close"].diff().apply(lambda x: 1 if x > 0 else -1 if x < 0 else 0))).cumsum()
+    return obv
+def aroon(df, period=25):
+    high_max = df["high"].rolling(period).apply(lambda x: x.argmax(), raw=True)
+    low_min = df["low"].rolling(period).apply(lambda x: x.argmin(), raw=True)
+    aroon_up = 100 * (period - high_max) / period
+    aroon_down = 100 * (period - low_min) / period
+    return aroon_up, aroon_down
+def hull_ma(series, period=55):
+    half = period // 2
+    sqrt = int(np.sqrt(period))
+    wma1 = 2 * ema(series, half) - ema(series, period)
+    hma = ema(wma1, sqrt)
+    return hma
+def donchian(df, period=20):
+    upper = df["high"].rolling(period).max()
+    lower = df["low"].rolling(period).min()
+    return upper, lower
+def keltner(df, period=20, atr_mult=1.5):
+    typical = (df["high"] + df["low"] + df["close"]) / 3
+    mb = ema(typical, period)
+    atr_val = atr(df, period)
+    upper = mb + atr_mult * atr_val
+    lower = mb - atr_mult * atr_val
+    return upper, mb, lower
+def parabolic_sar(df, acceleration=0.02, maximum=0.2):
+    high = df["high"].values
+    low = df["low"].values
+    close = df["close"].values
+    sar = np.zeros(len(df))
+    sar[0] = low[0]
+    ep = high[0]
+    af = acceleration
+    trend = 1
+    for i in range(1, len(df)):
+        sar[i] = sar[i-1] + af * (ep - sar[i-1])
+        if trend == 1:
+            if low[i] < sar[i]:
+                trend = -1
+                sar[i] = ep
+                ep = low[i]
+                af = acceleration
+            else:
+                if high[i] > ep:
+                    ep = high[i]
+                    af = min(af + acceleration, maximum)
+                if low[i-1] < sar[i]:
+                    sar[i] = low[i-1]
+                if low[i-2] < sar[i]:
+                    sar[i] = low[i-2]
+        else:
+            if high[i] > sar[i]:
+                trend = 1
+                sar[i] = ep
+                ep = high[i]
+                af = acceleration
+            else:
+                if low[i] < ep:
+                    ep = low[i]
+                    af = min(af + acceleration, maximum)
+                if high[i-1] > sar[i]:
+                    sar[i] = high[i-1]
+                if high[i-2] > sar[i]:
+                    sar[i] = high[i-2]
+    return pd.Series(sar, index=df.index)
 
 # ============================================================
-#                    ГЛАВНЫЙ ЦИКЛ
+#        ФУНКЦИИ ГЕНЕРАЦИИ СИГНАЛОВ (30+ СТРАТЕГИЙ)
+# ============================================================
+
+def ema_cross_9_21(df):
+    e9 = ema(df["close"], 9)
+    e21 = ema(df["close"], 21)
+    signal = pd.Series(0, index=df.index)
+    signal[(e9 > e21) & (e9.shift(1) <= e21.shift(1))] = 1
+    signal[(e9 < e21) & (e9.shift(1) >= e21.shift(1))] = -1
+    return signal
+
+def ema_cross_21_50(df):
+    e21 = ema(df["close"], 21)
+    e50 = ema(df["close"], 50)
+    signal = pd.Series(0, index=df.index)
+    signal[(e21 > e50) & (e21.shift(1) <= e50.shift(1))] = 1
+    signal[(e21 < e50) & (e21.shift(1) >= e50.shift(1))] = -1
+    return signal
+
+def sma_cross_50_200(df):
+    s50 = sma(df["close"], 50)
+    s200 = sma(df["close"], 200)
+    signal = pd.Series(0, index=df.index)
+    signal[(s50 > s200) & (s50.shift(1) <= s200.shift(1))] = 1
+    signal[(s50 < s200) & (s50.shift(1) >= s200.shift(1))] = -1
+    return signal
+
+def macd_cross(df):
+    ml, sl, _ = macd(df["close"])
+    signal = pd.Series(0, index=df.index)
+    signal[(ml > sl) & (ml.shift(1) <= sl.shift(1))] = 1
+    signal[(ml < sl) & (ml.shift(1) >= sl.shift(1))] = -1
+    return signal
+
+def rsi_oversold_overbought(df):
+    r = rsi(df["close"])
+    signal = pd.Series(0, index=df.index)
+    signal[r < 30] = 1
+    signal[r > 70] = -1
+    return signal
+
+def rsi_ema_filter(df):
+    r = rsi(df["close"])
+    e200 = ema(df["close"], 200)
+    signal = pd.Series(0, index=df.index)
+    signal[(r < 30) & (df["close"] > e200)] = 1
+    signal[(r > 70) & (df["close"] < e200)] = -1
+    return signal
+
+def bollinger_reversal(df):
+    upper, mid, lower = bollinger_bands(df["close"])
+    signal = pd.Series(0, index=df.index)
+    signal[df["close"] < lower] = 1
+    signal[df["close"] > upper] = -1
+    return signal
+
+def bollinger_rsi(df):
+    upper, mid, lower = bollinger_bands(df["close"])
+    r = rsi(df["close"])
+    signal = pd.Series(0, index=df.index)
+    signal[(df["close"] < lower) & (r < 30)] = 1
+    signal[(df["close"] > upper) & (r > 70)] = -1
+    return signal
+
+def supertrend_signal(df):
+    st = supertrend(df)
+    signal = pd.Series(0, index=df.index)
+    signal[(st > st.shift(1)) & (df["close"] > st)] = 1
+    signal[(st < st.shift(1)) & (df["close"] < st)] = -1
+    return signal
+
+def supertrend_rsi(df):
+    st = supertrend(df)
+    r = rsi(df["close"])
+    signal = pd.Series(0, index=df.index)
+    signal[(st > st.shift(1)) & (df["close"] > st) & (r < 50)] = 1
+    signal[(st < st.shift(1)) & (df["close"] < st) & (r > 50)] = -1
+    return signal
+
+def donchian_breakout(df):
+    upper, lower = donchian(df)
+    signal = pd.Series(0, index=df.index)
+    signal[df["close"] > upper.shift(1)] = 1
+    signal[df["close"] < lower.shift(1)] = -1
+    return signal
+
+def keltner_reversal(df):
+    upper, mid, lower = keltner(df)
+    signal = pd.Series(0, index=df.index)
+    signal[df["close"] < lower] = 1
+    signal[df["close"] > upper] = -1
+    return signal
+
+def stochastic_signal(df):
+    k, d = stochastic(df)
+    signal = pd.Series(0, index=df.index)
+    signal[(k < 20) & (k > d)] = 1
+    signal[(k > 80) & (k < d)] = -1
+    return signal
+
+def stochastic_trend(df):
+    k, d = stochastic(df)
+    e50 = ema(df["close"], 50)
+    signal = pd.Series(0, index=df.index)
+    signal[(k < 20) & (k > d) & (df["close"] > e50)] = 1
+    signal[(k > 80) & (k < d) & (df["close"] < e50)] = -1
+    return signal
+
+def adx_signal(df):
+    adx_val, plus_di, minus_di = adx(df)
+    signal = pd.Series(0, index=df.index)
+    signal[(adx_val > 25) & (plus_di > minus_di)] = 1
+    signal[(adx_val > 25) & (minus_di > plus_di)] = -1
+    return signal
+
+def ichimoku(df):
+    high9 = df["high"].rolling(9).max()
+    low9 = df["low"].rolling(9).min()
+    tenkan = (high9 + low9) / 2
+    high26 = df["high"].rolling(26).max()
+    low26 = df["low"].rolling(26).min()
+    kijun = (high26 + low26) / 2
+    signal = pd.Series(0, index=df.index)
+    signal[(tenkan > kijun) & (df["close"] > kijun)] = 1
+    signal[(tenkan < kijun) & (df["close"] < kijun)] = -1
+    return signal
+
+def parabolic_sar_signal(df):
+    sar = parabolic_sar(df)
+    signal = pd.Series(0, index=df.index)
+    signal[df["close"] > sar] = 1
+    signal[df["close"] < sar] = -1
+    return signal
+
+def cci_signal(df):
+    c = cci(df)
+    signal = pd.Series(0, index=df.index)
+    signal[c > 100] = -1
+    signal[c < -100] = 1
+    return signal
+
+def mfi_signal(df):
+    m = mfi(df)
+    signal = pd.Series(0, index=df.index)
+    signal[m < 20] = 1
+    signal[m > 80] = -1
+    return signal
+
+def obv_breakout(df):
+    o = obv(df)
+    signal = pd.Series(0, index=df.index)
+    signal[o > o.rolling(20).mean()] = 1
+    signal[o < o.rolling(20).mean()] = -1
+    return signal
+
+def aroon_signal(df):
+    up, down = aroon(df)
+    signal = pd.Series(0, index=df.index)
+    signal[(up > 70) & (down < 30)] = 1
+    signal[(down > 70) & (up < 30)] = -1
+    return signal
+
+def hull_ma_signal(df):
+    hma = hull_ma(df["close"])
+    signal = pd.Series(0, index=df.index)
+    signal[(hma > hma.shift(1))] = 1
+    signal[(hma < hma.shift(1))] = -1
+    return signal
+
+def volume_reversal(df):
+    avg_vol = df["volume"].rolling(20).mean()
+    body = abs(df["close"] - df["open"])
+    signal = pd.Series(0, index=df.index)
+    signal[(df["volume"] > 2 * avg_vol) & (df["close"] > df["open"]) & (body > body.shift(1))] = 1
+    signal[(df["volume"] > 2 * avg_vol) & (df["close"] < df["open"]) & (body > body.shift(1))] = -1
+    return signal
+
+def engulfing(df):
+    open, high, low, close = df["open"], df["high"], df["low"], df["close"]
+    signal = pd.Series(0, index=df.index)
+    bull_eng = (close > open) & (open.shift(1) > close.shift(1)) & (close > open.shift(1)) & (open < close.shift(1))
+    bear_eng = (close < open) & (open.shift(1) < close.shift(1)) & (close < open.shift(1)) & (open > close.shift(1))
+    signal[bull_eng] = 1
+    signal[bear_eng] = -1
+    return signal
+
+def pin_bar(df):
+    body = abs(df["close"] - df["open"])
+    upper_shadow = df["high"] - df[["open", "close"]].max(axis=1)
+    lower_shadow = df[["open", "close"]].min(axis=1) - df["low"]
+    signal = pd.Series(0, index=df.index)
+    signal[(lower_shadow > 2 * body) & (upper_shadow < 0.1 * body)] = 1
+    signal[(upper_shadow > 2 * body) & (lower_shadow < 0.1 * body)] = -1
+    return signal
+
+def fractal_breakout(df, period=5):
+    high_fractal = df["high"].rolling(2*period+1, center=True).apply(
+        lambda x: x[period] if (x[period] == x.max()) and (np.sum(x == x.max()) == 1) else np.nan, raw=True)
+    low_fractal = df["low"].rolling(2*period+1, center=True).apply(
+        lambda x: x[period] if (x[period] == x.min()) and (np.sum(x == x.min()) == 1) else np.nan, raw=True)
+    signal = pd.Series(0, index=df.index)
+    signal[df["high"] > high_fractal.shift(1)] = 1
+    signal[df["low"] < low_fractal.shift(1)] = -1
+    return signal
+
+def heikin_ashi(df):
+    ha_close = (df["open"] + df["high"] + df["low"] + df["close"]) / 4
+    ha_open = pd.Series(0, index=df.index)
+    ha_open.iloc[0] = (df["open"].iloc[0] + df["close"].iloc[0]) / 2
+    for i in range(1, len(df)):
+        ha_open.iloc[i] = (ha_open.iloc[i-1] + ha_close.iloc[i-1]) / 2
+    ha_color = ha_close > ha_open
+    signal = pd.Series(0, index=df.index)
+    signal[(ha_color) & (~ha_color.shift(1))] = 1
+    signal[(~ha_color) & (ha_color.shift(1))] = -1
+    return signal
+
+def range_filter_signal(df, period=100, qty=2.5):
+    close = df["close"]
+    atr_val = atr(df, period)
+    rng = qty * atr_val
+    filt = close.copy()
+    for i in range(1, len(close)):
+        c, r, pf = close.iloc[i], rng.iloc[i], filt.iloc[i-1]
+        if c - r > pf: filt.iloc[i] = c - r
+        elif c + r < pf: filt.iloc[i] = c + r
+        else: filt.iloc[i] = pf
+    signal = pd.Series(0, index=df.index)
+    signal[(close > filt) & (close.shift(1) <= filt.shift(1))] = 1
+    signal[(close < filt) & (close.shift(1) >= filt.shift(1))] = -1
+    return signal
+
+def vwap_reversal(df):
+    typical = (df["high"] + df["low"] + df["close"]) / 3
+    cum_vol = df["volume"].cumsum()
+    cum_vp = (typical * df["volume"]).cumsum()
+    vwap = cum_vp / cum_vol
+    std = (typical - vwap).rolling(100).std()
+    upper = vwap + 2 * std
+    lower = vwap - 2 * std
+    signal = pd.Series(0, index=df.index)
+    signal[df["close"] < lower] = 1
+    signal[df["close"] > upper] = -1
+    return signal
+
+def zscore_reversal(df, period=20):
+    sma20 = sma(df["close"], period)
+    std20 = df["close"].rolling(period).std()
+    z = (df["close"] - sma20) / std20
+    signal = pd.Series(0, index=df.index)
+    signal[z < -2] = 1
+    signal[z > 2] = -1
+    return signal
+
+def momentum(df, period=10):
+    mom = df["close"].pct_change(period)
+    signal = pd.Series(0, index=df.index)
+    signal[mom > 0.02] = 1
+    signal[mom < -0.02] = -1
+    return signal
+
+# Соберём все стратегии в список
+strategies = [
+    Strategy("EMA Cross 9/21", ema_cross_9_21),
+    Strategy("EMA Cross 21/50", ema_cross_21_50),
+    Strategy("SMA Cross 50/200", sma_cross_50_200),
+    Strategy("MACD Cross", macd_cross),
+    Strategy("RSI 30/70", rsi_oversold_overbought),
+    Strategy("RSI + EMA200", rsi_ema_filter),
+    Strategy("Bollinger Reversal", bollinger_reversal),
+    Strategy("Bollinger + RSI", bollinger_rsi),
+    Strategy("Supertrend", supertrend_signal),
+    Strategy("Supertrend + RSI", supertrend_rsi),
+    Strategy("Donchian Breakout", donchian_breakout),
+    Strategy("Keltner Reversal", keltner_reversal),
+    Strategy("Stochastic", stochastic_signal),
+    Strategy("Stochastic + Trend", stochastic_trend),
+    Strategy("ADX Trend", adx_signal),
+    Strategy("Ichimoku", ichimoku),
+    Strategy("Parabolic SAR", parabolic_sar_signal),
+    Strategy("CCI", cci_signal),
+    Strategy("MFI", mfi_signal),
+    Strategy("OBV Breakout", obv_breakout),
+    Strategy("Aroon", aroon_signal),
+    Strategy("Hull MA", hull_ma_signal),
+    Strategy("Volume Reversal", volume_reversal),
+    Strategy("Engulfing", engulfing),
+    Strategy("Pin Bar", pin_bar),
+    Strategy("Fractal Breakout", fractal_breakout),
+    Strategy("Heikin-Ashi", heikin_ashi),
+    Strategy("Range Filter", range_filter_signal),
+    Strategy("VWAP Reversal", vwap_reversal),
+    Strategy("Z-Score Reversal", zscore_reversal),
+    Strategy("Momentum", momentum),
+]
+
+# ============================================================
+#                 ФУНКЦИЯ БЭКТЕСТА
+# ============================================================
+def backtest_strategy(df: pd.DataFrame, signals: pd.Series, sl_mult, tp_mult, max_bars) -> Dict:
+    """Возвращает словарь с метриками."""
+    capital = INITIAL_CAPITAL
+    in_position = False
+    side = 0
+    entry_price = 0
+    entry_bar = 0
+    stop_loss = 0
+    take_profit = 0
+    trades = []
+    equity_curve = [capital]
+    bars_since_entry = 0
+
+    for i in range(1, len(df)):
+        if in_position:
+            bars_since_entry += 1
+            cur_price = df["close"].iloc[i]
+            # Проверка SL/TP
+            if side == 1:
+                if cur_price <= stop_loss or cur_price >= take_profit or bars_since_entry >= max_bars:
+                    exit_price = cur_price
+                    pnl = (exit_price - entry_price) / entry_price * 100
+                    capital += capital * (pnl / 100)  # упрощённо: процент от капитала
+                    trades.append(pnl)
+                    in_position = False
+            else:
+                if cur_price >= stop_loss or cur_price <= take_profit or bars_since_entry >= max_bars:
+                    exit_price = cur_price
+                    pnl = (entry_price - exit_price) / entry_price * 100
+                    capital += capital * (pnl / 100)
+                    trades.append(pnl)
+                    in_position = False
+        else:
+            sig = signals.iloc[i]
+            if sig != 0 and not pd.isna(sig):
+                in_position = True
+                side = sig
+                entry_price = df["close"].iloc[i]
+                entry_bar = i
+                bars_since_entry = 0
+                atr_val = atr(df).iloc[i]
+                if side == 1:
+                    stop_loss = entry_price - sl_mult * atr_val
+                    take_profit = entry_price + tp_mult * atr_val
+                else:
+                    stop_loss = entry_price + sl_mult * atr_val
+                    take_profit = entry_price - tp_mult * atr_val
+        equity_curve.append(capital)
+
+    total_trades = len(trades)
+    if total_trades == 0:
+        return {"strategy": "", "trades": 0, "winrate": 0, "avg_pnl": 0, "total_pnl_pct": 0, "max_dd": 0}
+
+    wins = sum(1 for p in trades if p > 0)
+    winrate = wins / total_trades * 100
+    avg_pnl = np.mean(trades)
+    total_pnl_pct = (capital - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
+    equity_series = pd.Series(equity_curve)
+    max_dd = (equity_series.cummax() - equity_series).max() / equity_series.cummax().max() * 100
+
+    return {
+        "trades": total_trades,
+        "winrate": winrate,
+        "avg_pnl": avg_pnl,
+        "total_pnl_pct": total_pnl_pct,
+        "max_dd": max_dd,
+    }
+
+# ============================================================
+#                    ЗАПУСК ТЕСТИРОВАНИЯ
 # ============================================================
 def main():
-    global stats
-    if not os.getenv("BYBIT_API_KEY"):
-        log.error("Нет API ключей")
+    log.info("Загрузка исторических данных...")
+    all_data = {}
+    for sym in SYMBOLS:
+        df = fetch_ohlcv(sym, TIMEFRAME, LIMIT)
+        if not df.empty:
+            all_data[sym] = df
+            log.info(f"{sym}: {len(df)} свечей")
+        else:
+            log.warning(f"{sym} нет данных, пропускаем")
+
+    if not all_data:
+        log.error("Нет данных для тестирования")
         return
 
-    stats["депозит_старт"] = get_balance(free=False)
-    stats["старт_время"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-    log.info(f"=== СТАКАННЫЙ БОТ v10.7 ===")
-    log.info(f"Реальная торговля: {'ВКЛ' if REAL_TRADING_ENABLED else 'ВЫКЛ'}")
-    log.info(f"Депозит: {stats['депозит_старт']:.2f} USDT")
+    log.info(f"Начинаем тестирование {len(strategies)} стратегий на {len(all_data)} монетах...")
 
-    paper_trader = PaperTrader(CSV_FILE) if PAPER_TRADING_ENABLED else None
+    results = []
+    for strat in strategies:
+        total_trades = 0
+        total_wins = 0
+        total_pnl = []
+        combined_equity = []
+        for sym, df in all_data.items():
+            try:
+                signals = strat.get_signals(df)
+                res = backtest_strategy(df, signals, SL_ATR_MULT, TP_ATR_MULT, MAX_HOLD_BARS)
+                if res["trades"] > 0:
+                    total_trades += res["trades"]
+                    total_wins += res["trades"] * res["winrate"] / 100
+                    total_pnl.extend([res["avg_pnl"]] * res["trades"])  # упрощённо для среднего
+            except Exception as e:
+                log.error(f"Ошибка в стратегии {strat.name} на {sym}: {e}")
+        if total_trades == 0:
+            results.append({
+                "Стратегия": strat.name,
+                "Сделок": 0,
+                "WinRate": 0,
+                "Средний P&L %": 0,
+                "Общий P&L %": 0,
+                "Max DD %": 0,
+            })
+            continue
+        avg_pnl_all = np.mean(total_pnl) if total_pnl else 0
+        overall_pnl = (np.prod([1 + p/100 for p in total_pnl]) - 1) * 100 if total_pnl else 0  # симуляция капитала
+        # Max DD рассчитываем по всем сделкам как по последовательности доходностей
+        eq = 1000
+        eq_curve = [eq]
+        for p in total_pnl:
+            eq *= (1 + p/100)
+            eq_curve.append(eq)
+        eq_series = pd.Series(eq_curve)
+        max_dd = (eq_series.cummax() - eq_series).max() / eq_series.cummax().max() * 100
+        results.append({
+            "Стратегия": strat.name,
+            "Сделок": total_trades,
+            "WinRate": round((total_wins / total_trades) * 100, 1) if total_trades else 0,
+            "Средний P&L %": round(avg_pnl_all, 2),
+            "Общий P&L %": round(overall_pnl, 2),
+            "Max DD %": round(max_dd, 2),
+        })
 
-    # Подхват реальных позиций (если включена торговля)
-    if REAL_TRADING_ENABLED:
-        existing = [p for p in fetch_positions() if float(p.get("contracts",0))>0]
-        if existing:
-            log.info(f"Найдены открытые позиции: {[(p['symbol'], p['side']) for p in existing]}")
-            # handle_existing_position можно оставить как раньше, но для бумажного режима не нужно
-            log.info("Реальная торговля активна – подхват позиций выполнен (не реализован здесь для краткости)")
+    # Сортировка по общему P&L
+    results.sort(key=lambda x: x["Общий P&L %"], reverse=True)
 
-    заблокированные: Dict[str, float] = {}
-    fail_attempts: Dict[str, int] = {}
-
-    while True:
-        try:
-            now = time.time()
-            # Обновление бумажного трейдера
-            if paper_trader:
-                paper_trader.update()
-                # Промежуточный итог каждые 15 минут
-                if now - paper_trader.last_interim_time >= INTERIM_INTERVAL:
-                    paper_trader.print_interim_summary()
-                if now - paper_trader.last_report_time >= PAPER_REPORT_INTERVAL:
-                    paper_trader.generate_hourly_report()
-
-            # Сканирование
-            log.info("── Сканирование стаканов ──")
-            signals = []
-            for sym in SYMBOLS:
-                if sym in заблокированные and time.time() < заблокированные[sym]:
-                    continue
-                sig = detect_wall_signal(sym)
-                if sig:
-                    # Фильтр тренда 4h
-                    if sig["signal"] == "long" and not trend_4h(sym, "bull"): continue
-                    if sig["signal"] == "short" and not trend_4h(sym, "bear"): continue
-                    df_ta = pd.DataFrame(fetch_ohlcv(sym, TIMEFRAME_TA, limit=20), columns=["ts","o","h","l","c","v"])
-                    ma_ok = ma_cross_ok(df_ta, sig["signal"]) if len(df_ta) >= 5 else True
-                    signals.append((sym, sig, ma_ok))
-
-            log.info(f"Найдено {len(signals)} сигналов после фильтра тренда")
-
-            # Бумажные входы по каждому сигналу
-            for sym, sig, ma_ok in signals:
-                df_ta = pd.DataFrame(fetch_ohlcv(sym, TIMEFRAME_TA, limit=50), columns=["ts","o","h","l","c","v"])
-                atr_val = calc_atr(df_ta, 14).iloc[-1] if len(df_ta) > 14 else sig["price"] * 0.01
-                price = sig["price"]
-                sl_dist = atr_val * ATR_SL_MULT
-                tp_dist = atr_val * ATR_TP_MULT
-                if sig["signal"] == "long":
-                    sl = price - sl_dist
-                    tp = price + tp_dist
-                else:
-                    sl = price + sl_dist
-                    tp = price - tp_dist
-
-                if sig["signal"] == "long":
-                    sl = max(price * (1 - MAX_SL_PERCENT/100), min(price * (1 - MIN_SL_PERCENT/100), sl))
-                    tp = max(price * (1 + TP_PERCENT/100), tp)
-                else:
-                    sl = min(price * (1 + MAX_SL_PERCENT/100), max(price * (1 + MIN_SL_PERCENT/100), sl))
-                    tp = min(price * (1 - TP_PERCENT/100), tp)
-
-                rr = abs(tp - price) / abs(sl - price) if abs(price - sl) > 0 else 0
-                current_price = float(fetch_ticker(sym)["last"]) if fetch_ticker(sym) else price
-                trend_val = "bull" if trend_4h(sym, "bull") else ("bear" if trend_4h(sym, "bear") else "neutral")
-                volume_ratio = df_ta["v"].iloc[-1] / (df_ta["v"].tail(20).mean() + 1e-10) if len(df_ta) >= 20 else 0
-
-                paper_trader.add_signal(
-                    symbol=sym,
-                    signal_info=sig,
-                    atr=atr_val,
-                    sl_price=sl,
-                    tp_price=tp,
-                    current_price=current_price,
-                    trend_4h_val=trend_val,
-                    ma_ok=ma_ok,
-                    volume_ratio=volume_ratio,
-                    rr=rr
-                )
-
-            time.sleep(SCAN_INTERVAL)
-
-        except Exception as e:
-            log.error(f"Ошибка в цикле: {e}", exc_info=True)
-            time.sleep(60)
+    # Вывод таблицы
+    print("\n" + "="*90)
+    print(f"{'Стратегия':<25} {'Сделок':>6} {'WinRate%':>9} {'Avg P&L%':>10} {'Total P&L%':>11} {'MaxDD%':>8}")
+    print("-"*90)
+    for r in results:
+        print(f"{r['Стратегия']:<25} {r['Сделок']:>6} {r['WinRate']:>8.1f} {r['Средний P&L %']:>9.2f} {r['Общий P&L %']:>10.2f} {r['Max DD %']:>7.2f}")
+    print("="*90)
 
 if __name__ == "__main__":
     main()
