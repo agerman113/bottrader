@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-AGGRESSIVE MULTI-STRATEGY SCALPER v10.6
+AGGRESSIVE MULTI-STRATEGY SCALPER v10.7
 =======================================
-- Только мем-койны и альты.
 - Сигнал открывается, если минимум 2 стратегии дают одинаковое направление.
+- ДОБАВЛЕН ФИЛЬТР ОБЪЁМА: текущий объём > 1.5 * средний объём за 20 свечей.
 - Плечо 20x, фиксированная маржа 3 USDT.
 - Улучшенный риск-менеджмент (ATR SL/TP 1.0/2.5).
 - Отключён частичный безубыток.
@@ -41,26 +41,28 @@ SYMBOLS = [
 TIMEFRAME_TA = "5m"
 SCAN_INTERVAL = 120
 
-FIXED_MARGIN = 3.0          # маржа на сделку
-LEVERAGE = 20               # повышенное плечо
+FIXED_MARGIN = 3.0
+LEVERAGE = 20
 
-MIN_WALL_USDT = 500         # минимальный объём стены
+MIN_CONSENSUS = 2            # можно повысить до 3 для ещё более строгого отбора
+
+MIN_WALL_USDT = 500
 ORDER_BOOK_DEPTH = 20
 WALL_THRESHOLD_VOL_RATIO = 3.0
 MAX_WALL_DISTANCE_PCT = 2.0
-IMBALANCE_RATIO_LONG = 1.2    # ослаблено для мемов
+IMBALANCE_RATIO_LONG = 1.2
 IMBALANCE_RATIO_SHORT = 1/1.2
 
-ATR_SL_MULT = 1.0           # более узкий стоп
-ATR_TP_MULT = 2.5           # тейк-профит 1:2.5
+ATR_SL_MULT = 1.0
+ATR_TP_MULT = 2.5
 MIN_SL_PERCENT = 0.5
 MAX_SL_PERCENT = 1.5
 TP_PERCENT = 3.0
 
-PARTIAL_BE_ENABLED = False   # отключаем частичный безубыток
+PARTIAL_BE_ENABLED = False
 TRAILING_ATR_MULT = 2.0
 TRAILING_OFFSET_MULT = 1.5
-MIN_PROFIT_FOR_TRAIL = 0.8   # трейлинг включается раньше
+MIN_PROFIT_FOR_TRAIL = 0.8
 RR_EXIT_TRIGGER = 0.5
 
 SYMBOL_BLOCK_AFTER_TP = 90 * 60
@@ -71,16 +73,19 @@ TRADE_MAX_LIFETIME = 7200
 REPORT_INTERVAL = 1800
 BYBIT_FEE = 0.00055
 
-STATE_FILE = "state_bot_v10.6_aggr.json"
-TRADES_FILE = "trades_bot_v10.6_aggr.json"
+# === НОВЫЙ ФИЛЬТР ===
+VOLUME_RATIO_THRESHOLD = 1.5   # текущий объём должен быть > среднего в 1.5 раза
+
+STATE_FILE = "state_bot_v10.7_vol.json"
+TRADES_FILE = "trades_bot_v10.7_vol.json"
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%d.%m.%Y %H:%M:%S",
-    handlers=[logging.StreamHandler(), logging.FileHandler("bot_v10.6_aggr.log", encoding="utf-8")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("bot_v10.7_vol.log", encoding="utf-8")],
 )
-log = logging.getLogger("AggrScalper")
+log = logging.getLogger("VolumeScalper")
 
 exchange = ccxt.bybit({
     "apiKey": os.getenv("BYBIT_API_KEY"),
@@ -383,7 +388,7 @@ def main():
         log.error("Нет API ключей"); return
     stats["депозит_старт"] = get_balance(free=False)
     stats["старт_время"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-    log.info(f"=== AGGRESSIVE MULTI-STRATEGY SCALPER v10.6 ===")
+    log.info(f"=== VOLUME-FILTERED SCALPER v10.7 ===")
     log.info(f"Депозит: {stats['депозит_старт']:.2f} USDT | Маржа: {FIXED_MARGIN} USDT | Плечо: {LEVERAGE}x")
 
     existing = [p for p in fetch_positions() if float(p.get("contracts",0))>0]
@@ -420,24 +425,30 @@ def main():
                 a = atr(df).iloc[-1] if len(df) > 14 else df["close"].iloc[-1]*0.01
                 price = df["close"].iloc[-1]
 
+                # === НОВЫЙ ФИЛЬТР ОБЪЁМА ===
+                avg_vol = df["volume"].tail(20).mean()
+                cur_vol = df["volume"].iloc[-1]
+                volume_ratio = cur_vol / avg_vol if avg_vol > 0 else 0
+                if volume_ratio < VOLUME_RATIO_THRESHOLD:
+                    continue  # пропускаем символ, если объём слабый
+
                 # Собираем голоса стратегий
                 votes = Counter()
                 for st in STRATEGIES:
                     sig = st.signal(df)
                     if sig != 0:
                         votes[sig] += 1
-                # Сигнал только если минимум 2 стратегии согласны
+                # Сигнал только если минимум MIN_CONSENSUS стратегий согласны
                 for direction, count in votes.items():
-                    if count >= 2:
+                    if count >= MIN_CONSENSUS:
                         side_str = "long" if direction == 1 else "short"
                         # Проверяем стакан
                         time.sleep(0.1)
                         ob_ok, wall_vol = order_book_filter(sym, direction)
                         if not ob_ok: continue
-                        # Дополнительно: требуем минимальный wall_usdt
                         if wall_vol < MIN_WALL_USDT: continue
                         signals.append((wall_vol, sym, side_str, f"Consensus({count})", price, a))
-                        log.info(f"Сигнал: Consensus({count}) {sym} {side_str.upper()} wall={wall_vol:.0f} USDT")
+                        log.info(f"Сигнал: Consensus({count}) {sym} {side_str.upper()} wall={wall_vol:.0f} USDT vol_ratio={volume_ratio:.1f}")
 
             log.info(f"Найдено {len(signals)} сигналов")
             if not signals:
