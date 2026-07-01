@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-ГИБРИДНЫЙ СКОРИНГ-БОТ v10.9_fixed
+ГИБРИДНЫЙ СКОРИНГ-БОТ v10.9_fixed (rate-limit safe)
 ===================================
 - 42 монеты, 7 стратегий-лидеров, динамические веса на основе винрейта.
 - Многослойный фильтр: стакан (order book wall) + тренд 4h.
 - Риск-менеджмент из v10.4 (ATR SL/TP, частичный безубыток, трейлинг).
 - Параллельный бумажный трейдер для сбора статистики.
 - Безопасные API-вызовы, логирование, подхват позиций.
+- ДОБАВЛЕНЫ ЗАДЕРЖКИ для защиты от rate limit.
 """
 
 import os, sys, time, logging, threading
@@ -104,7 +105,7 @@ def safe_api(func, *a, **kw):
             time.sleep(2)
     return None
 
-# ======================= ИНДИКАТОРЫ (используют полные названия колонок) =======================
+# ======================= ИНДИКАТОРЫ =======================
 def ema(s, p): return s.ewm(span=p, adjust=False).mean()
 def sma(s, p): return s.rolling(p).mean()
 def rsi(s, p=14):
@@ -198,7 +199,6 @@ STRATEGIES = [KeltnerRev("Keltner Rev"), StochasticStrat("Stochastic"), CCIStrat
 def trend_ok(symbol, side):
     raw = safe_api(exchange.fetch_ohlcv, symbol, TREND_TF, limit=60) or []
     if len(raw)<55: return False
-    # явно задаём полные имена колонок
     df = pd.DataFrame(raw, columns=["timestamp","open","high","low","close","volume"]).set_index("timestamp")
     e20 = ema(df["close"],20).iloc[-1]; e50 = ema(df["close"],50).iloc[-1]
     return e20>e50 if side==1 else e20<e50
@@ -388,8 +388,8 @@ def main():
             sym = pos["symbol"]; side = 1 if pos["side"]=="long" else -1
             entry = float(pos["entryPrice"]); qty = abs(float(pos["contracts"]))
             raw = safe_api(exchange.fetch_ohlcv, sym, TIMEFRAME, 50) or []
+            time.sleep(0.2)
             if len(raw)<14: continue
-            # явно задаём полные имена колонок
             df = pd.DataFrame(raw, columns=["timestamp","open","high","low","close","volume"]).set_index("timestamp")
             a = atr(df).iloc[-1]
             sl = entry*(1-MAX_SL_PCT/100) if side==1 else entry*(1+MAX_SL_PCT/100)
@@ -407,8 +407,8 @@ def main():
         signals = []
         for sym in SYMBOLS:
             raw = safe_api(exchange.fetch_ohlcv, sym, TIMEFRAME, CANDLE_LIMIT) or []
+            time.sleep(0.3)  # ЗАДЕРЖКА МЕЖДУ ЗАПРОСАМИ OHLCV
             if len(raw)<50: continue
-            # явно задаём полные имена колонок
             df = pd.DataFrame(raw, columns=["timestamp","open","high","low","close","volume"]).set_index("timestamp")
             a = atr(df).iloc[-1] if len(df)>14 else df["close"].iloc[-1]*0.01
             price = df["close"].iloc[-1]
@@ -416,6 +416,8 @@ def main():
                 sig = st.signal(df)
                 if sig==0: continue
                 if not trend_ok(sym, sig): continue
+                # задержка перед запросом стакана
+                time.sleep(0.2)
                 ob_ok, wall_vol = order_book_filter(sym, sig)
                 if not ob_ok: continue
                 w = weights.get(st.name, 0)
