@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-ГИБРИДНЫЙ БОТ v10.4_hybrid — СТАКАННЫЙ СКАЛЬПЕР + 7 СТРАТЕГИЙ
-=============================================================
-- Архитектура v10.4: подхват позиций, ATR SL/TP, трейлинг, частичный безубыток.
-- Сигналы генерируются 7 стратегиями-лидерами (Keltner, Stochastic, CCI, MFI, Aroon, VWAP, Stoch+Trend).
-- Каждый сигнал проверяется трендом 4h и стаканом.
-- Лучший сигнал выбирается по объёму стены.
+MEME COIN SCALPER v10.5_meme
+=============================
+- Только мем-койны и альты (без BTC, ETH и топов).
+- Фиксированный вход: 1 USDT маржи, плечо 10x.
+- 7 стратегий (Keltner, Stochastic, CCI, MFI, Aroon, VWAP, Stoch+Trend).
+- Фильтр стакана (wall) + тренд 4h.
+- Риск-менеджмент (ATR SL/TP, трейлинг, частичный безубыток) сохранён.
 """
 
 import os, time, logging, ccxt
@@ -21,24 +22,24 @@ load_dotenv()
 
 # ======================= КОНФИГУРАЦИЯ =======================
 SYMBOLS = [
-    "BTC/USDT:USDT", "ETH/USDT:USDT", "BNB/USDT:USDT", "XRP/USDT:USDT",
-    "SOL/USDT:USDT", "ADA/USDT:USDT", "TRX/USDT:USDT",
-    "AVAX/USDT:USDT", "DOT/USDT:USDT", "LTC/USDT:USDT", "BCH/USDT:USDT",
-    "ATOM/USDT:USDT", "XLM/USDT:USDT", "NEAR/USDT:USDT", "DOGE/USDT:USDT",
     "1000PEPE/USDT:USDT", "WIF/USDT:USDT", "BOME/USDT:USDT",
     "RENDER/USDT:USDT", "TAO/USDT:USDT", "WLD/USDT:USDT", "ARKM/USDT:USDT",
-    "IO/USDT:USDT", "ONDO/USDT:USDT", "VIRTUAL/USDT:USDT", "UNI/USDT:USDT",
-    "AAVE/USDT:USDT", "ARB/USDT:USDT", "OP/USDT:USDT", "LINK/USDT:USDT",
+    "IO/USDT:USDT", "ONDO/USDT:USDT", "VIRTUAL/USDT:USDT",
     "GRT/USDT:USDT", "INJ/USDT:USDT", "SUI/USDT:USDT", "APT/USDT:USDT",
     "TIA/USDT:USDT", "JTO/USDT:USDT", "EIGEN/USDT:USDT", "HBAR/USDT:USDT",
     "VET/USDT:USDT", "NOT/USDT:USDT", "CATI/USDT:USDT",
+    "1000FLOKI/USDT:USDT", "1000BONK/USDT:USDT", "PEOPLE/USDT:USDT",
+    "MEME/USDT:USDT", "DOGE/USDT:USDT", "SHIB/USDT:USDT",
+    "1000BABYDOGE/USDT:USDT", "1000LUNC/USDT:USDT",
 ]
 
 TIMEFRAME_TA = "5m"
 TIMEFRAME_4H = "4h"
-SCAN_INTERVAL = 120
+SCAN_INTERVAL = 180
 
-# --- Параметры стратегий (полностью из v10.4) ---
+FIXED_MARGIN = 1.0          # 1 USDT маржи на сделку
+LEVERAGE = 10               # фиксированное плечо для мемов
+
 ORDER_BOOK_DEPTH = 20
 WALL_THRESHOLD_VOL_RATIO = 3.0
 MIN_WALL_VOLUME_USDT = 500
@@ -64,34 +65,30 @@ MIN_PROFIT_FOR_TRAIL = 1.0
 RR_EXIT_TRIGGER = 0.6
 SIGNAL_EXIT_ENABLED = True
 
-DAILY_LOSS_LIMIT_PCT = 3.0
+DAILY_LOSS_LIMIT_PCT = 100.0   # отключено
 DAILY_LOSS_PAUSE_SEC = 10800
 SYMBOL_BLOCK_AFTER_TP = 90 * 60
 SYMBOL_BLOCK_AFTER_SL = 180 * 60
 SYMBOL_MAX_FAIL_ATTEMPTS = 3
 SYMBOL_BLOCK_AFTER_FAIL = 120 * 60
-SL_STREAK_LIMIT = 3
+SL_STREAK_LIMIT = 5
 SL_STREAK_PAUSE = 1800
-MIN_BALANCE = 5.0
-MAX_DRAWDOWN_PCT = 15.0
+MIN_BALANCE = 1.0
+MAX_DRAWDOWN_PCT = 100.0
 TRADE_MAX_LIFETIME = 7200
 REPORT_INTERVAL = 1800
 BYBIT_FEE = 0.00055
-RISK_PCT = 0.8
 
-LEVERAGE_MIN = 3
-LEVERAGE_MAX = 5
-
-STATE_FILE = "state_bot_v10.4_hybrid.json"
-TRADES_FILE = "trades_bot_v10.4_hybrid.json"
+STATE_FILE = "state_bot_v10.5_meme.json"
+TRADES_FILE = "trades_bot_v10.5_meme.json"
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%d.%m.%Y %H:%M:%S",
-    handlers=[logging.StreamHandler(), logging.FileHandler("bot_v10.4_hybrid.log", encoding="utf-8")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("bot_v10.5_meme.log", encoding="utf-8")],
 )
-log = logging.getLogger("HybridBot")
+log = logging.getLogger("MemeScalper")
 
 exchange = ccxt.bybit({
     "apiKey": os.getenv("BYBIT_API_KEY"),
@@ -249,12 +246,7 @@ def order_book_filter(symbol, side):
             if v >= WALL_THRESHOLD_VOL_RATIO*med_ask: wall_vol = v; break
         return (wall_vol*asks[0][0] >= MIN_WALL_VOLUME_USDT and imb < IMBALANCE_RATIO_SHORT), wall_vol*asks[0][0]
 
-# ======================= ТОРГОВЫЕ ФУНКЦИИ (из v10.4 без изменений) =======================
-def choose_leverage(atr_pct):
-    if atr_pct > 1.5: return LEVERAGE_MIN
-    elif atr_pct > 0.8: return LEVERAGE_MIN + 1
-    else: return LEVERAGE_MAX
-
+# ======================= ТОРГОВЫЕ ФУНКЦИИ =======================
 def set_leverage(symbol, lev):
     try:
         exchange.set_leverage(lev, symbol, params={"buyLeverage": lev, "sellLeverage": lev})
@@ -286,7 +278,22 @@ def open_position(symbol, side, qty, tp_price, sl_price, leverage):
             "takeProfit": float(exchange.price_to_precision(symbol, tp_price)),
             "stopLoss": float(exchange.price_to_precision(symbol, sl_price)),
         })
-        entry = float(order.get("average", price))
+        entry = None
+        if order.get("average") is not None:
+            try: entry = float(order["average"])
+            except: pass
+        if not entry or entry <= 0:
+            time.sleep(2)
+            positions = fetch_positions([symbol])
+            for pos in positions:
+                if float(pos.get("contracts",0) or 0) > 0 and pos.get("side") == side:
+                    ep = pos.get("entryPrice") or pos.get("avgCost")
+                    if ep:
+                        entry = float(ep)
+                        break
+        if not entry or entry <= 0:
+            entry = price
+            log.warning(f"Не удалось получить entry, использую рыночную цену {entry:.6f}")
         log.info(f"{side.upper()} открыт: {qty} @ {entry:.6f} (плечо {leverage}x)")
         return entry, qty
     except Exception as e:
@@ -353,21 +360,28 @@ def monitor_position(symbol, entry, qty, start_time, sl_price, tp_price, side, a
         cur = float(ticker["last"])
         qty_act = abs(float(pos.get("contracts",0) or 0))
         pnl_pct = (cur/entry - 1)*100 if side=="long" else (entry/cur - 1)*100
+
+        # Частичный безубыток с проверкой минимального лота
         if PARTIAL_BE_ENABLED and not partial_done and pnl_pct >= PARTIAL_BE_PROFIT:
-            close_qty = qty_act * (PARTIAL_BE_CLOSE_PCT/100)
-            if close_qty > 0:
+            try:
+                min_qty = float(exchange.market(symbol)["limits"]["amount"]["min"])
+            except: min_qty = 0
+            close_qty = qty_act * (PARTIAL_BE_CLOSE_PCT / 100)
+            remainder = qty_act - close_qty
+            if remainder >= min_qty and close_qty >= min_qty:
                 close_s = "sell" if side=="long" else "buy"
                 try:
                     exchange.create_market_order(symbol, close_s, close_qty, params={"reduceOnly": True})
                     partial_pnl = (cur - entry) * close_qty if side=="long" else (entry - cur) * close_qty
                     accumulated_pnl += partial_pnl
                     log.info(f"Частичный безубыток: {close_qty:.4f} PnL≈{partial_pnl:+.4f}U")
-                    qty_act -= close_qty
+                    qty_act = remainder
                     new_sl = entry * (1 + BYBIT_FEE*2 + 0.0003) if side=="long" else entry * (1 - BYBIT_FEE*2 - 0.0003)
                     if update_sl(symbol, new_sl, side): current_sl = new_sl
                     partial_done = True
                 except Exception as e:
                     log.warning(f"Ошибка частичного закрытия: {e}")
+
         if SIGNAL_EXIT_ENABLED and be_done and pnl_pct > 0.5:
             if (side=="long" and not trend_4h(symbol,"bull")) or (side=="short" and not trend_4h(symbol,"bear")):
                 log.info("Signal exit по 4h тренду"); close_position(symbol, qty_act, side); return "tp", accumulated_pnl
@@ -422,8 +436,8 @@ def main():
         log.error("Нет API ключей"); return
     stats["депозит_старт"] = get_balance(free=False)
     stats["старт_время"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-    log.info(f"=== ГИБРИДНЫЙ БОТ v10.4_hybrid ===")
-    log.info(f"Депозит: {stats['депозит_старт']:.2f} USDT")
+    log.info(f"=== MEME SCALPER v10.5 ===")
+    log.info(f"Депозит: {stats['депозит_старт']:.2f} USDT | Маржа на сделку: {FIXED_MARGIN} USDT | Плечо: {LEVERAGE}x")
 
     existing = [p for p in fetch_positions() if float(p.get("contracts",0))>0]
     if existing:
@@ -443,15 +457,7 @@ def main():
 
             свободный = get_balance(free=True)
             if свободный < MIN_BALANCE:
-                active = [p for p in fetch_positions() if float(p.get("contracts",0))>0]
-                if not active:
-                    log.warning("Мало средств, жду 300с"); time.sleep(300); continue
-
-            if stats["депозит_старт"] > 0:
-                loss = (stats["депозит_старт"] - get_balance(free=False)) / stats["депозит_старт"] * 100
-                if loss >= DAILY_LOSS_LIMIT_PCT:
-                    log.warning(f"Дневной лимит {loss:.2f}%, пауза {DAILY_LOSS_PAUSE_SEC//60} мин")
-                    time.sleep(DAILY_LOSS_PAUSE_SEC); continue
+                log.warning("Мало средств, жду 300с"); time.sleep(300); continue
 
             open_positions = [p for p in fetch_positions() if float(p.get("contracts",0))>0]
             if open_positions:
@@ -465,6 +471,7 @@ def main():
             for sym in SYMBOLS:
                 if sym in заблокированные and time.time() < заблокированные[sym]: continue
                 raw = fetch_ohlcv(sym, TIMEFRAME_TA, 100)
+                time.sleep(0.2)
                 if len(raw) < 50: continue
                 df = pd.DataFrame(raw, columns=["timestamp","open","high","low","close","volume"]).set_index("timestamp")
                 a = atr(df).iloc[-1] if len(df) > 14 else df["close"].iloc[-1]*0.01
@@ -491,18 +498,31 @@ def main():
             tp = price + tp_dist if side=="long" else price - tp_dist
             sl = max(price*(1-MAX_SL_PERCENT/100), min(price*(1-MIN_SL_PERCENT/100), sl)) if side=="long" else min(price*(1+MAX_SL_PERCENT/100), max(price*(1+MIN_SL_PERCENT/100), sl))
             tp = max(price*(1+TP_PERCENT/100), tp) if side=="long" else min(price*(1-TP_PERCENT/100), tp)
-            rr = abs(tp-price)/abs(sl-price) if abs(price-sl)>0 else 0
-            if rr < 2.0: continue
 
-            atr_pct = (a/price)*100
-            leverage = choose_leverage(atr_pct)
-            qty = (свободный * RISK_PCT / 100) / abs(sl - price)
-            try: qty = float(exchange.amount_to_precision(sym, qty))
-            except: pass
+            # Фиксированный размер позиции
+            qty = (FIXED_MARGIN * LEVERAGE) / price
+
+            # Проверка и корректировка под минимальный лот
+            try:
+                min_qty = float(exchange.market(sym)["limits"]["amount"]["min"])
+                min_cost = float(exchange.market(sym)["limits"]["cost"]["min"])
+                if qty < min_qty:
+                    if свободный >= min_cost * 1.1:
+                        qty = min_qty
+                    else:
+                        log.warning(f"Недостаточно средств для мин.лота {sym} (нужно {min_qty}), пропускаю")
+                        continue
+            except Exception as e:
+                log.warning(f"Не удалось проверить мин.лот для {sym}: {e}")
+
+            try:
+                qty = float(exchange.amount_to_precision(sym, qty))
+            except:
+                pass
             if qty <= 0: continue
 
-            log.info(f"✅ Вход {side.upper()} {sym} цена={price:.6f} SL={sl:.6f} TP={tp:.6f} плечо={leverage}x")
-            entry, qty_open = open_position(sym, side, qty, tp, sl, leverage)
+            log.info(f"✅ Вход {side.upper()} {sym} цена={price:.6f} SL={sl:.6f} TP={tp:.6f} плечо={LEVERAGE}x")
+            entry, qty_open = open_position(sym, side, qty, tp, sl, LEVERAGE)
             if not entry:
                 log.warning("Не удалось открыть позицию")
                 fail_attempts[sym] = fail_attempts.get(sym,0)+1
