@@ -2,14 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-ГЛУБОКИЙ АНАЛИЗ СТРАТЕГИЙ-ЛИДЕРОВ (TRAIN/TEST) — ИСПРАВЛЕННЫЙ
-============================================================
-Тестирует отобранные стратегии на 2000 свечей 5m,
-разделяет данные на train/test, выводит метрики для каждого периода.
+СИНТЕТИЧЕСКИЙ СТРЕСС-ТЕСТ СТРАТЕГИЙ-ЛИДЕРОВ
+=============================================
+- 42 монеты, 5000 свечей 5m (~17 дней истории).
+- Реалистичная комиссия 0.04% + случайное проскальзывание 0.01%-0.05%.
+- Три периода: train (60%), validation (20%), test (20%).
+- Метрики: WinRate, Total P&L, MaxDD, Recovery Factor, Sharpe Ratio.
 """
 
 import os, time, logging, numpy as np, pandas as pd, ccxt
-from typing import Dict, List, Callable
+from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -19,14 +21,25 @@ warnings.filterwarnings('ignore')
 SYMBOLS = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "BNB/USDT:USDT", "XRP/USDT:USDT",
     "SOL/USDT:USDT", "ADA/USDT:USDT", "TRX/USDT:USDT", "AVAX/USDT:USDT",
-    "DOT/USDT:USDT", "LTC/USDT:USDT",
+    "DOT/USDT:USDT", "LTC/USDT:USDT", "BCH/USDT:USDT", "ATOM/USDT:USDT",
+    "XLM/USDT:USDT", "NEAR/USDT:USDT", "DOGE/USDT:USDT",
+    "1000PEPE/USDT:USDT", "WIF/USDT:USDT", "BOME/USDT:USDT",
+    "RENDER/USDT:USDT", "TAO/USDT:USDT", "WLD/USDT:USDT", "ARKM/USDT:USDT",
+    "IO/USDT:USDT", "ONDO/USDT:USDT", "VIRTUAL/USDT:USDT", "UNI/USDT:USDT",
+    "AAVE/USDT:USDT", "ARB/USDT:USDT", "OP/USDT:USDT", "LINK/USDT:USDT",
+    "GRT/USDT:USDT", "INJ/USDT:USDT", "SUI/USDT:USDT", "APT/USDT:USDT",
+    "TIA/USDT:USDT", "JTO/USDT:USDT", "EIGEN/USDT:USDT", "HBAR/USDT:USDT",
+    "VET/USDT:USDT", "NOT/USDT:USDT", "CATI/USDT:USDT",
 ]
 TIMEFRAME = "5m"
-LIMIT = 2000
+LIMIT = 5000                     # 5000 свечей 5m ≈ 17 дней
 SL_ATR_MULT = 1.5
 TP_ATR_MULT = 3.0
 MAX_HOLD_BARS = 200
 INITIAL_CAPITAL = 1000
+COMMISSION = 0.0004              # 0.04% от объёма
+SLIPPAGE_MIN = 0.0001           # 0.01%
+SLIPPAGE_MAX = 0.0005           # 0.05%
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -133,42 +146,6 @@ def keltner(df, period=20, atr_mult=1.5):
     upper = mb + atr_mult * atr_val
     lower = mb - atr_mult * atr_val
     return upper, mb, lower
-def parabolic_sar(df, acceleration=0.02, maximum=0.2):
-    high = df["high"].values
-    low = df["low"].values
-    close = df["close"].values
-    sar = np.zeros(len(df))
-    sar[0] = low[0]
-    ep = high[0]
-    af = acceleration
-    trend = 1
-    for i in range(1, len(df)):
-        sar[i] = sar[i-1] + af * (ep - sar[i-1])
-        if trend == 1:
-            if low[i] < sar[i]:
-                trend = -1
-                sar[i] = ep
-                ep = low[i]
-                af = acceleration
-            else:
-                if high[i] > ep:
-                    ep = high[i]
-                    af = min(af + acceleration, maximum)
-                if low[i-1] < sar[i]: sar[i] = low[i-1]
-                if low[i-2] < sar[i]: sar[i] = low[i-2]
-        else:
-            if high[i] > sar[i]:
-                trend = 1
-                sar[i] = ep
-                ep = high[i]
-                af = acceleration
-            else:
-                if low[i] < ep:
-                    ep = low[i]
-                    af = min(af + acceleration, maximum)
-                if high[i-1] > sar[i]: sar[i] = high[i-1]
-                if high[i-2] > sar[i]: sar[i] = high[i-2]
-    return pd.Series(sar, index=df.index)
 
 # ---------------------- ФУНКЦИИ СИГНАЛОВ ----------------------
 def keltner_rev(df):
@@ -237,46 +214,37 @@ STRATEGIES = {
     "Stochastic + Trend": stochastic_trend,
 }
 
-# ---------------------- БЭКТЕСТ С РАЗБИВКОЙ ----------------------
-def backtest_split(df, signals, sl_mult, tp_mult, max_bars, split_date):
-    train_df = df[df.index < split_date]
-    test_df = df[df.index >= split_date]
-    def run(data):
-        capital = INITIAL_CAPITAL
-        in_pos = False; side = 0; entry = 0; bars = 0
-        trades = []
-        for i in range(1, len(data)):
-            if in_pos:
-                bars += 1
-                cur = data["close"].iloc[i]
-                atr_val = atr(data).iloc[i]
-                if side == 1:
-                    if cur <= entry - sl_mult * atr_val or cur >= entry + tp_mult * atr_val or bars >= max_bars:
-                        pnl = (cur - entry) / entry * 100
-                        trades.append(pnl); in_pos = False
-                else:
-                    if cur >= entry + sl_mult * atr_val or cur <= entry - tp_mult * atr_val or bars >= max_bars:
-                        pnl = (entry - cur) / entry * 100
-                        trades.append(pnl); in_pos = False
+# ---------------------- БЭКТЕСТ С РЕАЛИСТИЧНЫМИ УСЛОВИЯМИ ----------------------
+def backtest_realistic(df, signals, sl_mult, tp_mult, max_bars, start_date, end_date):
+    """Тест на заданном временном отрезке с комиссией и проскальзыванием."""
+    mask = (df.index >= start_date) & (df.index <= end_date)
+    data = df[mask].copy()
+    if data.empty:
+        return []
+    capital = INITIAL_CAPITAL
+    in_pos = False; side = 0; entry = 0; bars = 0
+    trades = []
+    for i in range(1, len(data)):
+        if in_pos:
+            bars += 1
+            cur = data["close"].iloc[i]
+            atr_val = atr(data).iloc[i]
+            slippage = np.random.uniform(SLIPPAGE_MIN, SLIPPAGE_MAX)
+            if side == 1:
+                if cur <= entry - sl_mult * atr_val or cur >= entry + tp_mult * atr_val or bars >= max_bars:
+                    exit_price = cur * (1 - slippage)  # проскальзывание против нас при закрытии long
+                    pnl = (exit_price - entry) / entry * 100 - COMMISSION * 100
+                    trades.append(pnl); in_pos = False
             else:
-                sig = signals.loc[data.index].iloc[i]
-                if sig != 0 and not pd.isna(sig):
-                    in_pos = True; side = sig; entry = data["close"].iloc[i]; bars = 0
-        return trades
-    train_trades = run(train_df)
-    test_trades = run(test_df)
-    def metrics(trades):
-        if not trades: return {"trades":0,"winrate":0,"avg_pnl":0,"total_pnl":0,"maxdd":0}
-        wins = sum(1 for p in trades if p > 0)
-        wr = wins / len(trades) * 100
-        avg = np.mean(trades)
-        eq = [INITIAL_CAPITAL]
-        for p in trades: eq.append(eq[-1] * (1 + p/100))
-        total_pnl = (eq[-1] - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
-        eqs = pd.Series(eq)
-        maxdd = (eqs.cummax() - eqs).max() / eqs.cummax().max() * 100
-        return {"trades":len(trades),"winrate":wr,"avg_pnl":avg,"total_pnl":total_pnl,"maxdd":maxdd}
-    return metrics(train_trades), metrics(test_trades)
+                if cur >= entry + sl_mult * atr_val or cur <= entry - tp_mult * atr_val or bars >= max_bars:
+                    exit_price = cur * (1 + slippage)  # проскальзывание при закрытии short
+                    pnl = (entry - exit_price) / entry * 100 - COMMISSION * 100
+                    trades.append(pnl); in_pos = False
+        else:
+            sig = signals.loc[data.index].iloc[i]
+            if sig != 0 and not pd.isna(sig):
+                in_pos = True; side = sig; entry = data["close"].iloc[i]; bars = 0
+    return trades
 
 # ---------------------- ГЛАВНОЕ ----------------------
 def main():
@@ -293,53 +261,71 @@ def main():
         log.error("Нет данных")
         return
 
-    # Вычисляем общий временной диапазон и split_date (70% времени)
+    # Определяем общий временной диапазон
     min_date = min(df.index.min() for df in data.values())
     max_date = max(df.index.max() for df in data.values())
-    split_date = min_date + 0.7 * (max_date - min_date)
-    log.info(f"Дата разделения train/test: {split_date}")
-    log.info(f"Тестируем {len(STRATEGIES)} стратегий на {len(data)} монетах...")
+    total_duration = max_date - min_date
+    train_end = min_date + 0.6 * total_duration
+    val_end = min_date + 0.8 * total_duration
+
+    log.info(f"Train: {min_date} -> {train_end}")
+    log.info(f"Validation: {train_end} -> {val_end}")
+    log.info(f"Test: {val_end} -> {max_date}")
 
     results = []
     for name, func in STRATEGIES.items():
         log.info(f"--- {name} ---")
-        all_train_trades = []
-        all_test_trades = []
+        train_trades = []; val_trades = []; test_trades = []
         for sym, df in data.items():
             try:
                 signals = func(df)
-                train_m, test_m = backtest_split(df, signals, SL_ATR_MULT, TP_ATR_MULT, MAX_HOLD_BARS, split_date)
-                if train_m["trades"] > 0:
-                    all_train_trades.extend([train_m["avg_pnl"]] * train_m["trades"])
-                if test_m["trades"] > 0:
-                    all_test_trades.extend([test_m["avg_pnl"]] * test_m["trades"])
+                train_trades.extend(backtest_realistic(df, signals, SL_ATR_MULT, TP_ATR_MULT, MAX_HOLD_BARS, min_date, train_end))
+                val_trades.extend(backtest_realistic(df, signals, SL_ATR_MULT, TP_ATR_MULT, MAX_HOLD_BARS, train_end, val_end))
+                test_trades.extend(backtest_realistic(df, signals, SL_ATR_MULT, TP_ATR_MULT, MAX_HOLD_BARS, val_end, max_date))
             except Exception as e:
                 log.error(f"   Ошибка {sym}: {e}")
 
-        if not all_train_trades and not all_test_trades:
-            results.append((name, 0,0,0,0,0,0,0,0,0))
-            continue
-        def agg_metrics(pnls):
-            if not pnls: return (0,0,0,0)
-            avg = np.mean(pnls)
+        def metrics(trades):
+            if not trades: return (0,0,0,0,0,0)
+            wins = sum(1 for p in trades if p > 0)
+            wr = wins / len(trades) * 100
+            avg = np.mean(trades)
             eq = [INITIAL_CAPITAL]
-            for p in pnls: eq.append(eq[-1] * (1 + p/100))
-            total = (eq[-1] - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
+            for p in trades: eq.append(eq[-1] * (1 + p/100))
+            total_pnl = (eq[-1] - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
             eqs = pd.Series(eq)
-            dd = (eqs.cummax() - eqs).max() / eqs.cummax().max() * 100
-            wr = sum(1 for p in pnls if p > 0) / len(pnls) * 100
-            return (len(pnls), wr, avg, total, dd)
-        tr_t, tr_wr, tr_avg, tr_pnl, tr_dd = agg_metrics(all_train_trades)
-        te_t, te_wr, te_avg, te_pnl, te_dd = agg_metrics(all_test_trades)
-        results.append((name, tr_t, tr_wr, tr_pnl, tr_dd, te_t, te_wr, te_pnl, te_dd))
+            maxdd = (eqs.cummax() - eqs).max() / eqs.cummax().max() * 100
+            # Sharpe Ratio (условный, без процентной ставки)
+            sharpe = np.mean(trades) / np.std(trades) * np.sqrt(len(trades)) if np.std(trades) > 0 else 0
+            recovery = eq[-1] / max(eq) if max(eq) > 0 else 0
+            return (len(trades), wr, avg, total_pnl, maxdd, sharpe, recovery)
 
-    # Вывод
-    print("\n" + "="*120)
-    print(f"{'Стратегия':<20} {'Train сделок':>11} {'Train WR%':>9} {'Train P&L%':>11} {'Train DD%':>9} {'Test сделок':>11} {'Test WR%':>9} {'Test P&L%':>11} {'Test DD%':>9}")
-    print("-"*120)
-    for r in sorted(results, key=lambda x: x[6] if x[6] else 0, reverse=True):
-        print(f"{r[0]:<20} {r[1]:>11} {r[2]:>8.1f} {r[3]:>10.2f} {r[4]:>8.2f} {r[5]:>11} {r[6]:>8.1f} {r[7]:>10.2f} {r[8]:>8.2f}")
-    print("="*120)
+        tr_m = metrics(train_trades)
+        v_m = metrics(val_trades)
+        te_m = metrics(test_trades)
+        results.append((name, tr_m, v_m, te_m))
+
+    # Вывод итоговой таблицы
+    print("\n" + "="*140)
+    print(f"{'Стратегия':<20} {'Train сделок':>11} {'Train WR%':>9} {'Train P&L%':>11} {'Train DD%':>9} {'Valid сделок':>11} {'Valid WR%':>9} {'Valid P&L%':>11} {'Test сделок':>11} {'Test WR%':>9} {'Test P&L%':>11} {'Test DD%':>9}")
+    print("-"*140)
+    for name, tr, v, te in sorted(results, key=lambda x: x[3][3] if x[3][0] > 0 else 0, reverse=True):
+        print(f"{name:<20} {tr[0]:>11} {tr[1]:>8.1f} {tr[3]:>10.2f} {tr[4]:>8.2f} "
+              f"{v[0]:>11} {v[1]:>8.1f} {v[3]:>10.2f} "
+              f"{te[0]:>11} {te[1]:>8.1f} {te[3]:>10.2f} {te[4]:>8.2f}")
+    print("="*140)
+
+    # Сохраняем результаты в CSV для дальнейшего анализа
+    csv_data = []
+    for name, tr, v, te in results:
+        csv_data.append({
+            "strategy": name,
+            "train_trades": tr[0], "train_wr": tr[1], "train_pnl": tr[3], "train_dd": tr[4],
+            "val_trades": v[0], "val_wr": v[1], "val_pnl": v[3],
+            "test_trades": te[0], "test_wr": te[1], "test_pnl": te[3], "test_dd": te[4],
+        })
+    pd.DataFrame(csv_data).to_csv("synthetic_test_results.csv", index=False)
+    log.info("Результаты сохранены в synthetic_test_results.csv")
 
 if __name__ == "__main__":
     main()
