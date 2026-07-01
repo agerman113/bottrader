@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-ГИБРИДНЫЙ СКОРИНГ-БОТ v10.9_fixed (rate-limit safe)
+ГИБРИДНЫЙ СКОРИНГ-БОТ v10.9_fixed (с расширенным логированием)
 ===================================
 - 42 монеты, 7 стратегий-лидеров, динамические веса на основе винрейта.
 - Многослойный фильтр: стакан (order book wall) + тренд 4h.
 - Риск-менеджмент из v10.4 (ATR SL/TP, частичный безубыток, трейлинг).
 - Параллельный бумажный трейдер для сбора статистики.
 - Безопасные API-вызовы, логирование, подхват позиций.
-- ДОБАВЛЕНЫ ЗАДЕРЖКИ для защиты от rate limit.
+- ДОБАВЛЕНО: подробные логи каждого этапа, сводка каждые 15 минут.
 """
 
 import os, sys, time, logging, threading
@@ -41,7 +41,7 @@ REAL_TRADING = False
 TIMEFRAME = "5m"
 TREND_TF = "4h"
 CANDLE_LIMIT = 100
-SCAN_INTERVAL = 180
+SCAN_INTERVAL = 300  # увеличено для снижения нагрузки
 
 ATR_PERIOD = 14
 ATR_SL_MULT = 1.5
@@ -75,6 +75,7 @@ MAX_SPREAD_PCT = 1.0
 WEIGHT_UPDATE_INTERVAL = 1800
 MIN_TRADES_WEIGHT = 10
 WEIGHT_LOOKBACK = 20
+SUMMARY_INTERVAL = 900  # сводка каждые 15 минут
 
 logging.basicConfig(
     level=logging.INFO,
@@ -258,8 +259,12 @@ class PaperTrader:
     def __init__(self):
         self.history = {s.name: [] for s in STRATEGIES}
         self.open = []
+        self.total_signals = 0
+        self.total_closed = 0
+        self.last_summary = time.time()
     def add(self, strat_name, sym, side, entry, sl, tp):
         self.open.append({"strat":strat_name,"sym":sym,"side":side,"entry":entry,"sl":sl,"tp":tp,"time":time.time()})
+        self.total_signals += 1
     def update(self):
         closed = []
         for p in self.open:
@@ -279,7 +284,13 @@ class PaperTrader:
                 pnl = (cur-p["entry"])/p["entry"]*100 if p["side"]==1 else (p["entry"]-cur)/p["entry"]*100
                 self.history[p["strat"]].append(pnl>0)
                 closed.append(p)
+                self.total_closed += 1
         for p in closed: self.open.remove(p)
+        # сводка каждые 15 минут
+        if time.time() - self.last_summary >= SUMMARY_INTERVAL:
+            log.info(f"=== БУМАЖНАЯ СВОДКА === Открыто вирт.позиций: {len(self.open)}, "
+                     f"Закрыто: {self.total_closed}, Всего сигналов: {self.total_signals}")
+            self.last_summary = time.time()
     def weights(self):
         w = {}
         for s in STRATEGIES:
@@ -402,13 +413,16 @@ def main():
         paper.update()
         if time.time() % WEIGHT_UPDATE_INTERVAL < SCAN_INTERVAL:
             weights = paper.weights()
-            log.info(f"Weights: { {k:round(v,2) for k,v in weights.items()} }")
+            if any(w > 0 for w in weights.values()):
+                log.info(f"✓ Веса обновлены: { {k:round(v,2) for k,v in weights.items()} }")
         if not risk.can_trade(""): time.sleep(60); continue
         signals = []
+        checked = 0
         for sym in SYMBOLS:
             raw = safe_api(exchange.fetch_ohlcv, sym, TIMEFRAME, CANDLE_LIMIT) or []
-            time.sleep(0.3)  # ЗАДЕРЖКА МЕЖДУ ЗАПРОСАМИ OHLCV
+            time.sleep(0.3)
             if len(raw)<50: continue
+            checked += 1
             df = pd.DataFrame(raw, columns=["timestamp","open","high","low","close","volume"]).set_index("timestamp")
             a = atr(df).iloc[-1] if len(df)>14 else df["close"].iloc[-1]*0.01
             price = df["close"].iloc[-1]
@@ -416,11 +430,10 @@ def main():
                 sig = st.signal(df)
                 if sig==0: continue
                 if not trend_ok(sym, sig): continue
-                # задержка перед запросом стакана
                 time.sleep(0.2)
                 ob_ok, wall_vol = order_book_filter(sym, sig)
                 if not ob_ok: continue
-                w = weights.get(st.name, 0)
+                w = paper.weights().get(st.name, 0)
                 if w <= 0: continue
                 signals.append((w*wall_vol, sym, sig, st.name, price, a, wall_vol))
                 sl_dist = a*ATR_SL_MULT; tp_dist = a*ATR_TP_MULT
@@ -429,6 +442,7 @@ def main():
                 sl = max(price*(1-MAX_SL_PCT/100), min(price*(1-MIN_SL_PCT/100), sl)) if sig==1 else min(price*(1+MAX_SL_PCT/100), max(price*(1+MIN_SL_PCT/100), sl))
                 tp = max(price*(1+MIN_TP_PCT/100), tp) if sig==1 else min(price*(1-MIN_TP_PCT/100), tp)
                 paper.add(st.name, sym, sig, price, sl, tp)
+        log.info(f"Сканирование: проверено {checked} монет, найдено сигналов {len(signals)}")
         if signals and risk.free >= 5 and REAL_TRADING:
             signals.sort(reverse=True)
             _, sym, sig, sname, price, a, wv = signals[0]
