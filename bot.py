@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-УГЛУБЛЁННЫЙ АНАЛИЗ СТРАТЕГИЙ-ЛИДЕРОВ (TRAIN/TEST)
-==================================================
-Проверяет робастность стратегий на разделённых исторических данных.
+ГЛУБОКИЙ АНАЛИЗ СТРАТЕГИЙ-ЛИДЕРОВ (TRAIN/TEST) — ИСПРАВЛЕННЫЙ
+============================================================
+Тестирует отобранные стратегии на 2000 свечей 5m,
+разделяет данные на train/test, выводит метрики для каждого периода.
 """
 
-import os, time, logging, numpy as np, pandas as pd, ccxt, signal
+import os, time, logging, numpy as np, pandas as pd, ccxt
 from typing import Dict, List, Callable
 import warnings
 warnings.filterwarnings('ignore')
@@ -237,12 +238,6 @@ STRATEGIES = {
 }
 
 # ---------------------- БЭКТЕСТ С РАЗБИВКОЙ ----------------------
-class TimeoutException(Exception):
-    pass
-
-def handler(signum, frame):
-    raise TimeoutException("Стратегия превысила лимит времени")
-
 def backtest_split(df, signals, sl_mult, tp_mult, max_bars, split_date):
     train_df = df[df.index < split_date]
     test_df = df[df.index >= split_date]
@@ -298,8 +293,10 @@ def main():
         log.error("Нет данных")
         return
 
-    all_dates = pd.concat([df.index for df in data.values()])
-    split_date = all_dates.quantile(0.7)
+    # Вычисляем общий временной диапазон и split_date (70% времени)
+    min_date = min(df.index.min() for df in data.values())
+    max_date = max(df.index.max() for df in data.values())
+    split_date = min_date + 0.7 * (max_date - min_date)
     log.info(f"Дата разделения train/test: {split_date}")
     log.info(f"Тестируем {len(STRATEGIES)} стратегий на {len(data)} монетах...")
 
@@ -310,21 +307,14 @@ def main():
         all_test_trades = []
         for sym, df in data.items():
             try:
-                signal.signal(signal.SIGALRM, handler)
-                signal.alarm(30)
                 signals = func(df)
-                signal.alarm(0)
                 train_m, test_m = backtest_split(df, signals, SL_ATR_MULT, TP_ATR_MULT, MAX_HOLD_BARS, split_date)
                 if train_m["trades"] > 0:
                     all_train_trades.extend([train_m["avg_pnl"]] * train_m["trades"])
                 if test_m["trades"] > 0:
                     all_test_trades.extend([test_m["avg_pnl"]] * test_m["trades"])
-            except TimeoutException:
-                log.warning(f"   ⏰ Пропуск {sym} (дольше 30с)")
-                signal.alarm(0)
             except Exception as e:
                 log.error(f"   Ошибка {sym}: {e}")
-                signal.alarm(0)
 
         if not all_train_trades and not all_test_trades:
             results.append((name, 0,0,0,0,0,0,0,0,0))
