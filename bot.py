@@ -11,7 +11,7 @@
 - Безопасные API-вызовы, логирование, подхват позиций.
 """
 
-import os, sys, time, json, logging, threading
+import os, sys, time, logging, threading
 import numpy as np, pandas as pd, ccxt
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
@@ -104,7 +104,7 @@ def safe_api(func, *a, **kw):
             time.sleep(2)
     return None
 
-# ======================= ИНДИКАТОРЫ =======================
+# ======================= ИНДИКАТОРЫ (используют полные названия колонок) =======================
 def ema(s, p): return s.ewm(span=p, adjust=False).mean()
 def sma(s, p): return s.rolling(p).mean()
 def rsi(s, p=14):
@@ -198,8 +198,9 @@ STRATEGIES = [KeltnerRev("Keltner Rev"), StochasticStrat("Stochastic"), CCIStrat
 def trend_ok(symbol, side):
     raw = safe_api(exchange.fetch_ohlcv, symbol, TREND_TF, limit=60) or []
     if len(raw)<55: return False
-    df = pd.DataFrame(raw, columns=["ts","o","h","l","c","v"])
-    e20 = ema(df["c"],20).iloc[-1]; e50 = ema(df["c"],50).iloc[-1]
+    # явно задаём полные имена колонок
+    df = pd.DataFrame(raw, columns=["timestamp","open","high","low","close","volume"]).set_index("timestamp")
+    e20 = ema(df["close"],20).iloc[-1]; e50 = ema(df["close"],50).iloc[-1]
     return e20>e50 if side==1 else e20<e50
 
 def order_book_filter(symbol, side):
@@ -386,8 +387,11 @@ def main():
         if float(pos.get("contracts",0) or 0)>0:
             sym = pos["symbol"]; side = 1 if pos["side"]=="long" else -1
             entry = float(pos["entryPrice"]); qty = abs(float(pos["contracts"]))
-            df = pd.DataFrame(safe_api(exchange.fetch_ohlcv, sym, TIMEFRAME, 50) or [], columns=["ts","o","h","l","c","v"])
-            a = atr(df).iloc[-1] if len(df)>14 else entry*0.01
+            raw = safe_api(exchange.fetch_ohlcv, sym, TIMEFRAME, 50) or []
+            if len(raw)<14: continue
+            # явно задаём полные имена колонок
+            df = pd.DataFrame(raw, columns=["timestamp","open","high","low","close","volume"]).set_index("timestamp")
+            a = atr(df).iloc[-1]
             sl = entry*(1-MAX_SL_PCT/100) if side==1 else entry*(1+MAX_SL_PCT/100)
             tp = entry*(1+MIN_TP_PCT/100) if side==1 else entry*(1-MIN_TP_PCT/100)
             log.info(f"Подхват {sym} {side} entry={entry:.6f}")
@@ -404,9 +408,10 @@ def main():
         for sym in SYMBOLS:
             raw = safe_api(exchange.fetch_ohlcv, sym, TIMEFRAME, CANDLE_LIMIT) or []
             if len(raw)<50: continue
-            df = pd.DataFrame(raw, columns=["ts","o","h","l","c","v"])
-            a = atr(df).iloc[-1] if len(df)>14 else df["c"].iloc[-1]*0.01
-            price = df["c"].iloc[-1]
+            # явно задаём полные имена колонок
+            df = pd.DataFrame(raw, columns=["timestamp","open","high","low","close","volume"]).set_index("timestamp")
+            a = atr(df).iloc[-1] if len(df)>14 else df["close"].iloc[-1]*0.01
+            price = df["close"].iloc[-1]
             for st in STRATEGIES:
                 sig = st.signal(df)
                 if sig==0: continue
