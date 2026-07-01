@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-ГИБРИДНЫЙ СКОРИНГ-БОТ v10.9_fixed (с расширенным логированием)
-===================================
-- 42 монеты, 7 стратегий-лидеров, динамические веса на основе винрейта.
-- Многослойный фильтр: стакан (order book wall) + тренд 4h.
+ГИБРИДНЫЙ СКОРИНГ-БОТ v10.9_real — НЕМЕДЛЕННАЯ РЕАЛЬНАЯ ТОРГОВЛЯ
+================================================================
+- 42 монеты, 7 стратегий-лидеров.
+- Пока нет статистики, все стратегии имеют равный приоритет (вес = 1.0).
+- Многослойный фильтр: стакан + тренд 4h (можно ослабить в конфиге).
+- Сразу открывает реальные сделки при совпадении сигналов.
 - Риск-менеджмент из v10.4 (ATR SL/TP, частичный безубыток, трейлинг).
-- Параллельный бумажный трейдер для сбора статистики.
-- Безопасные API-вызовы, логирование, подхват позиций.
-- ДОБАВЛЕНО: подробные логи каждого этапа, сводка каждые 15 минут.
+- Бумажный трейдер работает параллельно для сбора статистики.
 """
 
 import os, sys, time, logging, threading
@@ -37,11 +37,11 @@ SYMBOLS = [
     "VET/USDT:USDT","NOT/USDT:USDT","CATI/USDT:USDT",
 ]
 
-REAL_TRADING = False
+REAL_TRADING = True                # <-- ВКЛЮЧЕНА РЕАЛЬНАЯ ТОРГОВЛЯ
 TIMEFRAME = "5m"
 TREND_TF = "4h"
 CANDLE_LIMIT = 100
-SCAN_INTERVAL = 300  # увеличено для снижения нагрузки
+SCAN_INTERVAL = 120                # сканирование каждые 2 минуты
 
 ATR_PERIOD = 14
 ATR_SL_MULT = 1.5
@@ -75,13 +75,13 @@ MAX_SPREAD_PCT = 1.0
 WEIGHT_UPDATE_INTERVAL = 1800
 MIN_TRADES_WEIGHT = 10
 WEIGHT_LOOKBACK = 20
-SUMMARY_INTERVAL = 900  # сводка каждые 15 минут
+SUMMARY_INTERVAL = 900
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%d.%m.%Y %H:%M:%S",
-    handlers=[logging.StreamHandler(), logging.FileHandler("bot_v10.9_fixed.log", encoding="utf-8")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("bot_v10.9_real.log", encoding="utf-8")],
 )
 log = logging.getLogger("ScoringBot")
 
@@ -286,7 +286,6 @@ class PaperTrader:
                 closed.append(p)
                 self.total_closed += 1
         for p in closed: self.open.remove(p)
-        # сводка каждые 15 минут
         if time.time() - self.last_summary >= SUMMARY_INTERVAL:
             log.info(f"=== БУМАЖНАЯ СВОДКА === Открыто вирт.позиций: {len(self.open)}, "
                      f"Закрыто: {self.total_closed}, Всего сигналов: {self.total_signals}")
@@ -298,13 +297,6 @@ class PaperTrader:
             if len(hist)>=MIN_TRADES_WEIGHT: w[s.name] = sum(hist)/len(hist)
             else: w[s.name] = 0
         return w
-    def report(self):
-        lines = []
-        for s in STRATEGIES:
-            hist = self.history[s.name]
-            wr = sum(hist)/len(hist)*100 if hist else 0
-            lines.append(f"{s.name}: trades={len(hist)} WR={wr:.1f}% weight={self.weights()[s.name]:.2f}")
-        return "\n".join(lines)
 
 # ======================= ИСПОЛНИТЕЛЬ =======================
 class Executor:
@@ -316,7 +308,7 @@ class Executor:
         try:
             o = exchange.create_order(sym, "market", s, qty, params={"takeProfit":tp_s,"stopLoss":sl_s})
             entry = float(o.get("average",0)) or float(exchange.fetch_ticker(sym)["last"])
-            log.info(f"OPEN {s.upper()} {sym} qty={qty} @ {entry:.6f} SL={sl_s} TP={tp_s}")
+            log.info(f"✅ ОТКРЫТА СДЕЛКА {s.upper()} {sym} qty={qty} @ {entry:.6f} SL={sl_s} TP={tp_s}")
             return entry
         except Exception as e:
             log.error(f"Open error {sym}: {e}")
@@ -392,7 +384,10 @@ def main():
     risk = RiskManager(); risk.update_balance()
     risk.start_balance = risk.balance
     paper = PaperTrader()
-    log.info("=== SCORING BOT v10.9_fixed ===")
+    log.info("=== SCORING BOT v10.9_real (НЕМЕДЛЕННАЯ ТОРГОВЛЯ) ===")
+    log.info(f"Баланс: {risk.balance:.2f} USDT, свободно: {risk.free:.2f} USDT")
+    log.info(f"Реальная торговля: {'ВКЛЮЧЕНА' if REAL_TRADING else 'ОТКЛЮЧЕНА'}")
+
     # Подхват позиций
     for pos in safe_api(exchange.fetch_positions) or []:
         if float(pos.get("contracts",0) or 0)>0:
@@ -415,7 +410,12 @@ def main():
             weights = paper.weights()
             if any(w > 0 for w in weights.values()):
                 log.info(f"✓ Веса обновлены: { {k:round(v,2) for k,v in weights.items()} }")
-        if not risk.can_trade(""): time.sleep(60); continue
+
+        if not risk.can_trade(""):
+            log.warning("Торговля заблокирована (лимиты/кулдаун). Жду 60с.")
+            time.sleep(60)
+            continue
+
         signals = []
         checked = 0
         for sym in SYMBOLS:
@@ -429,12 +429,18 @@ def main():
             for st in STRATEGIES:
                 sig = st.signal(df)
                 if sig==0: continue
-                if not trend_ok(sym, sig): continue
+                if not trend_ok(sym, sig):
+                    # log.debug(f"{sym} {st.name}: тренд не пройден")
+                    continue
                 time.sleep(0.2)
                 ob_ok, wall_vol = order_book_filter(sym, sig)
-                if not ob_ok: continue
+                if not ob_ok:
+                    # log.debug(f"{sym} {st.name}: стакан не пройден")
+                    continue
+                # ВАЖНО: пока нет весов, считаем вес = 1.0 для всех стратегий
                 w = paper.weights().get(st.name, 0)
-                if w <= 0: continue
+                if w <= 0:
+                    w = 1.0  # равный приоритет на старте
                 signals.append((w*wall_vol, sym, sig, st.name, price, a, wall_vol))
                 sl_dist = a*ATR_SL_MULT; tp_dist = a*ATR_TP_MULT
                 sl = price-sl_dist if sig==1 else price+sl_dist
@@ -442,17 +448,21 @@ def main():
                 sl = max(price*(1-MAX_SL_PCT/100), min(price*(1-MIN_SL_PCT/100), sl)) if sig==1 else min(price*(1+MAX_SL_PCT/100), max(price*(1+MIN_SL_PCT/100), sl))
                 tp = max(price*(1+MIN_TP_PCT/100), tp) if sig==1 else min(price*(1-MIN_TP_PCT/100), tp)
                 paper.add(st.name, sym, sig, price, sl, tp)
+
         log.info(f"Сканирование: проверено {checked} монет, найдено сигналов {len(signals)}")
         if signals and risk.free >= 5 and REAL_TRADING:
             signals.sort(reverse=True)
             _, sym, sig, sname, price, a, wv = signals[0]
             qty = (risk.free*RISK_PCT/100)/abs(a*ATR_SL_MULT)
-            entry = Executor().open(sym, sig, qty, price+a*ATR_TP_MULT if sig==1 else price-a*ATR_TP_MULT, price-a*ATR_SL_MULT if sig==1 else price+a*ATR_SL_MULT)
+            tp_price = price+a*ATR_TP_MULT if sig==1 else price-a*ATR_TP_MULT
+            sl_price = price-a*ATR_SL_MULT if sig==1 else price+a*ATR_SL_MULT
+            log.info(f"🎯 СИГНАЛ: {sname} {sym} {'LONG' if sig==1 else 'SHORT'} wall={wv:.0f} USDT")
+            entry = Executor().open(sym, sig, qty, tp_price, sl_price)
             if entry:
-                res = monitor(sym, entry, qty, sig, entry-(a*ATR_SL_MULT if sig==1 else a*ATR_SL_MULT), entry+(a*ATR_TP_MULT if sig==1 else a*ATR_TP_MULT), a)
+                res = monitor(sym, entry, qty, sig, sl_price, tp_price, a)
                 pnl = (risk.balance - risk.start_balance)
                 risk.record(pnl); risk.set_cooldown(sym, res=="tp")
-                log.info(f"Trade closed: {res} PnL={pnl:.4f}")
+                log.info(f"Сделка закрыта: {res} PnL={pnl:.4f}")
         time.sleep(SCAN_INTERVAL)
 
 if __name__ == "__main__":
