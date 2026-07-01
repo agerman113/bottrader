@@ -2,13 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-MEME COIN SCALPER v10.5_meme
-=============================
-- Только мем-койны и альты (без BTC, ETH и топов).
+MEME COIN AGGRESSIVE SCALPER v10.5_meme_aggressive
+==================================================
+- Только мем-койны и альты, фильтр тренда отключён.
 - Фиксированный вход: 1 USDT маржи, плечо 10x.
-- 7 стратегий (Keltner, Stochastic, CCI, MFI, Aroon, VWAP, Stoch+Trend).
-- Фильтр стакана (wall) + тренд 4h.
-- Риск-менеджмент (ATR SL/TP, трейлинг, частичный безубыток) сохранён.
+- 8 стратегий (добавлен Volume Spike).
+- Ослабленный стаканный фильтр (MIN_WALL = 100 USDT).
 """
 
 import os, time, logging, ccxt
@@ -31,18 +30,20 @@ SYMBOLS = [
     "1000FLOKI/USDT:USDT", "1000BONK/USDT:USDT", "PEOPLE/USDT:USDT",
     "MEME/USDT:USDT", "DOGE/USDT:USDT", "SHIB/USDT:USDT",
     "1000BABYDOGE/USDT:USDT", "1000LUNC/USDT:USDT",
+    "1000RATS/USDT:USDT", "1000TURBO/USDT:USDT", "MYRO/USDT:USDT",
+    "PONKE/USDT:USDT", "SLERF/USDT:USDT", "SAMO/USDT:USDT",
+    "WEN/USDT:USDT", "MOODENG/USDT:USDT", "GOAT/USDT:USDT",
 ]
 
 TIMEFRAME_TA = "5m"
-TIMEFRAME_4H = "4h"
-SCAN_INTERVAL = 180
+SCAN_INTERVAL = 120
 
-FIXED_MARGIN = 1.0          # 1 USDT маржи на сделку
-LEVERAGE = 10               # фиксированное плечо для мемов
+FIXED_MARGIN = 1.0
+LEVERAGE = 10
 
 ORDER_BOOK_DEPTH = 20
 WALL_THRESHOLD_VOL_RATIO = 3.0
-MIN_WALL_VOLUME_USDT = 500
+MIN_WALL_VOLUME_USDT = 100         # ослаблено для мемов
 MAX_WALL_DISTANCE_PCT = 2.0
 IMBALANCE_RATIO_LONG = 1.5
 IMBALANCE_RATIO_SHORT = 1 / 1.5
@@ -63,32 +64,25 @@ MIN_TRAILING_STEP = 0.4
 MIN_TRAILING_OFFSET = 0.6
 MIN_PROFIT_FOR_TRAIL = 1.0
 RR_EXIT_TRIGGER = 0.6
-SIGNAL_EXIT_ENABLED = True
 
-DAILY_LOSS_LIMIT_PCT = 100.0   # отключено
-DAILY_LOSS_PAUSE_SEC = 10800
 SYMBOL_BLOCK_AFTER_TP = 90 * 60
 SYMBOL_BLOCK_AFTER_SL = 180 * 60
 SYMBOL_MAX_FAIL_ATTEMPTS = 3
 SYMBOL_BLOCK_AFTER_FAIL = 120 * 60
-SL_STREAK_LIMIT = 5
-SL_STREAK_PAUSE = 1800
-MIN_BALANCE = 1.0
-MAX_DRAWDOWN_PCT = 100.0
 TRADE_MAX_LIFETIME = 7200
 REPORT_INTERVAL = 1800
 BYBIT_FEE = 0.00055
 
-STATE_FILE = "state_bot_v10.5_meme.json"
-TRADES_FILE = "trades_bot_v10.5_meme.json"
+STATE_FILE = "state_bot_v10.5_meme_aggr.json"
+TRADES_FILE = "trades_bot_v10.5_meme_aggr.json"
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%d.%m.%Y %H:%M:%S",
-    handlers=[logging.StreamHandler(), logging.FileHandler("bot_v10.5_meme.log", encoding="utf-8")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("bot_v10.5_meme_aggr.log", encoding="utf-8")],
 )
-log = logging.getLogger("MemeScalper")
+log = logging.getLogger("MemeAggr")
 
 exchange = ccxt.bybit({
     "apiKey": os.getenv("BYBIT_API_KEY"),
@@ -180,8 +174,20 @@ class StochTrend(Strategy):
         k, d = stoch(df); e50 = ema(df["close"],50)
         return 1 if (k.iloc[-1]<20 and k.iloc[-1]>d.iloc[-1] and df["close"].iloc[-1]>e50.iloc[-1]) else (-1 if (k.iloc[-1]>80 and k.iloc[-1]<d.iloc[-1] and df["close"].iloc[-1]<e50.iloc[-1]) else 0)
 
+class VolumeSpike(Strategy):
+    def signal(self, df):
+        avg_vol = df["volume"].rolling(20).mean().iloc[-1]
+        cur_vol = df["volume"].iloc[-1]
+        if cur_vol > 2 * avg_vol:
+            if df["close"].iloc[-1] > df["open"].iloc[-1]:
+                return 1
+            elif df["close"].iloc[-1] < df["open"].iloc[-1]:
+                return -1
+        return 0
+
 STRATEGIES = [KeltnerRev("Keltner Rev"), StochasticStrat("Stochastic"), CCIStrat("CCI"),
-              MFIStrat("MFI"), AroonStrat("Aroon"), VWAPRev("VWAP Rev"), StochTrend("Stoch+Trend")]
+              MFIStrat("MFI"), AroonStrat("Aroon"), VWAPRev("VWAP Rev"), StochTrend("Stoch+Trend"),
+              VolumeSpike("Vol Spike")]
 
 # ======================= ФИЛЬТРЫ =======================
 def safe_api(func, *a, retries=3, delay=1.0, **kw):
@@ -216,19 +222,12 @@ def get_balance(free=True):
         return float(bal.get("USDT", {}).get("free" if free else "total", 0))
     except: return 0.0
 
-def trend_4h(symbol, direction="bull"):
-    raw = fetch_ohlcv(symbol, TIMEFRAME_4H, limit=60)
-    if len(raw) < 55: return False
-    df = pd.DataFrame(raw, columns=["timestamp","open","high","low","close","volume"]).set_index("timestamp")
-    e20 = ema(df["close"],20).iloc[-1]; e50 = ema(df["close"],50).iloc[-1]
-    return e20>e50 if direction=="bull" else e20<e50
-
 def order_book_filter(symbol, side):
     ob = safe_api(exchange.fetch_order_book, symbol, ORDER_BOOK_DEPTH)
     if not ob or len(ob["bids"])<5 or len(ob["asks"])<5: return False, 0
     bids = ob["bids"]; asks = ob["asks"]
     spread = (asks[0][0]-bids[0][0])/bids[0][0]*100
-    if spread > 1.0: return False, 0
+    if spread > 2.0: return False, 0   # ослаблено для мемов (было 1.0)
     bid_vols = [v for _,v in bids[1:]]; ask_vols = [v for _,v in asks[1:]]
     med_bid = np.median(bid_vols) if bid_vols else 0
     med_ask = np.median(ask_vols) if ask_vols else 0
@@ -239,12 +238,12 @@ def order_book_filter(symbol, side):
         wall_vol = bids[0][1]
         for p,v in bids[:5]:
             if v >= WALL_THRESHOLD_VOL_RATIO*med_bid: wall_vol = v; break
-        return (wall_vol*bids[0][0] >= MIN_WALL_VOLUME_USDT and imb > IMBALANCE_RATIO_LONG), wall_vol*bids[0][0]
+        return (wall_vol*bids[0][0] >= MIN_WALL_VOLUME_USDT and imb > 1.2), wall_vol*bids[0][0]
     else:
         wall_vol = asks[0][1]
         for p,v in asks[:5]:
             if v >= WALL_THRESHOLD_VOL_RATIO*med_ask: wall_vol = v; break
-        return (wall_vol*asks[0][0] >= MIN_WALL_VOLUME_USDT and imb < IMBALANCE_RATIO_SHORT), wall_vol*asks[0][0]
+        return (wall_vol*asks[0][0] >= MIN_WALL_VOLUME_USDT and imb < 0.8), wall_vol*asks[0][0]
 
 # ======================= ТОРГОВЫЕ ФУНКЦИИ =======================
 def set_leverage(symbol, lev):
@@ -382,9 +381,6 @@ def monitor_position(symbol, entry, qty, start_time, sl_price, tp_price, side, a
                 except Exception as e:
                     log.warning(f"Ошибка частичного закрытия: {e}")
 
-        if SIGNAL_EXIT_ENABLED and be_done and pnl_pct > 0.5:
-            if (side=="long" and not trend_4h(symbol,"bull")) or (side=="short" and not trend_4h(symbol,"bear")):
-                log.info("Signal exit по 4h тренду"); close_position(symbol, qty_act, side); return "tp", accumulated_pnl
         if not partial_done and not be_done and pnl_pct >= 0.3:
             new_sl = entry * (1 + BYBIT_FEE*2 + 0.0003) if side=="long" else entry * (1 - BYBIT_FEE*2 - 0.0003)
             if update_sl(symbol, new_sl, side): current_sl = new_sl; be_done = True; log.info("Безубыток")
@@ -436,7 +432,7 @@ def main():
         log.error("Нет API ключей"); return
     stats["депозит_старт"] = get_balance(free=False)
     stats["старт_время"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-    log.info(f"=== MEME SCALPER v10.5 ===")
+    log.info(f"=== MEME AGGRESSIVE SCALPER v10.5 ===")
     log.info(f"Депозит: {stats['депозит_старт']:.2f} USDT | Маржа на сделку: {FIXED_MARGIN} USDT | Плечо: {LEVERAGE}x")
 
     existing = [p for p in fetch_positions() if float(p.get("contracts",0))>0]
@@ -454,10 +450,6 @@ def main():
                 bal = get_balance(free=False)
                 log.info(f"📊 Отчёт: Баланс={bal:.2f} USDT | Сделок: {stats['сделок_всего']} | TP: {stats['тейкпрофит']} SL: {stats['стоплосс']}")
                 stats["последний_отчёт"] = time.time()
-
-            свободный = get_balance(free=True)
-            if свободный < MIN_BALANCE:
-                log.warning("Мало средств, жду 300с"); time.sleep(300); continue
 
             open_positions = [p for p in fetch_positions() if float(p.get("contracts",0))>0]
             if open_positions:
@@ -480,7 +472,7 @@ def main():
                     sig = st.signal(df)
                     if sig == 0: continue
                     side_str = "long" if sig == 1 else "short"
-                    if not trend_4h(sym, "bull" if sig==1 else "bear"): continue
+                    # Трендовый фильтр ОТКЛЮЧЕН
                     time.sleep(0.1)
                     ob_ok, wall_vol = order_book_filter(sym, sig)
                     if not ob_ok: continue
@@ -505,13 +497,8 @@ def main():
             # Проверка и корректировка под минимальный лот
             try:
                 min_qty = float(exchange.market(sym)["limits"]["amount"]["min"])
-                min_cost = float(exchange.market(sym)["limits"]["cost"]["min"])
                 if qty < min_qty:
-                    if свободный >= min_cost * 1.1:
-                        qty = min_qty
-                    else:
-                        log.warning(f"Недостаточно средств для мин.лота {sym} (нужно {min_qty}), пропускаю")
-                        continue
+                    qty = min_qty
             except Exception as e:
                 log.warning(f"Не удалось проверить мин.лот для {sym}: {e}")
 
@@ -543,8 +530,8 @@ def main():
             stats["sl_streak"] = 0 if result=="tp" else stats.get("sl_streak",0)+1
             заблокированные[sym] = time.time() + (SYMBOL_BLOCK_AFTER_TP if result=="tp" else SYMBOL_BLOCK_AFTER_SL)
             log.info(f"Сделка закрыта: {result} PnL={total_pnl:.4f} USDT")
-            if stats["sl_streak"] >= SL_STREAK_LIMIT:
-                log.warning("Серия SL, пауза"); time.sleep(SL_STREAK_PAUSE); stats["sl_streak"] = 0
+            if stats["sl_streak"] >= 5:
+                log.warning("Серия SL, пауза"); time.sleep(1800); stats["sl_streak"] = 0
             time.sleep(30)
 
         except Exception as e:
