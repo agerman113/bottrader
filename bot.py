@@ -2,14 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-AGGRESSIVE MULTI-STRATEGY SCALPER v10.7
-=======================================
-- Сигнал открывается, если минимум 2 стратегии дают одинаковое направление.
-- ДОБАВЛЕН ФИЛЬТР ОБЪЁМА: текущий объём > 1.5 * средний объём за 20 свечей.
-- Плечо 20x, фиксированная маржа 3 USDT.
-- Улучшенный риск-менеджмент (ATR SL/TP 1.0/2.5).
-- Отключён частичный безубыток.
-- Фильтр минимальной стены 500 USDT.
+MOMENTUM + REVERSAL SCALPER v10.9
+=================================
+- Фильтр силы импульса на входе (MomentumFilter).
+- Детектор разворота в реальном времени (ReversalDetector) для досрочного выхода.
+- Консенсус стратегий + объёмный фильтр + стакан.
+- Плечо 20x, маржа 3 USDT.
 """
 
 import os, time, logging, ccxt
@@ -44,8 +42,7 @@ SCAN_INTERVAL = 120
 FIXED_MARGIN = 3.0
 LEVERAGE = 20
 
-MIN_CONSENSUS = 2            # можно повысить до 3 для ещё более строгого отбора
-
+MIN_CONSENSUS = 2
 MIN_WALL_USDT = 500
 ORDER_BOOK_DEPTH = 20
 WALL_THRESHOLD_VOL_RATIO = 3.0
@@ -65,6 +62,12 @@ TRAILING_OFFSET_MULT = 1.5
 MIN_PROFIT_FOR_TRAIL = 0.8
 RR_EXIT_TRIGGER = 0.5
 
+# === НОВЫЕ ФИЛЬТРЫ ===
+VOLUME_RATIO_THRESHOLD = 1.5
+MIN_MOMENTUM_STRENGTH = 0.3    # минимальная сила импульса для входа (0..1)
+REVERSAL_SCORE_THRESHOLD = 0.7 # критическая вероятность разворота для досрочного выхода
+MIN_PROFIT_FOR_REVERSAL_EXIT = 0.5 # мин. прибыль в % для досрочного выхода
+
 SYMBOL_BLOCK_AFTER_TP = 90 * 60
 SYMBOL_BLOCK_AFTER_SL = 180 * 60
 SYMBOL_MAX_FAIL_ATTEMPTS = 3
@@ -73,19 +76,16 @@ TRADE_MAX_LIFETIME = 7200
 REPORT_INTERVAL = 1800
 BYBIT_FEE = 0.00055
 
-# === НОВЫЙ ФИЛЬТР ===
-VOLUME_RATIO_THRESHOLD = 1.5   # текущий объём должен быть > среднего в 1.5 раза
-
-STATE_FILE = "state_bot_v10.7_vol.json"
-TRADES_FILE = "trades_bot_v10.7_vol.json"
+STATE_FILE = "state_bot_v10.9_mom.json"
+TRADES_FILE = "trades_bot_v10.9_mom.json"
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%d.%m.%Y %H:%M:%S",
-    handlers=[logging.StreamHandler(), logging.FileHandler("bot_v10.7_vol.log", encoding="utf-8")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("bot_v10.9_mom.log", encoding="utf-8")],
 )
-log = logging.getLogger("VolumeScalper")
+log = logging.getLogger("MomentumScalper")
 
 exchange = ccxt.bybit({
     "apiKey": os.getenv("BYBIT_API_KEY"),
@@ -112,8 +112,6 @@ def atr(df, p=14):
     h, l, c = df["high"], df["low"], df["close"].shift(1)
     tr = pd.concat([h-l, (h-c).abs(), (l-c).abs()], axis=1).max(axis=1)
     return tr.ewm(alpha=1/p, adjust=False).mean()
-def bollinger(s, p=20, std=2):
-    mb = sma(s, p); sd = s.rolling(p).std(); return mb+std*sd, mb, mb-std*sd
 def stoch(df, kp=14, dp=3):
     lo = df["low"].rolling(kp).min(); hi = df["high"].rolling(kp).max()
     k = 100*(df["close"]-lo)/(hi-lo+1e-10); d = k.rolling(dp).mean()
@@ -184,9 +182,57 @@ class VolumeSpike(Strategy):
             elif df["close"].iloc[-1] < df["open"].iloc[-1]: return -1
         return 0
 
-STRATEGIES = [KeltnerRev("Keltner Rev"), StochasticStrat("Stochastic"), CCIStrat("CCI"),
-              MFIStrat("MFI"), AroonStrat("Aroon"), VWAPRev("VWAP Rev"), StochTrend("Stoch+Trend"),
-              VolumeSpike("Vol Spike")]
+STRATEGIES = [KeltnerRev, StochasticStrat, CCIStrat, MFIStrat, AroonStrat, VWAPRev, StochTrend, VolumeSpike]
+
+# ======================= ФИЛЬТРЫ ИМПУЛЬСА И РАЗВОРОТА =======================
+def calculate_momentum_strength(df: pd.DataFrame) -> float:
+    """Оценивает силу текущего импульса (0..1)."""
+    close = df["close"]
+    # Изменение цены за последние 3 свечи относительно ATR
+    change = close.iloc[-1] - close.iloc[-4] if len(close) >= 4 else 0
+    atr_val = atr(df).iloc[-1] if len(df) > 14 else 0
+    if atr_val <= 0: return 0.0
+    price_strength = min(abs(change) / atr_val, 2.0) / 2.0
+    # Объёмный импульс
+    avg_vol = df["volume"].tail(10).mean()
+    cur_vol = df["volume"].iloc[-1]
+    vol_strength = min(cur_vol / avg_vol, 3.0) / 3.0 if avg_vol > 0 else 0.0
+    # Комбинируем
+    return (price_strength * 0.7 + vol_strength * 0.3)
+
+def calculate_reversal_score(df: pd.DataFrame, side: str) -> float:
+    """Оценивает вероятность разворота (0..1). Чем выше, тем вероятнее разворот."""
+    score = 0.0
+    r = rsi(df["close"]).iloc[-1]
+    k, _ = stoch(df); k_val = k.iloc[-1]
+    c = cci(df).iloc[-1]
+    macd_line, signal_line, _ = macd(df["close"])
+    macd_val = macd_line.iloc[-1] - signal_line.iloc[-1]
+
+    if side == "long":
+        if r > 70: score += 0.3
+        elif r > 60: score += 0.15
+        if k_val > 80: score += 0.3
+        elif k_val > 70: score += 0.15
+        if c > 100: score += 0.2
+        if macd_val < 0: score += 0.2
+    else:  # short
+        if r < 30: score += 0.3
+        elif r < 40: score += 0.15
+        if k_val < 20: score += 0.3
+        elif k_val < 30: score += 0.15
+        if c < -100: score += 0.2
+        if macd_val > 0: score += 0.2
+
+    # Дивергенция цены и RSI (упрощённо)
+    close = df["close"]
+    rsi_vals = rsi(close)
+    if side == "long" and close.iloc[-1] > close.iloc[-3] and rsi_vals.iloc[-1] < rsi_vals.iloc[-3]:
+        score += 0.2  # медвежья дивергенция
+    elif side == "short" and close.iloc[-1] < close.iloc[-3] and rsi_vals.iloc[-1] > rsi_vals.iloc[-3]:
+        score += 0.2  # бычья дивергенция
+
+    return min(score, 1.0)
 
 # ======================= ФИЛЬТРЫ =======================
 def safe_api(func, *a, retries=3, delay=1.0, **kw):
@@ -342,6 +388,18 @@ def monitor_position(symbol, entry, qty, start_time, sl_price, tp_price, side, a
         if not ticker or ticker.get("last") is None: continue
         cur = float(ticker["last"])
         pnl_pct = (cur/entry - 1)*100 if side=="long" else (entry/cur - 1)*100
+
+        # === ПРОВЕРКА РАЗВОРОТА ===
+        if pnl_pct >= MIN_PROFIT_FOR_REVERSAL_EXIT:
+            raw = fetch_ohlcv(symbol, TIMEFRAME_TA, 50)
+            if len(raw) >= 30:
+                df = pd.DataFrame(raw, columns=["timestamp","open","high","low","close","volume"]).set_index("timestamp")
+                rev_score = calculate_reversal_score(df, side)
+                if rev_score >= REVERSAL_SCORE_THRESHOLD:
+                    log.info(f"🔄 Обнаружен разворот (score={rev_score:.2f}) – закрываю с плюсом")
+                    close_position(symbol, qty, side)
+                    return "tp"  # досрочный выход с прибылью
+
         qty_act = abs(float(pos.get("contracts",0) or 0))
 
         if not be_done and pnl_pct >= 0.3:
@@ -388,7 +446,7 @@ def main():
         log.error("Нет API ключей"); return
     stats["депозит_старт"] = get_balance(free=False)
     stats["старт_время"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-    log.info(f"=== VOLUME-FILTERED SCALPER v10.7 ===")
+    log.info(f"=== MOMENTUM+REVERSAL SCALPER v10.9 ===")
     log.info(f"Депозит: {stats['депозит_старт']:.2f} USDT | Маржа: {FIXED_MARGIN} USDT | Плечо: {LEVERAGE}x")
 
     existing = [p for p in fetch_positions() if float(p.get("contracts",0))>0]
@@ -425,20 +483,26 @@ def main():
                 a = atr(df).iloc[-1] if len(df) > 14 else df["close"].iloc[-1]*0.01
                 price = df["close"].iloc[-1]
 
-                # === НОВЫЙ ФИЛЬТР ОБЪЁМА ===
+                # Фильтр объёма
                 avg_vol = df["volume"].tail(20).mean()
                 cur_vol = df["volume"].iloc[-1]
                 volume_ratio = cur_vol / avg_vol if avg_vol > 0 else 0
-                if volume_ratio < VOLUME_RATIO_THRESHOLD:
-                    continue  # пропускаем символ, если объём слабый
+                if volume_ratio < VOLUME_RATIO_THRESHOLD: continue
 
-                # Собираем голоса стратегий
+                # Сила импульса
+                momentum = calculate_momentum_strength(df)
+                if momentum < MIN_MOMENTUM_STRENGTH: continue
+
+                # Голосование стратегий
                 votes = Counter()
-                for st in STRATEGIES:
+                active_strategies = []
+                for st_cls in STRATEGIES:
+                    st = st_cls(st_cls.__name__)
                     sig = st.signal(df)
                     if sig != 0:
                         votes[sig] += 1
-                # Сигнал только если минимум MIN_CONSENSUS стратегий согласны
+                        active_strategies.append(st.name)
+
                 for direction, count in votes.items():
                     if count >= MIN_CONSENSUS:
                         side_str = "long" if direction == 1 else "short"
@@ -448,7 +512,7 @@ def main():
                         if not ob_ok: continue
                         if wall_vol < MIN_WALL_USDT: continue
                         signals.append((wall_vol, sym, side_str, f"Consensus({count})", price, a))
-                        log.info(f"Сигнал: Consensus({count}) {sym} {side_str.upper()} wall={wall_vol:.0f} USDT vol_ratio={volume_ratio:.1f}")
+                        log.info(f"Сигнал: Consensus({count}) {sym} {side_str.upper()} wall={wall_vol:.0f} USDT momentum={momentum:.2f}")
 
             log.info(f"Найдено {len(signals)} сигналов")
             if not signals:
